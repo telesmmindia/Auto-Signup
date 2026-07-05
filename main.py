@@ -439,8 +439,13 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None):
     page.wait_for_timeout(4000)
 
     if not open_signup_modal(page):
+        SHOTS_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        no_modal_shot = SHOTS_DIR / f"{acct.get('username', 'unknown')}-{stamp}-no-modal.png"
+        page.screenshot(path=str(no_modal_shot))
         result["ok"] = False
         result["messages"] = ["Could not open the signup modal (JOIN button)."]
+        result["shot"] = str(no_modal_shot)
         return result
 
     # Type (not fill) so the site's live validation/keyup handlers fire; blur

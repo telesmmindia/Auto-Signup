@@ -243,7 +243,12 @@ def _blocking_fill_and_register(session, phone):
     page.wait_for_timeout(4000)
 
     if not open_signup_modal(page):
-        return {"ok": False, "message": "Could not open the signup modal (JOIN button)."}
+        SHOTS_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        no_modal_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-no-modal.png"
+        page.screenshot(path=str(no_modal_shot))
+        return {"ok": False, "message": "Could not open the signup modal (JOIN button).",
+                "shot": str(no_modal_shot)}
 
     for sel, value in [(SEL["username"], acct["username"]),
                        (SEL["email"], acct["email"]),
