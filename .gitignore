@@ -1,0 +1,11 @@
+.venv/
+.idea/
+shots/
+accounts.json
+credentials.log
+accounts.db
+proxy_settings.json
+url_settings.json
+.env
+__pycache__/
+*.pyc
