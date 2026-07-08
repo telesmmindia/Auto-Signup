@@ -6,14 +6,15 @@ Flow:
     (you send the phone number)
     -> bot fills + submits the signup form, asks for the OTP sent by SMS
     (you send the OTP)
-    -> bot verifies it and replies with the result screenshot, captioned with
-       the full signup details (username/email/password/phone/proxy/status)
+    -> bot verifies it and replies with the result screenshot (captioned with
+       the full signup details) plus that same data as a one-row CSV file
 
 Other commands:
     /stats            -> counts of signups by status
     /list [N]         -> most recent N stored accounts (default 10)
     /photo <id>       -> resend a stored account's screenshot with its
                          details as the caption (id from /list)
+    /export [N]       -> export stored accounts as a CSV file (omit N for all)
     /cancel           -> abandon an in-progress signup
     /setproxy <proxy> -> set the proxy used for this chat's future signups
                          (host:port, host:port:username:password, or a URL)
@@ -42,6 +43,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -142,6 +144,23 @@ async def send_result_photo(update, shot_path, caption):
             await update.message.reply_photo(photo=f, caption=caption)
     else:
         await update.message.reply_text(caption)
+
+
+async def send_csv(update, filename, row_id=None, limit=None, status=None, caption=None):
+    """Export account row(s) to a CSV file and send it as a document, then
+    clean up the temp file. Signup details are delivered this way (a real
+    file) rather than as a text message."""
+    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        count = db.export_csv(conn, tmp_path, row_id=row_id, limit=limit, status=status)
+        if count == 0:
+            await update.message.reply_text("No accounts to export.")
+            return
+        with open(tmp_path, "rb") as f:
+            await update.message.reply_document(document=f, filename=filename, caption=caption)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
 
 
 # One Chromium process for the bot's whole lifetime, plus the single worker
@@ -589,6 +608,17 @@ async def photo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_result_photo(update, r["screenshot"], build_caption(r))
 
 
+async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    limit = None
+    if context.args:
+        try:
+            limit = max(1, min(int(context.args[0]), 5000))
+        except ValueError:
+            await update.message.reply_text("Usage: /export [N]  (omit N to export everything)")
+            return
+    await send_csv(update, "accounts.csv", limit=limit)
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     session = sessions.get(chat_id)
@@ -627,6 +657,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             acct = dict(session.acct)
             acct.update(status="failed", notes=f"Signup failed: {result['message']}")
             await send_result_photo(update, result.get("shot"), build_caption(acct))
+            await send_csv(update, f"{acct['username']}.csv", row_id=session.row_id)
             await end_session(session)
             del sessions[chat_id]
             return
@@ -653,6 +684,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     notes=("Signup successful!" if result["ok"]
                           else f"Verification failed: {result['message']}"))
         await send_result_photo(update, result.get("shot"), build_caption(acct))
+        await send_csv(update, f"{acct['username']}.csv", row_id=session.row_id)
 
         await end_session(session)
         del sessions[chat_id]
@@ -665,6 +697,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/stats - counts of signups by status\n"
         "/list [N] - most recent N stored accounts\n"
         "/photo <id> - resend a stored account's screenshot with its details as caption\n"
+        "/export [N] - export stored accounts as a CSV file (omit N for all)\n"
         "/cancel - abandon an in-progress signup\n"
         "/setproxy <proxy> - use a proxy for this chat's future signups\n"
         "/proxy - show the currently set proxy\n"
@@ -687,6 +720,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("list", list_accounts))
     app.add_handler(CommandHandler("photo", photo_cmd))
+    app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(CommandHandler("setproxy", setproxy))
     app.add_handler(CommandHandler("proxy", show_proxy))
     app.add_handler(CommandHandler("clearproxy", clearproxy))

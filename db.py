@@ -1,6 +1,7 @@
 """SQLite storage for generated test accounts, so credentials can be retrieved
 later for repeat testing (e.g. logging back in with an already-verified test
 account) instead of only living in terminal scrollback."""
+import csv
 import sqlite3
 from pathlib import Path
 
@@ -63,18 +64,37 @@ COLUMNS = ("id", "created_at", "username", "email", "password", "phone",
 
 
 def list_accounts(conn, limit=20, status=None):
+    """`limit=None` returns every stored account (used for CSV export)."""
     cols = ", ".join(COLUMNS)
+    query = f"SELECT {cols} FROM accounts"
+    params = []
     if status:
-        cur = conn.execute(
-            f"SELECT {cols} FROM accounts WHERE status = ? ORDER BY id DESC LIMIT ?",
-            (status, limit),
-        )
-    else:
-        cur = conn.execute(
-            f"SELECT {cols} FROM accounts ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
+        query += " WHERE status = ?"
+        params.append(status)
+    query += " ORDER BY id DESC"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    cur = conn.execute(query, params)
     return cur.fetchall()
+
+
+def get_account(conn, row_id):
+    cur = conn.execute(f"SELECT {', '.join(COLUMNS)} FROM accounts WHERE id = ?", (row_id,))
+    return cur.fetchone()
+
+
+def export_csv(conn, path, limit=None, status=None, row_id=None):
+    """Write stored accounts to a CSV file at `path`. Returns the row count.
+    If `row_id` is given, exports just that one account (ignores limit/status)
+    -- used to hand back a single signup's details as a file rather than text."""
+    rows = [get_account(conn, row_id)] if row_id is not None else list_accounts(conn, limit=limit, status=status)
+    rows = [r for r in rows if r is not None]
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(COLUMNS)
+        writer.writerows(rows)
+    return len(rows)
 
 
 def print_accounts(conn, limit=20, status=None):
