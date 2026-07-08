@@ -166,22 +166,75 @@ running QA signups from Telegram instead of the CLI.
 
 ```
 cp .env.example .env
-# edit .env and paste your token from @BotFather into TELEGRAM_BOT_TOKEN
+# edit .env: TELEGRAM_BOT_TOKEN from @BotFather, and MASTER_ADMIN_ID
+# (your own Telegram user ID -- message @userinfobot to get it)
 .venv/bin/python telegram_bot.py
 ```
 
 `telegram_bot.py` loads `.env` via `python-dotenv` at import time; `.env` is
-gitignored so the token never lands in a commit.
+gitignored so the token (and `MASTER_ADMIN_ID`) never land in a commit.
 
-Commands: `/newacc` (generates an identity, asks for phone, then OTP, then
-sends the result **screenshot as a photo** with full details as the caption,
-plus that same data as a one-row **CSV file**), `/stats` (counts by status),
-`/list [N]` (recent stored accounts, text), `/photo <id>` (resend any past
-account's screenshot + caption, id from `/list`), `/export [N]` (CSV of N
-most recent accounts, or every account if N is omitted), `/cancel` (abandon
-an in-progress flow), `/setproxy <proxy>` / `/proxy` / `/clearproxy` /
-`/testproxy [proxy]` (per-chat proxy management, see below), `/seturl <url>` /
-`/url` / `/clearurl` (per-chat site URL, see below).
+### Roles
+
+Two roles, checked via `is_master(user_id)` / `is_admin(user_id)` (master
+counts as admin too) and enforced with a `@require_role(check)` decorator on
+every handler except `/start`:
+
+- **master admin** — exactly one, fixed via `MASTER_ADMIN_ID` in `.env` and
+  never changeable from inside the bot (so a compromised admin session can't
+  self-promote). Can do everything: `/addadmin <id>` / `/removeadmin <id>` /
+  `/admins`, `/setproxy` / `/proxy` / `/clearproxy` / `/testproxy`, `/seturl`
+  / `/url` / `/clearurl`, and all data commands (`/list`, `/photo`,
+  `/export`, `/stats`).
+- **admin** — authorized by the master admin, persisted in gitignored
+  `admins.json` (`admin_ids`, a set of Telegram user-id strings, via
+  `save_admin_ids()`). Can only run `/newacc` and `/cancel`.
+- **anyone else** — every gated handler replies "You are not authorized...
+  Your Telegram user ID: `<id>`" so an unauthorized user can hand that ID to
+  the master admin for `/addadmin`. `/start` is deliberately *not*
+  `@require_role`-gated, since it's the one command that needs to show
+  different content per role (including this ID-disclosure message) rather
+  than a blanket rejection.
+
+Proxy, site URL, and password are all **global**, not per-chat —
+`global_settings` (persisted to gitignored `bot_settings.json` via
+`save_settings()`) holds `{"proxy": ..., "url": ..., "password": ...}`, set
+only by the master admin, and every admin's `/newacc` reads from it
+(`session.proxy`, `session.site_url`, and an override of
+`session.acct["password"]` after `gen_account()` already generated a random
+one). This replaced an earlier per-chat-dict design (`chat_proxies`/
+`chat_urls`) once "master sets it for everyone" became the actual
+requirement.
+
+`/setpassword <pw>` fixes every future signup to that exact password;
+`/setpassword --random` removes the `"password"` key from `global_settings`
+so `newacc()`'s `if global_settings.get("password"):` check is falsy again
+and the random one from `gen_account()` is left as-is. There's no
+"random" *value* stored anywhere — random mode is simply the absence of a
+`"password"` key, which is also why `/password` reports it as `RANDOM
+(default, per-signup)` rather than showing some placeholder.
+
+Telegram's native "/" command-menu autocomplete is scoped per user via
+`BotCommandScopeChat`, set in `post_init()` (a callback passed to
+`Application.builder().post_init(...)`, run once before polling starts) and
+also updated live inside `/addadmin`/`/removeadmin`. The **default** scope
+(`BotCommandScopeDefault`) is set to an empty list, so a random user's "/"
+menu shows nothing at all — they can still type a command manually and get
+the `require_role` rejection, the menu is just a visibility/discoverability
+control, not the actual enforcement (that's the decorator).
+
+Commands (master unless noted): `/newacc` (admin+; generates an identity,
+asks for phone, then OTP, then sends the result **screenshot as a photo**
+with full details as the caption, plus that same data as a one-row **CSV
+file**), `/cancel` (admin+), `/stats` (counts by status), `/list [N]` (recent
+stored accounts, text), `/photo <id>` (resend any past account's screenshot +
+caption, id from `/list`), `/export [N]` (CSV of N most recent accounts, or
+every account if N is omitted), `/setpassword <pw>` / `/setpassword --random`
+/ `/password` (global fixed-or-random password mode), `/setproxy <proxy>` /
+`/proxy` / `/clearproxy` / `/testproxy [proxy]` (global proxy), `/seturl
+<url>` / `/url` / `/clearurl` (global site URL), `/addadmin <id>` /
+`/removeadmin <id>` /
+`/admins`.
 
 ### Screenshot + caption delivery
 

@@ -1,6 +1,19 @@
 """
 Telegram bot wrapper for the QA signup driver.
 
+Two roles:
+    master admin -> exactly one, set via MASTER_ADMIN_ID in .env. Can do
+                    everything: create/remove admins, set the GLOBAL proxy
+                    and site URL (applies to every admin's signups), and
+                    view/export all stored account data.
+    admin        -> authorized by the master admin (/addadmin). Can only
+                    run /newacc and /cancel -- no proxy/URL/admin/data
+                    commands.
+Anyone else gets an "unauthorized" reply showing their own Telegram user ID
+so they can ask the master admin to add them. Telegram's native "/" command
+menu is scoped per user (BotCommandScopeChat) so each role only ever *sees*
+the commands it can actually run -- a random user's menu is empty.
+
 Flow:
     /newacc  -> bot generates a random test identity, asks for a phone number
     (you send the phone number)
@@ -9,26 +22,35 @@ Flow:
     -> bot verifies it and replies with the result screenshot (captioned with
        the full signup details) plus that same data as a one-row CSV file
 
-Other commands:
+Master-only commands:
     /stats            -> counts of signups by status
     /list [N]         -> most recent N stored accounts (default 10)
     /photo <id>       -> resend a stored account's screenshot with its
                          details as the caption (id from /list)
     /export [N]       -> export stored accounts as a CSV file (omit N for all)
-    /cancel           -> abandon an in-progress signup
-    /setproxy <proxy> -> set the proxy used for this chat's future signups
+    /setpassword <pw> -> fixed password for every future signup;
+                         /setpassword --random reverts to a random one
+    /password         -> show the current password mode
+    /setproxy <proxy> -> set the GLOBAL proxy for every admin's signups
                          (host:port, host:port:username:password, or a URL)
-    /proxy            -> show the currently set proxy
-    /clearproxy       -> stop using a proxy (direct connection)
+    /proxy            -> show the global proxy
+    /clearproxy       -> clear the global proxy (direct connection)
     /testproxy [proxy] -> open the proxy in a browser context and report the
-                         exit IP; tests the saved proxy if none is given
-    /seturl <url>     -> use a different site for this chat's future signups
-    /url              -> show the currently set site URL
+                         exit IP; tests the global proxy if none is given
+    /seturl <url>     -> set the GLOBAL site URL for every admin's signups
+    /url              -> show the global site URL
     /clearurl         -> reset to the default site URL
+    /addadmin <id>    -> authorize a new admin
+    /removeadmin <id> -> revoke an admin
+    /admins           -> list current admins
+
+Everyone (master + admins):
+    /cancel           -> abandon an in-progress signup
 
 Setup:
     cp .env.example .env
-    # edit .env and paste your token from @BotFather into TELEGRAM_BOT_TOKEN
+    # edit .env: TELEGRAM_BOT_TOKEN from @BotFather, and MASTER_ADMIN_ID
+    # (your own Telegram user ID -- message @userinfobot to get it)
     .venv/bin/python telegram_bot.py
 
 One Chromium instance is launched when the bot starts and reused for every
@@ -40,6 +62,7 @@ different chats are serialized rather than run in parallel; fine for a
 personal QA bot, but worth knowing if several people use it at once.
 """
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -50,7 +73,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError
-from telegram import Update
+from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import db
@@ -66,6 +89,10 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+# The one, fixed top-level role. Set via .env, not changeable from the bot
+# itself -- a compromised admin session should never be able to promote
+# itself to master.
+MASTER_ADMIN_ID = os.environ.get("MASTER_ADMIN_ID")
 
 # Shared across handlers; all handler coroutines run on the same asyncio event
 # loop thread, so one sqlite3 connection is safe to reuse.
@@ -74,36 +101,113 @@ conn = db.get_connection()
 # chat_id -> Session, for signups currently in progress.
 sessions = {}
 
-# chat_id (str) -> raw proxy string, persisted across restarts. Gitignored
-# since a proxy string commonly embeds credentials.
-PROXY_FILE = Path("proxy_settings.json")
-# chat_id (str) -> site URL override, persisted across restarts.
-URL_FILE = Path("url_settings.json")
+# Telegram user IDs (str) the master admin has authorized, persisted across
+# restarts. Gitignored -- this is access-control state, not project content.
+ADMINS_FILE = Path("admins.json")
+# Proxy/URL are GLOBAL (master-controlled, apply to every admin's signups),
+# not per-chat -- {"proxy": "...", "url": "..."}.
+SETTINGS_FILE = Path("bot_settings.json")
 
 
-def _load_json_dict(path):
+def _load_json(path, default):
     if path.exists():
         try:
             return json.loads(path.read_text())
         except (json.JSONDecodeError, OSError):
-            return {}
-    return {}
+            return default
+    return default
 
 
-def _save_json_dict(path, data):
+def _save_json(path, data):
     path.write_text(json.dumps(data))
 
 
-chat_proxies = _load_json_dict(PROXY_FILE)
-chat_urls = _load_json_dict(URL_FILE)
+admin_ids = set(_load_json(ADMINS_FILE, []))
+global_settings = _load_json(SETTINGS_FILE, {})
 
 
-def save_chat_proxies():
-    _save_json_dict(PROXY_FILE, chat_proxies)
+def save_admin_ids():
+    _save_json(ADMINS_FILE, sorted(admin_ids))
 
 
-def save_chat_urls():
-    _save_json_dict(URL_FILE, chat_urls)
+def save_settings():
+    _save_json(SETTINGS_FILE, global_settings)
+
+
+def is_master(user_id):
+    return MASTER_ADMIN_ID is not None and str(user_id) == str(MASTER_ADMIN_ID)
+
+
+def is_admin(user_id):
+    return is_master(user_id) or str(user_id) in admin_ids
+
+
+def require_role(check):
+    """Decorator gating a handler to users satisfying `check(user_id)`. On
+    denial, replies with the user's own Telegram ID so they can hand it to
+    the master admin for /addadmin."""
+    def decorator(func):
+        @functools.wraps(func)
+        async def wrapper(update, context):
+            user_id = update.effective_user.id
+            if not check(user_id):
+                await update.message.reply_text(
+                    "You are not authorized to use this bot.\n"
+                    f"Your Telegram user ID: {user_id}\n"
+                    "Share this with the master admin to request access."
+                )
+                return
+            return await func(update, context)
+        return wrapper
+    return decorator
+
+
+# Native "/" command menu, scoped per user via BotCommandScopeChat -- everyone
+# else gets the empty BotCommandScopeDefault set in post_init(), so a random
+# user sees no suggested commands at all (they can still type one manually
+# and get the require_role() rejection above).
+ADMIN_COMMANDS = [
+    BotCommand("newacc", "Start a new test signup"),
+    BotCommand("cancel", "Abandon an in-progress signup"),
+    BotCommand("start", "Show available commands"),
+]
+MASTER_COMMANDS = ADMIN_COMMANDS + [
+    BotCommand("list", "Recent stored accounts"),
+    BotCommand("photo", "Resend a stored account's screenshot"),
+    BotCommand("export", "Export accounts as a CSV file"),
+    BotCommand("stats", "Counts of signups by status"),
+    BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
+    BotCommand("password", "Show the current password mode"),
+    BotCommand("setproxy", "Set the global proxy for all signups"),
+    BotCommand("proxy", "Show the global proxy"),
+    BotCommand("clearproxy", "Clear the global proxy"),
+    BotCommand("testproxy", "Check a proxy actually works"),
+    BotCommand("seturl", "Set the global site URL for all signups"),
+    BotCommand("url", "Show the global site URL"),
+    BotCommand("clearurl", "Reset to the default site URL"),
+    BotCommand("addadmin", "Authorize a new admin"),
+    BotCommand("removeadmin", "Revoke an admin"),
+    BotCommand("admins", "List current admins"),
+]
+
+
+async def post_init(application):
+    """Runs once at startup, before polling begins: empties the default
+    command menu, then gives the master and every already-authorized admin
+    their role-appropriate menu."""
+    bot = application.bot
+    await bot.set_my_commands([], scope=BotCommandScopeDefault())
+    if MASTER_ADMIN_ID:
+        try:
+            await bot.set_my_commands(MASTER_COMMANDS,
+                                      scope=BotCommandScopeChat(chat_id=int(MASTER_ADMIN_ID)))
+        except Exception as e:
+            logger.warning(f"Could not set master command menu: {e}")
+    for uid in admin_ids:
+        try:
+            await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=int(uid)))
+        except Exception as e:
+            logger.warning(f"Could not set command menu for admin {uid}: {e}")
 
 
 def mask_proxy_display(proxy_str):
@@ -349,6 +453,7 @@ def _blocking_verify_otp(session, otp):
     return {"ok": True, "message": "OTP verified — account registered.", "shot": str(otp_result)}
 
 
+@require_role(is_admin)
 async def newacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if chat_id in sessions:
@@ -360,24 +465,35 @@ async def newacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session = Session()
     session.acct = gen_account()
+    # A master-set fixed password (/setpassword) overrides the random one
+    # gen_account() just generated; /setpassword --random clears this so the
+    # random default applies again.
+    if global_settings.get("password"):
+        session.acct["password"] = global_settings["password"]
     session.stage = "await_phone"
-    session.proxy = chat_proxies.get(str(chat_id))
-    session.site_url = chat_urls.get(str(chat_id))
+    # Proxy/URL are set globally by the master admin (/setproxy, /seturl),
+    # applying to every admin's signups -- not a per-chat setting.
+    session.proxy = global_settings.get("proxy")
+    session.site_url = global_settings.get("url")
     sessions[chat_id] = session
 
     proxy_line = (f"Proxy: {mask_proxy_display(session.proxy)}" if session.proxy
-                 else "Proxy: none (direct connection) — use /setproxy to add one.")
+                 else "Proxy: none (direct connection)")
     url_line = f"URL: {session.site_url or SITE_URL}"
+    password_line = ("Password: fixed (master-set)" if global_settings.get("password")
+                     else "Password: random")
     await update.message.reply_text(
         "New test signup:\n"
         f"Username: {session.acct['username']}\n"
         f"Email: {session.acct['email']}\n"
+        f"{password_line}\n"
         f"{proxy_line}\n"
         f"{url_line}\n\n"
         "Send the phone number to use for this signup."
     )
 
 
+@require_role(is_admin)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     session = sessions.pop(chat_id, None)
@@ -388,8 +504,41 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No signup in progress.")
 
 
+@require_role(is_master)
+async def setpassword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /setpassword <password>  (fixed password for every future signup)\n"
+            "/setpassword --random  (back to a random password per signup, the default)"
+        )
+        return
+    if context.args[0] == "--random":
+        if global_settings.pop("password", None) is not None:
+            save_settings()
+        await update.message.reply_text(
+            "Password mode: RANDOM — each new signup gets its own random password again."
+        )
+        return
+    password = context.args[0]
+    global_settings["password"] = password
+    save_settings()
+    await update.message.reply_text(
+        f"Password mode: FIXED — every future signup will use: {password}\n"
+        "Use /setpassword --random to go back to random passwords."
+    )
+
+
+@require_role(is_master)
+async def show_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    pw = global_settings.get("password")
+    if pw:
+        await update.message.reply_text(f"Current password mode: FIXED — {pw}")
+    else:
+        await update.message.reply_text("Current password mode: RANDOM (default, per-signup)")
+
+
+@require_role(is_master)
 async def setproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
     if not context.args:
         await update.message.reply_text(
             "Usage: /setproxy host:port:username:password\n"
@@ -402,34 +551,34 @@ async def setproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except ValueError as e:
         await update.message.reply_text(f"Invalid proxy: {e}")
         return
-    chat_proxies[chat_id] = raw
-    save_chat_proxies()
+    global_settings["proxy"] = raw
+    save_settings()
     await update.message.reply_text(
-        f"Proxy set for future signups: {mask_proxy_display(raw)}\n"
+        f"Global proxy set for all admins' signups: {mask_proxy_display(raw)}\n"
         "Tip: /testproxy to confirm it works before running /newacc."
     )
 
 
+@require_role(is_master)
 async def show_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    raw = chat_proxies.get(chat_id)
+    raw = global_settings.get("proxy")
     if raw:
-        await update.message.reply_text(f"Current proxy: {mask_proxy_display(raw)}")
+        await update.message.reply_text(f"Current global proxy: {mask_proxy_display(raw)}")
     else:
         await update.message.reply_text("No proxy set — signups use a direct connection.")
 
 
+@require_role(is_master)
 async def clearproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    if chat_proxies.pop(chat_id, None) is not None:
-        save_chat_proxies()
-        await update.message.reply_text("Proxy cleared — signups will use a direct connection.")
+    if global_settings.pop("proxy", None) is not None:
+        save_settings()
+        await update.message.reply_text("Global proxy cleared — signups will use a direct connection.")
     else:
         await update.message.reply_text("No proxy was set.")
 
 
+@require_role(is_master)
 async def seturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
     if not context.args:
         await update.message.reply_text("Usage: /seturl https://example.com")
         return
@@ -437,22 +586,22 @@ async def seturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not (url.startswith("http://") or url.startswith("https://")):
         await update.message.reply_text("URL must start with http:// or https://")
         return
-    chat_urls[chat_id] = url
-    save_chat_urls()
-    await update.message.reply_text(f"Site URL set for future signups: {url}")
+    global_settings["url"] = url
+    save_settings()
+    await update.message.reply_text(f"Global site URL set for all admins' signups: {url}")
 
 
+@require_role(is_master)
 async def show_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    url = chat_urls.get(chat_id)
-    await update.message.reply_text(f"Current site URL: {url or SITE_URL}"
+    url = global_settings.get("url")
+    await update.message.reply_text(f"Current global site URL: {url or SITE_URL}"
                                     + ("" if url else " (default)"))
 
 
+@require_role(is_master)
 async def clearurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    if chat_urls.pop(chat_id, None) is not None:
-        save_chat_urls()
+    if global_settings.pop("url", None) is not None:
+        save_settings()
         await update.message.reply_text(f"Site URL reset to default: {SITE_URL}")
     else:
         await update.message.reply_text("No custom site URL was set.")
@@ -501,9 +650,9 @@ def _blocking_test_proxy(proxy_conf):
     return result
 
 
+@require_role(is_master)
 async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = str(update.effective_chat.id)
-    raw = context.args[0] if context.args else chat_proxies.get(chat_id)
+    raw = context.args[0] if context.args else global_settings.get("proxy")
     if not raw:
         await update.message.reply_text(
             "No proxy to test. Use /testproxy host:port:username:password, or /setproxy first."
@@ -537,6 +686,7 @@ async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
 
 
+@require_role(is_master)
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur = conn.execute("SELECT status, COUNT(*) FROM accounts GROUP BY status")
     rows = cur.fetchall()
@@ -547,6 +697,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines) if rows else "No signups recorded yet.")
 
 
+@require_role(is_master)
 async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = 10
     if context.args:
@@ -592,6 +743,7 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(c.strip())
 
 
+@require_role(is_master)
 async def photo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text("Usage: /photo <id> — see /list for ids.")
@@ -608,6 +760,7 @@ async def photo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_result_photo(update, r["screenshot"], build_caption(r))
 
 
+@require_role(is_master)
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = None
     if context.args:
@@ -619,6 +772,7 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_csv(update, "accounts.csv", limit=limit)
 
 
+@require_role(is_admin)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     session = sessions.get(chat_id)
@@ -691,33 +845,103 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Commands:\n"
-        "/newacc - start a new test signup (asks for phone, then OTP)\n"
-        "/stats - counts of signups by status\n"
-        "/list [N] - most recent N stored accounts\n"
-        "/photo <id> - resend a stored account's screenshot with its details as caption\n"
-        "/export [N] - export stored accounts as a CSV file (omit N for all)\n"
-        "/cancel - abandon an in-progress signup\n"
-        "/setproxy <proxy> - use a proxy for this chat's future signups\n"
-        "/proxy - show the currently set proxy\n"
-        "/clearproxy - stop using a proxy\n"
-        "/testproxy [proxy] - check a proxy actually works\n"
-        "/seturl <url> - use a different site for this chat's future signups\n"
-        "/url - show the currently set site URL\n"
-        "/clearurl - reset to the default site URL"
-    )
+    """Not role-gated -- shows role-appropriate content instead of a blanket
+    rejection, since an unauthorized user still needs to see their own ID."""
+    user_id = update.effective_user.id
+    if is_master(user_id):
+        await update.message.reply_text(
+            "Commands (master admin):\n"
+            "/newacc - start a new test signup (asks for phone, then OTP)\n"
+            "/cancel - abandon an in-progress signup\n"
+            "/stats - counts of signups by status\n"
+            "/list [N] - most recent N stored accounts\n"
+            "/photo <id> - resend a stored account's screenshot with its details as caption\n"
+            "/export [N] - export stored accounts as a CSV file (omit N for all)\n"
+            "/setpassword <pw> - fixed password for every future signup (--random to revert)\n"
+            "/password - show the current password mode\n"
+            "/setproxy <proxy> - set the GLOBAL proxy for every admin's signups\n"
+            "/proxy - show the global proxy\n"
+            "/clearproxy - clear the global proxy\n"
+            "/testproxy [proxy] - check a proxy actually works\n"
+            "/seturl <url> - set the GLOBAL site URL for every admin's signups\n"
+            "/url - show the global site URL\n"
+            "/clearurl - reset to the default site URL\n"
+            "/addadmin <user_id> - authorize a new admin\n"
+            "/removeadmin <user_id> - revoke an admin\n"
+            "/admins - list current admins"
+        )
+    elif is_admin(user_id):
+        await update.message.reply_text(
+            "Commands (admin):\n"
+            "/newacc - start a new test signup (asks for phone, then OTP)\n"
+            "/cancel - abandon an in-progress signup"
+        )
+    else:
+        await update.message.reply_text(
+            "You are not authorized to use this bot.\n"
+            f"Your Telegram user ID: {user_id}\n"
+            "Share this with the master admin to request access."
+        )
+
+
+@require_role(is_master)
+async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /addadmin <telegram_user_id>")
+        return
+    new_id = context.args[0]
+    if new_id in admin_ids:
+        await update.message.reply_text(f"{new_id} is already an admin.")
+        return
+    admin_ids.add(new_id)
+    save_admin_ids()
+    try:
+        await context.bot.set_my_commands(ADMIN_COMMANDS,
+                                          scope=BotCommandScopeChat(chat_id=int(new_id)))
+    except Exception as e:
+        logger.warning(f"Could not set command menu for new admin {new_id}: {e}")
+    await update.message.reply_text(f"Added admin: {new_id}")
+
+
+@require_role(is_master)
+async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /removeadmin <telegram_user_id>")
+        return
+    old_id = context.args[0]
+    if old_id not in admin_ids:
+        await update.message.reply_text(f"{old_id} is not an admin.")
+        return
+    admin_ids.discard(old_id)
+    save_admin_ids()
+    try:
+        await context.bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(old_id)))
+    except Exception as e:
+        logger.warning(f"Could not clear command menu for removed admin {old_id}: {e}")
+    await update.message.reply_text(f"Removed admin: {old_id}")
+
+
+@require_role(is_master)
+async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin_ids:
+        await update.message.reply_text("No admins yet. Use /addadmin <user_id> to add one.")
+        return
+    await update.message.reply_text("Admins:\n" + "\n".join(sorted(admin_ids)))
 
 
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env (see .env.example) before running this bot.")
-    app = Application.builder().token(BOT_TOKEN).build()
+    if not MASTER_ADMIN_ID:
+        raise SystemExit("Set MASTER_ADMIN_ID in .env (see .env.example) before running this bot.")
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("newacc", newacc))
     app.add_handler(CommandHandler("cancel", cancel))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("setpassword", setpassword))
+    app.add_handler(CommandHandler("password", show_password))
     app.add_handler(CommandHandler("list", list_accounts))
     app.add_handler(CommandHandler("photo", photo_cmd))
     app.add_handler(CommandHandler("export", export_cmd))
@@ -728,6 +952,9 @@ def main():
     app.add_handler(CommandHandler("seturl", seturl))
     app.add_handler(CommandHandler("url", show_url))
     app.add_handler(CommandHandler("clearurl", clearurl))
+    app.add_handler(CommandHandler("addadmin", addadmin))
+    app.add_handler(CommandHandler("removeadmin", removeadmin))
+    app.add_handler(CommandHandler("admins", list_admins))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Warming up the shared browser...")
