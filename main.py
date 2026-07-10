@@ -43,12 +43,23 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError as PWTimeout
 
 import db
 
 SITE_URL = "https://cricmatch247.com?btag=211079"
+
+
+def extract_referral_code(url):
+    """Pull the 'btag' affiliate/referral code out of a site URL's query
+    string (e.g. "...?btag=211079" -> "211079"), for its own CSV/DB column
+    separate from the full url. Returns None if there's no btag param."""
+    if not url:
+        return None
+    values = parse_qs(urlsplit(url).query).get("btag")
+    return values[0] if values else None
 
 FIRST_NAMES = ["aarav", "vivaan", "aditya", "vihaan", "arjun", "sai", "reyansh",
                "ayaan", "krishna", "ishaan", "rohan", "kabir", "dhruv", "karan",
@@ -536,6 +547,7 @@ def load_accounts(args):
         for a in accts:
             a.setdefault("proxy", args.proxy)
             a.setdefault("url", args.url)
+            a["referral_code"] = extract_referral_code(a.get("url") or SITE_URL)
         return accts
 
     # Default: generate a random identity, keep any explicit overrides.
@@ -549,6 +561,7 @@ def load_accounts(args):
     acct["phone"] = args.phone or prompt_phone()
     acct["proxy"] = args.proxy
     acct["url"] = args.url
+    acct["referral_code"] = extract_referral_code(acct["url"] or SITE_URL)
 
     print("\nGenerated account:")
     print(f"  username : {acct['username']}")
@@ -556,7 +569,8 @@ def load_accounts(args):
     print(f"  password : {acct['password']}")
     print(f"  phone    : {acct['phone']}")
     print(f"  proxy    : {acct['proxy'] or '(none — direct connection)'}")
-    print(f"  url      : {acct['url'] or SITE_URL} {'(default)' if not acct['url'] else ''}\n")
+    print(f"  url      : {acct['url'] or SITE_URL} {'(default)' if not acct['url'] else ''}")
+    print(f"  referral : {acct['referral_code'] or '(none)'}\n")
     return [acct]
 
 

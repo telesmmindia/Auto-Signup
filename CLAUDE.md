@@ -193,7 +193,7 @@ every handler except `/start`:
   `/export`, `/stats`).
 - **admin** — authorized by the master admin, persisted in gitignored
   `admins.json` (`admin_ids`, a set of Telegram user-id strings, via
-  `save_admin_ids()`). Can only run `/newacc` and `/cancel`.
+  `save_admin_ids()`). Can only run `/newacc`, `/done`, and `/cancel`.
 - **anyone else** — every gated handler replies "You are not authorized...
   Your Telegram user ID: `<id>`" so an unauthorized user can hand that ID to
   the master admin for `/addadmin`. `/start` is deliberately *not*
@@ -228,18 +228,42 @@ menu shows nothing at all — they can still type a command manually and get
 the `require_role` rejection, the menu is just a visibility/discoverability
 control, not the actual enforcement (that's the decorator).
 
-Commands (master unless noted): `/newacc` (admin+; generates an identity,
-asks for phone, then OTP, then sends the result **screenshot as a photo**
-with full details as the caption, plus that same data as a one-row **CSV
-file**), `/cancel` (admin+), `/stats` (counts by status), `/list [N]` (recent
-stored accounts, text), `/photo <id>` (resend any past account's screenshot +
-caption, id from `/list`), `/export [N]` (CSV of N most recent accounts, or
-every account if N is omitted), `/setpassword <pw>` / `/setpassword --random`
-/ `/password` (global fixed-or-random password mode), `/setproxy <proxy>` /
-`/proxy` / `/clearproxy` / `/testproxy [proxy]` (global proxy), `/seturl
-<url>` / `/url` / `/clearurl` (global site URL), `/addadmin <id>` /
-`/removeadmin <id>` /
-`/admins`.
+Commands (master unless noted): `/newacc` (admin+; starts a **continuous**
+run of signups, see below), `/done` (admin+; stop after the current one),
+`/cancel` (admin+; abort now, also stops the loop), `/stats` (counts by
+status), `/list [N]` (recent stored accounts, text), `/photo <id>` (resend
+any past account's screenshot + caption, id from `/list`), `/export [N]
+[status] [url]` (CSV, defaults to successful signups only), `/setpassword
+<pw>` / `/setpassword --random` / `/password` (global fixed-or-random
+password mode), `/setproxy <proxy>` / `/proxy` / `/clearproxy` /
+`/testproxy [proxy]` (global proxy), `/seturl <url>` / `/url` / `/clearurl`
+(global site URL), `/addadmin <id>` / `/removeadmin <id>` / `/admins`.
+
+### Continuous signup loop
+
+`/newacc` no longer means "one signup" — it adds the chat to `looping_chats`
+(a module-level `set`) and calls `begin_signup(update, chat_id)`, which holds
+the account-generation + session-creation + "send the phone number" logic
+that used to live directly in `newacc()`. After a signup reaches a terminal
+outcome inside `handle_message()` (registration failure, or the final
+OTP success/failure) — the exact two places that used to call
+`end_session()` + `del sessions[chat_id]` and stop — there's now an added
+`if chat_id in looping_chats: await begin_signup(update, chat_id)`, so a
+fresh account starts immediately with no further `/newacc` needed.
+
+`/done` only removes the chat from `looping_chats`; it does **not** touch
+`sessions`, so a signup already in flight (e.g. waiting on an OTP you haven't
+sent yet) still completes normally — it just doesn't auto-restart afterward.
+`/cancel` does both: clears `looping_chats` *and* tears down the current
+session immediately via `end_session()`. Get this distinction right if you
+touch either handler — `/done` is "stop after this one," `/cancel` is "stop
+right now."
+
+Verified via a full mock run of `handle_message()` (stubbing
+`_blocking_fill_and_register`/`_blocking_verify_otp`/`_blocking_close_context`
+rather than needing a real browser): `/newacc` → phone → OTP-success
+produces a *different* account already sitting in `await_phone`, with zero
+additional commands sent.
 
 ### Screenshot + caption delivery
 
@@ -250,23 +274,31 @@ produces). `send_result_photo()` sends the screenshot file as a photo with
 that caption, falling back to a plain text message if the file is missing
 (e.g. a very old row from before a given code path started saving one).
 
-Both `/newacc`'s final outcomes (registration failure, OTP success/failure)
-and `/photo <id>` go through `send_result_photo()`, so the same
-credentials-on-the-image experience works whether you're watching a signup
-happen live or pulling up an old one later. `_blocking_fill_and_register()`
-now takes a `result.png` screenshot right after the REGISTER click and
-returns its path as `"shot"` in every failure branch (it previously only
-returned a message with no screenshot at all) — kept in parity with
-`_blocking_verify_otp()`, which already did this. It also now saves a
-screenshot (`*-no-modal.png`) if `open_signup_modal()` itself fails, which it
-never used to — that specific failure previously had zero visual evidence.
+**Success and failure are handled differently on purpose.** A *failed*
+signup (registration failure, or OTP rejected/timed out) still goes through
+`send_result_photo()` — the screenshot is the actual diagnostic value there.
+A *successful* signup does **not** get a photo at all anymore — just a plain
+`f"Signup successful! (#{session.row_id})"` reply — since the full details
+already go out as a CSV file (`send_csv()`, unconditional on both outcomes)
+and a screenshot of a working form adds nothing worth the extra message.
+Don't reintroduce `send_result_photo()` on the success path without
+checking this was a deliberate choice, not an oversight.
+
+`_blocking_fill_and_register()` takes a `result.png` screenshot right after
+the REGISTER click and returns its path as `"shot"` in every failure branch
+(it previously only returned a message with no screenshot at all) — kept in
+parity with `_blocking_verify_otp()`, which already did this. It also now
+saves a screenshot (`*-no-modal.png`) if `open_signup_modal()` itself fails,
+which it never used to — that specific failure previously had zero visual
+evidence.
 
 ### CSV export
 
-`db.export_csv(conn, path, limit=None, status=None, row_id=None)` writes
-`db.COLUMNS` rows to a CSV file — `row_id` for one specific account (used
-after every `/newacc` outcome, success or failure, so the details arrive as
-an actual file rather than only as text/caption), or `limit`/`status` for a
+`db.export_csv(conn, path, limit=None, status=None, url=None, row_id=None)`
+writes `db.COLUMNS` rows to a CSV file — `row_id` for one specific account
+(used after every `/newacc` outcome, success or failure, so the details
+arrive as an actual file rather than only as text/caption), or
+`limit`/`status`/`url` for a
 bulk dump (`limit=None` means every row). `telegram_bot.py`'s `send_csv()`
 wraps this in a `tempfile.NamedTemporaryFile`, sends it via
 `reply_document()`, and deletes the temp file in a `finally` — follow that
@@ -298,6 +330,18 @@ Link-filtered export stayed **master-only**, same as unfiltered `/export` —
 admins still cannot run any `/export` variant, a deliberate choice to keep
 "admins can only create new accounts" intact rather than carve out an
 exception per argument.
+
+**`referral_code` column** — `main.py`'s `extract_referral_code(url)` pulls
+the `btag` query-string value out of a site URL (e.g.
+`"...?btag=211079"` → `"211079"`) via `urllib.parse.parse_qs`/`urlsplit`, so
+it's a separate, always-present column even when `url` itself is `NULL`
+(the default-`SITE_URL` case) — computed from `acct.get("url") or SITE_URL`
+in both `main.py`'s `load_accounts()` and `telegram_bot.py`'s
+`handle_message()`, right before `db.insert_account()`. This is specific to
+this site's `btag` affiliate-tracking convention, not a generic
+"parse any query param" facility — if you point this at a site using a
+different tracking param name, `extract_referral_code()` needs updating
+(or generalizing) to match.
 
 `/testproxy` opens a throwaway context with the given (or currently-set) proxy
 and hits `api.ipify.org` to confirm it actually routes traffic, before you

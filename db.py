@@ -19,13 +19,14 @@ CREATE TABLE IF NOT EXISTS accounts (
     notes TEXT,
     screenshot TEXT,
     proxy TEXT,
-    url TEXT
+    url TEXT,
+    referral_code TEXT
 );
 """
 
 # Columns added after the initial release; migrated in on every connect so
 # older accounts.db files keep working.
-_MIGRATED_COLUMNS = ("proxy TEXT", "url TEXT")
+_MIGRATED_COLUMNS = ("proxy TEXT", "url TEXT", "referral_code TEXT")
 
 
 def get_connection(db_path=DB_PATH):
@@ -43,9 +44,10 @@ def get_connection(db_path=DB_PATH):
 def insert_account(conn, acct):
     """Store a freshly generated account, return its row id."""
     cur = conn.execute(
-        "INSERT INTO accounts (username, email, password, phone, proxy, url) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO accounts (username, email, password, phone, proxy, url, referral_code) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
         (acct["username"], acct["email"], acct["password"], acct.get("phone", ""),
-         acct.get("proxy"), acct.get("url")),
+         acct.get("proxy"), acct.get("url"), acct.get("referral_code")),
     )
     conn.commit()
     return cur.lastrowid
@@ -60,7 +62,7 @@ def update_status(conn, row_id, status, notes=None, screenshot=None):
 
 
 COLUMNS = ("id", "created_at", "username", "email", "password", "phone",
-           "status", "proxy", "url", "screenshot", "notes")
+           "status", "proxy", "url", "referral_code", "screenshot", "notes")
 
 
 def list_accounts(conn, limit=20, status=None, url=None):

@@ -14,13 +14,19 @@ so they can ask the master admin to add them. Telegram's native "/" command
 menu is scoped per user (BotCommandScopeChat) so each role only ever *sees*
 the commands it can actually run -- a random user's menu is empty.
 
-Flow:
+Flow (continuous -- keeps going until /done or /cancel):
     /newacc  -> bot generates a random test identity, asks for a phone number
     (you send the phone number)
     -> bot fills + submits the signup form, asks for the OTP sent by SMS
     (you send the OTP)
-    -> bot verifies it and replies with the result screenshot (captioned with
-       the full signup details) plus that same data as a one-row CSV file
+    -> on success: just "Signup successful! (#id)" (no photo) plus the
+       details as a one-row CSV file; on failure: the result screenshot,
+       captioned with the details, plus that same CSV
+    -> a NEW signup starts automatically right away (fresh identity, same
+       "Send the phone number" prompt) -- only /newacc once per session,
+       not once per account
+    /done    -> stop after the signup currently in progress finishes (does
+                not abort it; /cancel does that instead)
 
 Master-only commands:
     /stats            -> counts of signups by status
@@ -50,7 +56,7 @@ Master-only commands:
     /admins           -> list current admins
 
 Everyone (master + admins):
-    /cancel           -> abandon an in-progress signup
+    /cancel           -> abandon an in-progress signup (also stops looping)
 
 Setup:
     cp .env.example .env
@@ -84,8 +90,8 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import db
 from main import (
     SEL, SHOTS_DIR, SITE_URL,
-    check_phone_taken, click_first_visible, gen_account, maybe_bridge_proxy,
-    open_signup_modal, parse_proxy, read_result, stop_bridge,
+    check_phone_taken, click_first_visible, extract_referral_code, gen_account,
+    maybe_bridge_proxy, open_signup_modal, parse_proxy, read_result, stop_bridge,
     wait_for_otp_outcome, wait_for_register_outcome,
 )
 
@@ -105,6 +111,9 @@ conn = db.get_connection()
 
 # chat_id -> Session, for signups currently in progress.
 sessions = {}
+# chat_ids currently in continuous mode: a new signup auto-starts after each
+# one finishes, until /done or /cancel removes the chat_id from this set.
+looping_chats = set()
 
 # Telegram user IDs (str) the master admin has authorized, persisted across
 # restarts. Gitignored -- this is access-control state, not project content.
@@ -172,7 +181,8 @@ def require_role(check):
 # user sees no suggested commands at all (they can still type one manually
 # and get the require_role() rejection above).
 ADMIN_COMMANDS = [
-    BotCommand("newacc", "Start a new test signup"),
+    BotCommand("newacc", "Start continuous test signups"),
+    BotCommand("done", "Stop continuous signups after the current one"),
     BotCommand("cancel", "Abandon an in-progress signup"),
     BotCommand("start", "Show available commands"),
 ]
@@ -458,16 +468,10 @@ def _blocking_verify_otp(session, otp):
     return {"ok": True, "message": "OTP verified — account registered.", "shot": str(otp_result)}
 
 
-@require_role(is_admin)
-async def newacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    if chat_id in sessions:
-        await update.message.reply_text(
-            "You already have a signup in progress. Reply with the phone "
-            "number/OTP it's waiting for, or send /cancel."
-        )
-        return
-
+async def begin_signup(update, chat_id):
+    """Generate a new account and start a fresh session. Shared by /newacc
+    (the first one) and the continuous-mode auto-restart in handle_message()
+    after a signup finishes."""
     session = Session()
     session.acct = gen_account()
     # A master-set fixed password (/setpassword) overrides the random one
@@ -499,8 +503,42 @@ async def newacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @require_role(is_admin)
+async def newacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if chat_id in sessions:
+        await update.message.reply_text(
+            "You already have a signup in progress. Reply with the phone "
+            "number/OTP it's waiting for, or send /cancel."
+        )
+        return
+
+    # /newacc now runs continuously: after each signup finishes, a new one
+    # starts automatically until /done (or /cancel) is sent.
+    looping_chats.add(chat_id)
+    await begin_signup(update, chat_id)
+
+
+@require_role(is_admin)
+async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    was_looping = chat_id in looping_chats
+    looping_chats.discard(chat_id)
+    if chat_id in sessions:
+        await update.message.reply_text(
+            "Will stop after the current signup finishes." if was_looping
+            else "Not in continuous mode -- nothing to stop."
+        )
+    else:
+        await update.message.reply_text(
+            "Continuous mode stopped." if was_looping
+            else "Not in continuous mode."
+        )
+
+
+@require_role(is_admin)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    looping_chats.discard(chat_id)
     session = sessions.pop(chat_id, None)
     if session:
         await end_session(session)
@@ -806,6 +844,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.acct["phone"] = text
         session.acct["proxy"] = session.proxy
         session.acct["url"] = session.site_url
+        session.acct["referral_code"] = extract_referral_code(session.site_url or SITE_URL)
         session.row_id = db.insert_account(conn, session.acct)
         await update.message.reply_text("Submitting the signup form and requesting an OTP, one moment...")
 
@@ -829,6 +868,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_csv(update, f"{acct['username']}.csv", row_id=session.row_id)
             await end_session(session)
             del sessions[chat_id]
+            if chat_id in looping_chats:
+                await begin_signup(update, chat_id)
             return
 
         session.stage = "await_otp"
@@ -848,15 +889,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.update_status(conn, session.row_id, status,
                          notes=result["message"], screenshot=result.get("shot"))
 
-        acct = dict(session.acct)
-        acct.update(status=status,
-                    notes=("Signup successful!" if result["ok"]
-                          else f"Verification failed: {result['message']}"))
-        await send_result_photo(update, result.get("shot"), build_caption(acct))
-        await send_csv(update, f"{acct['username']}.csv", row_id=session.row_id)
+        if result["ok"]:
+            # No photo/caption on success -- just a plain confirmation; the
+            # full details still go out as a CSV file below.
+            await update.message.reply_text(f"Signup successful! (#{session.row_id})")
+        else:
+            acct = dict(session.acct)
+            acct.update(status=status, notes=f"Verification failed: {result['message']}")
+            await send_result_photo(update, result.get("shot"), build_caption(acct))
+        await send_csv(update, f"{session.acct['username']}.csv", row_id=session.row_id)
 
         await end_session(session)
         del sessions[chat_id]
+        if chat_id in looping_chats:
+            await begin_signup(update, chat_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -866,8 +912,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_master(user_id):
         await update.message.reply_text(
             "Commands (master admin):\n"
-            "/newacc - start a new test signup (asks for phone, then OTP)\n"
-            "/cancel - abandon an in-progress signup\n"
+            "/newacc - start continuous test signups (asks for phone, then OTP, "
+            "then starts the next one automatically)\n"
+            "/done - stop after the current signup finishes\n"
+            "/cancel - abandon an in-progress signup (also stops looping)\n"
             "/stats - counts of signups by status\n"
             "/list [N] - most recent N stored accounts\n"
             "/photo <id> - resend a stored account's screenshot with its details as caption\n"
@@ -890,8 +938,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif is_admin(user_id):
         await update.message.reply_text(
             "Commands (admin):\n"
-            "/newacc - start a new test signup (asks for phone, then OTP)\n"
-            "/cancel - abandon an in-progress signup"
+            "/newacc - start continuous test signups (asks for phone, then OTP, "
+            "then starts the next one automatically)\n"
+            "/done - stop after the current signup finishes\n"
+            "/cancel - abandon an in-progress signup (also stops looping)"
         )
     else:
         await update.message.reply_text(
@@ -956,6 +1006,7 @@ def main():
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("newacc", newacc))
     app.add_handler(CommandHandler("cancel", cancel))
+    app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("setpassword", setpassword))
     app.add_handler(CommandHandler("password", show_password))
