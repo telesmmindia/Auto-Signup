@@ -58,9 +58,10 @@ path so credentials can be retrieved later:
 .venv/bin/python main.py --export-csv                    # writes accounts_export.csv
 .venv/bin/python main.py --export-csv my_accounts.csv
 
-# filter --list / --export-csv to one status
+# filter --list / --export-csv to one status and/or one site URL
 .venv/bin/python main.py --list --status success
 .venv/bin/python main.py --export-csv success.csv --status success
+.venv/bin/python main.py --export-csv by-url.csv --filter-url "https://example.com?tag=123"
 ```
 
 Randomly generated emails are not real inboxes, so email verification can't be
@@ -281,22 +282,22 @@ unfiltered-by-default behavior. Both are deliberate: `/export` is usually
 "give me the accounts that worked," while the CLI flag follows ordinary
 CLI convention (explicit opt-in filtering, nothing filtered by default).
 
-`export_cmd()`'s argument parsing takes `N` (a row limit) and a status word
-in **either order** — `/export 50`, `/export failed`, `/export failed 20`,
-`/export 20 failed`, `/export all 50` all work, since it just checks
-`arg.isdigit()` vs. `arg.lower() == "all"` vs. anything else (treated as an
-explicit status, overriding the `"success"` default) per argument rather
-than assuming positional order.
+`export_cmd()`'s argument parsing takes `N` (a row limit), a status word, and
+a site URL, all in **any order** — `/export 50`, `/export failed`,
+`/export https://example.com`, `/export https://example.com failed 20` all
+work, since each arg is classified independently: `arg.isdigit()` → limit,
+`arg.startswith(("http://", "https://"))` → URL filter, `arg.lower() ==
+"all"` → clear the status filter, anything else → explicit status
+(overriding the `"success"` default). `db.list_accounts()`/`export_csv()`'s
+`url` parameter does an exact match against the `url` column, which is
+`NULL` for any signup that used the default `SITE_URL` rather than an
+explicit `/seturl`/`--url` override — filtering by a specific URL only
+surfaces signups explicitly tagged with it, not the NULL/default ones.
 
-### Per-chat proxy
-
-Each chat can set one active proxy (`chat_proxies`, keyed by `str(chat_id)`,
-persisted to gitignored `proxy_settings.json` via `save_chat_proxies()`).
-`/newacc` reads it at session-start time (`session.proxy`) and
-`_blocking_fill_and_register()` opens that session's `BrowserContext` with it
-(`parse_proxy()`, imported from `main.py` — same parser and same formats as
-the CLI's `--proxy`). Bot replies never echo a set proxy's raw password back —
-`mask_proxy_display()` shows only `host:port (user: ..., password hidden)`.
+Link-filtered export stayed **master-only**, same as unfiltered `/export` —
+admins still cannot run any `/export` variant, a deliberate choice to keep
+"admins can only create new accounts" intact rather than carve out an
+exception per argument.
 
 `/testproxy` opens a throwaway context with the given (or currently-set) proxy
 and hits `api.ipify.org` to confirm it actually routes traffic, before you
@@ -305,18 +306,9 @@ automatically retries once as `socks5://` and tells you if that's what fixed
 it — ProxyCheap and similar resellers commonly issue SOCKS5-only endpoints
 that look identical to an HTTP proxy string. A timeout (as opposed to an
 immediate auth error) more often means wrong protocol or an IP-whitelist
-requirement on the provider's dashboard than wrong credentials.
-
-### Per-chat site URL
-
-Same pattern as per-chat proxy: `chat_urls` (keyed by `str(chat_id)`,
-persisted to gitignored `url_settings.json`) via `/seturl <url>` / `/url` /
-`/clearurl`. `_load_json_dict()` / `_save_json_dict()` in `telegram_bot.py`
-are the shared persistence helpers behind both `chat_proxies` and
-`chat_urls` — reuse them for any future per-chat setting rather than adding
-another bespoke load/save pair. `/newacc` reads the chat's URL at
-session-start (`session.site_url`), and `_blocking_fill_and_register()` uses
-it (falling back to `main.py`'s `SITE_URL`) instead of a hardcoded constant.
+requirement on the provider's dashboard than wrong credentials. Bot replies
+never echo a set proxy's raw password back — `mask_proxy_display()` shows
+only `host:port (user: ..., password hidden)`.
 
 One Chromium instance is launched when the bot starts (`_blocking_ensure_browser()`,
 pre-warmed in `main()` before `run_polling()`) and reused for every `/newacc` —

@@ -27,10 +27,12 @@ Master-only commands:
     /list [N]         -> most recent N stored accounts (default 10)
     /photo <id>       -> resend a stored account's screenshot with its
                          details as the caption (id from /list)
-    /export [N] [status] -> export as CSV; defaults to SUCCESSFUL signups
-                         only. /export all for every status, /export failed
-                         for a specific one, /export 50 for a row limit
-                         (N and status can be given in either order)
+    /export [N] [status] [url] -> export as CSV; defaults to SUCCESSFUL
+                         signups only. /export all for every status,
+                         /export failed for a specific one, /export 50 for
+                         a row limit, /export https://example.com to filter
+                         to signups made against that site URL -- all
+                         combinable, in any order (master only)
     /setpassword <pw> -> fixed password for every future signup;
                          /setpassword --random reverts to a random one
     /password         -> show the current password mode
@@ -253,14 +255,14 @@ async def send_result_photo(update, shot_path, caption):
         await update.message.reply_text(caption)
 
 
-async def send_csv(update, filename, row_id=None, limit=None, status=None, caption=None):
+async def send_csv(update, filename, row_id=None, limit=None, status=None, url=None, caption=None):
     """Export account row(s) to a CSV file and send it as a document, then
     clean up the temp file. Signup details are delivered this way (a real
     file) rather than as a text message."""
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
         tmp_path = tmp.name
     try:
-        count = db.export_csv(conn, tmp_path, row_id=row_id, limit=limit, status=status)
+        count = db.export_csv(conn, tmp_path, row_id=row_id, limit=limit, status=status, url=url)
         if count == 0:
             await update.message.reply_text("No accounts to export.")
             return
@@ -766,19 +768,23 @@ async def photo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @require_role(is_master)
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/export defaults to successful signups only. /export all exports
-    every status. N (a row limit) and a status word can both be given, in
-    either order, e.g. /export 50, /export all 50, /export failed."""
+    every status. N (a row limit), a status word, and a site URL can all be
+    given, in any order, e.g. /export 50, /export all 50, /export failed,
+    /export https://example.com, /export https://example.com failed 20."""
     limit = None
     status = "success"
+    url = None
     for arg in context.args:
         if arg.isdigit():
             limit = max(1, min(int(arg), 5000))
+        elif arg.startswith("http://") or arg.startswith("https://"):
+            url = arg
         elif arg.lower() == "all":
             status = None
         else:
             status = arg
     filename = f"accounts_{status}.csv" if status else "accounts.csv"
-    await send_csv(update, filename, limit=limit, status=status)
+    await send_csv(update, filename, limit=limit, status=status, url=url)
 
 
 @require_role(is_admin)
@@ -865,8 +871,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/stats - counts of signups by status\n"
             "/list [N] - most recent N stored accounts\n"
             "/photo <id> - resend a stored account's screenshot with its details as caption\n"
-            "/export [N] [status] - CSV of successful signups by default; "
-            "/export all for every status, /export failed for a specific one\n"
+            "/export [N] [status] [url] - CSV of successful signups by default; "
+            "/export all for every status, /export failed for a specific one, "
+            "/export https://example.com to filter by site URL\n"
             "/setpassword <pw> - fixed password for every future signup (--random to revert)\n"
             "/password - show the current password mode\n"
             "/setproxy <proxy> - set the GLOBAL proxy for every admin's signups\n"

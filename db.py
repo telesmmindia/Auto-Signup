@@ -63,14 +63,23 @@ COLUMNS = ("id", "created_at", "username", "email", "password", "phone",
            "status", "proxy", "url", "screenshot", "notes")
 
 
-def list_accounts(conn, limit=20, status=None):
-    """`limit=None` returns every stored account (used for CSV export)."""
+def list_accounts(conn, limit=20, status=None, url=None):
+    """`limit=None` returns every stored account (used for CSV export).
+    `url` filters to signups made against that exact site URL (the `url`
+    column, NULL for signups that used the default SITE_URL rather than an
+    explicit override)."""
     cols = ", ".join(COLUMNS)
     query = f"SELECT {cols} FROM accounts"
+    conditions = []
     params = []
     if status:
-        query += " WHERE status = ?"
+        conditions.append("status = ?")
         params.append(status)
+    if url:
+        conditions.append("url = ?")
+        params.append(url)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
     query += " ORDER BY id DESC"
     if limit is not None:
         query += " LIMIT ?"
@@ -84,11 +93,13 @@ def get_account(conn, row_id):
     return cur.fetchone()
 
 
-def export_csv(conn, path, limit=None, status=None, row_id=None):
+def export_csv(conn, path, limit=None, status=None, url=None, row_id=None):
     """Write stored accounts to a CSV file at `path`. Returns the row count.
-    If `row_id` is given, exports just that one account (ignores limit/status)
-    -- used to hand back a single signup's details as a file rather than text."""
-    rows = [get_account(conn, row_id)] if row_id is not None else list_accounts(conn, limit=limit, status=status)
+    If `row_id` is given, exports just that one account (ignores the other
+    filters) -- used to hand back a single signup's details as a file rather
+    than text."""
+    rows = ([get_account(conn, row_id)] if row_id is not None
+            else list_accounts(conn, limit=limit, status=status, url=url))
     rows = [r for r in rows if r is not None]
     with open(path, "w", newline="") as f:
         writer = csv.writer(f)
@@ -97,8 +108,8 @@ def export_csv(conn, path, limit=None, status=None, row_id=None):
     return len(rows)
 
 
-def print_accounts(conn, limit=20, status=None):
-    rows = list_accounts(conn, limit=limit, status=status)
+def print_accounts(conn, limit=20, status=None, url=None):
+    rows = list_accounts(conn, limit=limit, status=status, url=url)
     if not rows:
         print("No accounts stored yet.")
         return
