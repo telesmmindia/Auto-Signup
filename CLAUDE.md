@@ -57,6 +57,10 @@ path so credentials can be retrieved later:
 # export every stored account to a CSV file and exit
 .venv/bin/python main.py --export-csv                    # writes accounts_export.csv
 .venv/bin/python main.py --export-csv my_accounts.csv
+
+# filter --list / --export-csv to one status
+.venv/bin/python main.py --list --status success
+.venv/bin/python main.py --export-csv success.csv --status success
 ```
 
 Randomly generated emails are not real inboxes, so email verification can't be
@@ -262,13 +266,27 @@ never used to — that specific failure previously had zero visual evidence.
 `db.COLUMNS` rows to a CSV file — `row_id` for one specific account (used
 after every `/newacc` outcome, success or failure, so the details arrive as
 an actual file rather than only as text/caption), or `limit`/`status` for a
-bulk dump (`limit=None` means every row — used by `/export` with no argument
-and by the CLI's `--export-csv`, which always exports everything since it has
-no reason to default to a small page size the way `/list` does).
-`telegram_bot.py`'s `send_csv()` wraps this in a `tempfile.NamedTemporaryFile`,
-sends it via `reply_document()`, and deletes the temp file in a `finally` —
-follow that pattern for any new CSV-producing command rather than writing
-into the repo directory.
+bulk dump (`limit=None` means every row). `telegram_bot.py`'s `send_csv()`
+wraps this in a `tempfile.NamedTemporaryFile`, sends it via
+`reply_document()`, and deletes the temp file in a `finally` — follow that
+pattern for any new CSV-producing command rather than writing into the repo
+directory.
+
+**`/export`'s default differs from `--export-csv`'s on purpose.** The bot's
+`export_cmd()` defaults `status` to `"success"` — plain `/export` gives you
+only successful signups, and you say `/export all` to get every status
+(`status=None`). The CLI's `--export-csv` has no such default — it exports
+everything unless you pass `--status`, matching `--list`'s existing
+unfiltered-by-default behavior. Both are deliberate: `/export` is usually
+"give me the accounts that worked," while the CLI flag follows ordinary
+CLI convention (explicit opt-in filtering, nothing filtered by default).
+
+`export_cmd()`'s argument parsing takes `N` (a row limit) and a status word
+in **either order** — `/export 50`, `/export failed`, `/export failed 20`,
+`/export 20 failed`, `/export all 50` all work, since it just checks
+`arg.isdigit()` vs. `arg.lower() == "all"` vs. anything else (treated as an
+explicit status, overriding the `"success"` default) per argument rather
+than assuming positional order.
 
 ### Per-chat proxy
 

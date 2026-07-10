@@ -574,19 +574,22 @@ def main():
     ap.add_argument("--list", action="store_true",
                     help="print stored accounts from accounts.db and exit")
     ap.add_argument("--limit", type=int, default=20, help="rows to show with --list")
+    ap.add_argument("--status", help="filter --list/--export-csv to one status, "
+                                     "e.g. success, failed, phone_taken")
     ap.add_argument("--export-csv", nargs="?", const="accounts_export.csv", default=None,
-                    metavar="PATH", help="export ALL stored accounts to a CSV file and exit "
-                                         "(default path: accounts_export.csv)")
+                    metavar="PATH", help="export stored accounts to a CSV file and exit "
+                                         "(default path: accounts_export.csv; ALL accounts "
+                                         "unless --status filters it)")
     args = ap.parse_args()
 
     conn = db.get_connection()
 
     if args.list:
-        db.print_accounts(conn, limit=args.limit)
+        db.print_accounts(conn, limit=args.limit, status=args.status)
         return
 
     if args.export_csv:
-        count = db.export_csv(conn, args.export_csv)
+        count = db.export_csv(conn, args.export_csv, status=args.status)
         print(f"Exported {count} account(s) to {args.export_csv}")
         return
 

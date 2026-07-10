@@ -27,7 +27,10 @@ Master-only commands:
     /list [N]         -> most recent N stored accounts (default 10)
     /photo <id>       -> resend a stored account's screenshot with its
                          details as the caption (id from /list)
-    /export [N]       -> export stored accounts as a CSV file (omit N for all)
+    /export [N] [status] -> export as CSV; defaults to SUCCESSFUL signups
+                         only. /export all for every status, /export failed
+                         for a specific one, /export 50 for a row limit
+                         (N and status can be given in either order)
     /setpassword <pw> -> fixed password for every future signup;
                          /setpassword --random reverts to a random one
     /password         -> show the current password mode
@@ -762,14 +765,20 @@ async def photo_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_role(is_master)
 async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/export defaults to successful signups only. /export all exports
+    every status. N (a row limit) and a status word can both be given, in
+    either order, e.g. /export 50, /export all 50, /export failed."""
     limit = None
-    if context.args:
-        try:
-            limit = max(1, min(int(context.args[0]), 5000))
-        except ValueError:
-            await update.message.reply_text("Usage: /export [N]  (omit N to export everything)")
-            return
-    await send_csv(update, "accounts.csv", limit=limit)
+    status = "success"
+    for arg in context.args:
+        if arg.isdigit():
+            limit = max(1, min(int(arg), 5000))
+        elif arg.lower() == "all":
+            status = None
+        else:
+            status = arg
+    filename = f"accounts_{status}.csv" if status else "accounts.csv"
+    await send_csv(update, filename, limit=limit, status=status)
 
 
 @require_role(is_admin)
@@ -856,7 +865,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/stats - counts of signups by status\n"
             "/list [N] - most recent N stored accounts\n"
             "/photo <id> - resend a stored account's screenshot with its details as caption\n"
-            "/export [N] - export stored accounts as a CSV file (omit N for all)\n"
+            "/export [N] [status] - CSV of successful signups by default; "
+            "/export all for every status, /export failed for a specific one\n"
             "/setpassword <pw> - fixed password for every future signup (--random to revert)\n"
             "/password - show the current password mode\n"
             "/setproxy <proxy> - set the GLOBAL proxy for every admin's signups\n"
