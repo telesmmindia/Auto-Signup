@@ -230,14 +230,34 @@ control, not the actual enforcement (that's the decorator).
 
 Commands (master unless noted): `/newacc` (admin+; starts a **continuous**
 run of signups, see below), `/done` (admin+; stop after the current one),
-`/cancel` (admin+; abort now, also stops the loop), `/stats` (counts by
-status), `/list [N]` (recent stored accounts, text), `/photo <id>` (resend
+`/cancel` (admin+; abort now, also stops the loop), `/stats` / `/stats
+<btag>` (counts by status, and by btag; a btag argument narrows to that
+btag's own status breakdown — see below), `/list [N]` (recent stored
+accounts, text), `/photo <id>` (resend
 any past account's screenshot + caption, id from `/list`), `/export [N]
 [status] [url]` (CSV, defaults to successful signups only), `/setpassword
 <pw>` / `/setpassword --random` / `/password` (global fixed-or-random
 password mode), `/setproxy <proxy>` / `/proxy` / `/clearproxy` /
 `/testproxy [proxy]` (global proxy), `/seturl <url>` / `/url` / `/clearurl`
-(global site URL), `/addadmin <id>` / `/removeadmin <id>` / `/admins`.
+(global site URL), `/btag <code>` / `/btag` (global site URL's `btag` query
+param only, see below), `/addadmin <id>` / `/removeadmin <id>` / `/admins`.
+
+`/btag <code>` rebuilds the global site URL keeping whatever scheme/host/path
+the current one (or, if none is set, `SITE_URL`) already has, and replaces
+just its query string with `btag=<code>` — so switching affiliate tags
+doesn't require retyping the whole URL by hand. It reuses `main.py`'s
+`extract_referral_code()` for the no-argument form (`/btag` alone shows the
+currently-active code). Like `/seturl`, this writes to `global_settings["url"]`
+and persists via `save_settings()`, so it's global across all admins, not
+per-chat.
+
+`/stats` with no arguments groups `accounts` by `status` (as before) and now
+also by the `referral_code` column (`COALESCE(referral_code, '(none)')`, since
+any signup made against the default `SITE_URL` before a `/seturl`/`/btag`
+override has a `NULL` `referral_code`) — this is the per-btag signup count.
+`/stats <btag>` instead filters `WHERE referral_code = ?` and shows just that
+btag's own status breakdown (how many succeeded/failed/etc under that one
+tag), mirroring how `/export`'s status/url filters narrow its CSV dump.
 
 ### Continuous signup loop
 
@@ -276,12 +296,15 @@ that caption, falling back to a plain text message if the file is missing
 
 **Success and failure are handled differently on purpose.** A *failed*
 signup (registration failure, or OTP rejected/timed out) still goes through
-`send_result_photo()` — the screenshot is the actual diagnostic value there.
-A *successful* signup does **not** get a photo at all anymore — just a plain
-`f"Signup successful! (#{session.row_id})"` reply — since the full details
-already go out as a CSV file (`send_csv()`, unconditional on both outcomes)
-and a screenshot of a working form adds nothing worth the extra message.
-Don't reintroduce `send_result_photo()` on the success path without
+`send_result_photo()` **and** `send_csv()` — the screenshot and the full
+credentials are the actual diagnostic value there. A *successful* signup gets
+neither: just a plain `f"Signup successful! (#{session.row_id})"` reply, with
+no photo, no caption, and no CSV pushed into the chat — the account's
+credentials stay in `accounts.db` and are retrievable later via `/list` or
+`/export` (or `/photo` for the screenshot, though a working-form screenshot
+adds little). This is deliberate: the admin explicitly asked for successful
+signups to not spam the chat with details, only a bare confirmation. Don't
+reintroduce `send_result_photo()`/`send_csv()` on the success path without
 checking this was a deliberate choice, not an oversight.
 
 `_blocking_fill_and_register()` takes a `result.png` screenshot right after
@@ -380,10 +403,14 @@ old flat 4s. On top of Chromium's own network round-trip, Telegram itself adds
 per-message latency that a local terminal doesn't have, so the bot will still
 feel slower than the CLI even though the underlying automation is now faster.
 
-If the site rejects the phone number as already registered, the bot replies
-with that message and stays in `await_phone`, keeping the session (and its
-generated username/email/password) alive so you can just send a different
-phone number — it doesn't restart the whole flow.
+If the site rejects the phone number as already registered, the bot records
+the attempt as `phone_taken`, closes that browser context, and — same as any
+other finished signup — moves straight on: if the chat is still in
+`looping_chats` it calls `begin_signup()` again, generating a brand-new
+account and prompting for a phone number, with no `/newacc` or manual retry
+needed. This makes `phone_taken` a terminal outcome for that attempt (like
+`success`/`failed`) rather than a pause waiting on the admin to supply a
+different number for the same account.
 
 ## CLI architecture
 

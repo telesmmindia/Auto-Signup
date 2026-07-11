@@ -29,7 +29,8 @@ Flow (continuous -- keeps going until /done or /cancel):
                 not abort it; /cancel does that instead)
 
 Master-only commands:
-    /stats            -> counts of signups by status
+    /stats            -> counts of signups by status and by btag
+    /stats <btag>     -> status breakdown for just that btag
     /list [N]         -> most recent N stored accounts (default 10)
     /photo <id>       -> resend a stored account's screenshot with its
                          details as the caption (id from /list)
@@ -51,6 +52,9 @@ Master-only commands:
     /seturl <url>     -> set the GLOBAL site URL for every admin's signups
     /url              -> show the global site URL
     /clearurl         -> reset to the default site URL
+    /btag <code>      -> set just the btag query param on the global site
+                         URL, keeping its scheme/host/path
+    /btag             -> show the current btag
     /addadmin <id>    -> authorize a new admin
     /removeadmin <id> -> revoke an admin
     /admins           -> list current admins
@@ -81,6 +85,7 @@ import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError
@@ -190,7 +195,7 @@ MASTER_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("list", "Recent stored accounts"),
     BotCommand("photo", "Resend a stored account's screenshot"),
     BotCommand("export", "Export accounts as a CSV file"),
-    BotCommand("stats", "Counts of signups by status"),
+    BotCommand("stats", "Counts of signups by status and btag"),
     BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
     BotCommand("password", "Show the current password mode"),
     BotCommand("setproxy", "Set the global proxy for all signups"),
@@ -200,6 +205,7 @@ MASTER_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("seturl", "Set the global site URL for all signups"),
     BotCommand("url", "Show the global site URL"),
     BotCommand("clearurl", "Reset to the default site URL"),
+    BotCommand("btag", "Set/show just the btag on the global site URL"),
     BotCommand("addadmin", "Authorize a new admin"),
     BotCommand("removeadmin", "Revoke an admin"),
     BotCommand("admins", "List current admins"),
@@ -486,20 +492,7 @@ async def begin_signup(update, chat_id):
     session.site_url = global_settings.get("url")
     sessions[chat_id] = session
 
-    proxy_line = (f"Proxy: {mask_proxy_display(session.proxy)}" if session.proxy
-                 else "Proxy: none (direct connection)")
-    url_line = f"URL: {session.site_url or SITE_URL}"
-    password_line = ("Password: fixed (master-set)" if global_settings.get("password")
-                     else "Password: random")
-    await update.message.reply_text(
-        "New test signup:\n"
-        f"Username: {session.acct['username']}\n"
-        f"Email: {session.acct['email']}\n"
-        f"{password_line}\n"
-        f"{proxy_line}\n"
-        f"{url_line}\n\n"
-        "Send the phone number to use for this signup."
-    )
+    await update.message.reply_text("Send the phone number to use for this signup.")
 
 
 @require_role(is_admin)
@@ -650,6 +643,26 @@ async def clearurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No custom site URL was set.")
 
 
+@require_role(is_master)
+async def btag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set (or show) just the btag affiliate/referral code, keeping whatever
+    scheme/host/path the global site URL (or the SITE_URL default) already
+    has -- so the master doesn't have to retype the whole URL to swap tags."""
+    current_url = global_settings.get("url") or SITE_URL
+    if not context.args:
+        code = extract_referral_code(current_url)
+        await update.message.reply_text(
+            f"Current btag: {code}" if code else "No btag set on the current site URL."
+        )
+        return
+    code = context.args[0]
+    parts = urlsplit(current_url)
+    new_url = urlunsplit((parts.scheme, parts.netloc, parts.path, f"btag={code}", parts.fragment))
+    global_settings["url"] = new_url
+    save_settings()
+    await update.message.reply_text(f"Global site URL set for all admins' signups: {new_url}")
+
+
 def _blocking_test_proxy_once(proxy_conf, timeout_ms=30000):
     browser = _blocking_ensure_browser()
     bridge_proc = None
@@ -731,13 +744,44 @@ async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_role(is_master)
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """No args: overall status breakdown plus a per-btag count. One arg (a
+    btag code): status breakdown for just that btag."""
+    if context.args:
+        btag = context.args[0]
+        cur = conn.execute(
+            "SELECT status, COUNT(*) FROM accounts WHERE referral_code = ? GROUP BY status",
+            (btag,))
+        rows = cur.fetchall()
+        if not rows:
+            await update.message.reply_text(f"No signups recorded for btag {btag}.")
+            return
+        total = sum(c for _, c in rows)
+        lines = [f"Signups for btag {btag}: {total}"]
+        for status, count in rows:
+            lines.append(f"  {status}: {count}")
+        await update.message.reply_text("\n".join(lines))
+        return
+
     cur = conn.execute("SELECT status, COUNT(*) FROM accounts GROUP BY status")
     rows = cur.fetchall()
     total = sum(c for _, c in rows)
-    lines = [f"Total signups recorded: {total}"]
+    if not rows:
+        await update.message.reply_text("No signups recorded yet.")
+        return
+    lines = [f"Total signups recorded: {total}", "", "By status:"]
     for status, count in rows:
         lines.append(f"  {status}: {count}")
-    await update.message.reply_text("\n".join(lines) if rows else "No signups recorded yet.")
+
+    btag_rows = conn.execute(
+        "SELECT COALESCE(referral_code, '(none)'), COUNT(*) FROM accounts "
+        "GROUP BY referral_code ORDER BY COUNT(*) DESC"
+    ).fetchall()
+    lines.append("")
+    lines.append("By btag:")
+    for code, count in btag_rows:
+        lines.append(f"  {code}: {count}")
+
+    await update.message.reply_text("\n".join(lines))
 
 
 @require_role(is_master)
@@ -853,11 +897,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if result.get("phone_taken"):
             db.update_status(conn, session.row_id, "phone_taken", notes=result["message"])
-            await close_browser(session)
-            await update.message.reply_text(
-                f"{result['message']} Send a different phone number to try again, or /cancel."
-            )
-            return  # stays in "await_phone" stage, session kept alive
+            await end_session(session)
+            await update.message.reply_text(result["message"])
+            del sessions[chat_id]
+            if chat_id in looping_chats:
+                await begin_signup(update, chat_id)
+            return
 
         if not result["ok"]:
             db.update_status(conn, session.row_id, "failed", notes=result["message"],
@@ -890,14 +935,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          notes=result["message"], screenshot=result.get("shot"))
 
         if result["ok"]:
-            # No photo/caption on success -- just a plain confirmation; the
-            # full details still go out as a CSV file below.
+            # Success: just a plain confirmation, no photo/caption/CSV -- the
+            # account details stay in accounts.db, retrievable via /list or
+            # /export later, but aren't pushed into the chat automatically.
             await update.message.reply_text(f"Signup successful! (#{session.row_id})")
         else:
             acct = dict(session.acct)
             acct.update(status=status, notes=f"Verification failed: {result['message']}")
             await send_result_photo(update, result.get("shot"), build_caption(acct))
-        await send_csv(update, f"{session.acct['username']}.csv", row_id=session.row_id)
+            await send_csv(update, f"{session.acct['username']}.csv", row_id=session.row_id)
 
         await end_session(session)
         del sessions[chat_id]
@@ -916,7 +962,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "then starts the next one automatically)\n"
             "/done - stop after the current signup finishes\n"
             "/cancel - abandon an in-progress signup (also stops looping)\n"
-            "/stats - counts of signups by status\n"
+            "/stats - counts of signups by status and by btag\n"
+            "/stats <btag> - status breakdown for just that btag\n"
             "/list [N] - most recent N stored accounts\n"
             "/photo <id> - resend a stored account's screenshot with its details as caption\n"
             "/export [N] [status] [url] - CSV of successful signups by default; "
@@ -931,6 +978,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/seturl <url> - set the GLOBAL site URL for every admin's signups\n"
             "/url - show the global site URL\n"
             "/clearurl - reset to the default site URL\n"
+            "/btag <code> - set just the btag on the global site URL (keeps scheme/host/path)\n"
+            "/btag - show the current btag\n"
             "/addadmin <user_id> - authorize a new admin\n"
             "/removeadmin <user_id> - revoke an admin\n"
             "/admins - list current admins"
@@ -1020,6 +1069,7 @@ def main():
     app.add_handler(CommandHandler("seturl", seturl))
     app.add_handler(CommandHandler("url", show_url))
     app.add_handler(CommandHandler("clearurl", clearurl))
+    app.add_handler(CommandHandler("btag", btag_cmd))
     app.add_handler(CommandHandler("addadmin", addadmin))
     app.add_handler(CommandHandler("removeadmin", removeadmin))
     app.add_handler(CommandHandler("admins", list_admins))
