@@ -546,6 +546,44 @@ path as a plain `failed` outcome (the bot then just loops to the next
 account) rather than cricmatch's dedicated `phone_taken` status
 (`.err_phone` is cricmatch-specific markup).
 
+### spin24star is behind an AWS WAF CAPTCHA (known blocker, not a code bug)
+
+Diagnosed live (2026-07-13): a *real* signup on spin24star never reaches the
+OTP screen because the register POST is **challenged by AWS WAF**. Full trace:
+the REGISTER click fires a same-origin `POST https://spin24star.com/sign-up`,
+which returns **HTTP 405 with header `x-amzn-waf-action: captcha`** and a
+`<title>Human Verification</title>` HTML page instead of JSON. The site's own
+AJAX handler doesn't surface this — the submit button just sticks on "Please
+wait ..." — so with no visible message it bubbled up as `Register rejected:
+unknown error`.
+
+Key facts established, so nobody re-litigates this as a bug:
+- It is **not** IP reputation. The failing proxy IP (`51.194.232.95`) checks
+  clean on `ip-api.com` (`proxy:false, hosting:false`, residential ISP), and
+  the same 405/captcha happens with **no proxy at all** from a clean IP.
+- It is **not** a missing token. The `aws-waf-token` cookie *is* present after
+  page load (alongside `AWSALB`/`AWSALBCORS`) in **both** headless and headed
+  Chromium — and `/sign-up` still returns 405 `captcha` in both. The WAF rule
+  demands an actually-*solved* CAPTCHA for the register action, which no
+  browser-mode/stealth tweak provides.
+- cricmatch247 does **not** CAPTCHA its register endpoint, which is why the
+  same code path works there and not here.
+
+Getting past this needs one of: (a) the **site owner exempts** the register
+endpoint or a test IP/header from the WAF CAPTCHA rule (cleanest, since this
+is the owner's own QA per the Purpose section), or (b) integrating a
+**CAPTCHA-solving service** that supports AWS WAF CAPTCHA (e.g. CapSolver /
+2Captcha) — real cost/work, out of scope for the current code. Do not
+"fix" this in the driver by fiddling selectors or waits; the request is
+being rejected at the edge before the app ever sees it.
+
+`_blocking_fill_and_register()` now makes this legible instead of dumping WAF
+telemetry tokens: it captures the same-origin register POST response (skipping
+`token.awswaf.com` beacons + analytics) and, when the outcome has no visible
+message, reports any `x-amzn-waf-action` header explicitly — e.g. `BLOCKED by
+AWS WAF (x-amzn-waf-action: captcha, HTTP 405) on .../sign-up`. Verified live
+that this is exactly what a spin24star `/newacc` now reports.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an

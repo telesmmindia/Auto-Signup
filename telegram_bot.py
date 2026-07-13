@@ -414,24 +414,32 @@ def _blocking_fill_and_register(session, phone):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     page.screenshot(path=str(SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png"))
 
-    # Capture POST responses fired by the REGISTER click: if the outcome ends
-    # up "unknown" (no visible message -- e.g. the register API blocked/hung
-    # through a flagged proxy, or a snackbar vanished before the screenshot),
-    # the API's own status/body is the only diagnostic left.
-    post_responses = []
-    def _track_post(resp):
+    # Capture the register POST's own response so an "unknown" outcome (no
+    # visible message -- e.g. the register endpoint silently blocked) is still
+    # diagnosable. The site's register call is a same-origin POST (spin24star:
+    # /sign-up); everything else fired by the click is noise -- AWS WAF's
+    # token.awswaf.com telemetry beacons and analytics -- which we filter out.
+    # When AWS WAF blocks/challenges the call it answers with an
+    # `x-amzn-waf-action` header (e.g. "captcha"/"challenge"), which is the
+    # single most useful thing to surface, so we grab it explicitly.
+    app_responses = []
+    def _track_resp(resp):
         try:
-            if resp.request.method == "POST":
-                post_responses.append(resp)
+            url = resp.url
+            if resp.request.method != "POST":
+                return
+            if "awswaf.com" in url or "google" in url or "gtag" in url or "analytics" in url:
+                return
+            app_responses.append(resp)
         except Exception:
             pass
-    page.on("response", _track_post)
+    page.on("response", _track_resp)
 
     page.click(SEL["submit"])
     outcome, msgs = wait_for_register_outcome(page)
 
     try:
-        page.remove_listener("response", _track_post)
+        page.remove_listener("response", _track_resp)
     except Exception:
         pass
 
@@ -446,16 +454,24 @@ def _blocking_fill_and_register(session, phone):
         message = "Register rejected: " + ("; ".join(msgs) or "unknown error")
         if not msgs:
             api_notes = []
-            for resp in post_responses[-3:]:
+            for resp in app_responses[-3:]:
+                try:
+                    waf = resp.headers.get("x-amzn-waf-action")
+                except Exception:
+                    waf = None
+                if waf:
+                    api_notes.append(f"BLOCKED by AWS WAF (x-amzn-waf-action: {waf}, "
+                                     f"HTTP {resp.status}) on {resp.url.split('?')[0][-50:]}")
+                    continue
                 try:
                     body = " ".join(resp.text()[:150].split())
                 except Exception:
                     body = ""
-                api_notes.append(f"{resp.status} {resp.url.split('?')[0][-60:]} {body}".strip())
+                api_notes.append(f"{resp.status} {resp.url.split('?')[0][-50:]} {body}".strip())
             if api_notes:
-                message += " | API: " + " | ".join(api_notes)
+                message += " | " + " | ".join(api_notes)
             elif outcome == "timeout":
-                message += " (no API call was made -- REGISTER click had no effect)"
+                message += " (no register API call was made -- REGISTER click had no effect)"
         return {"ok": False, "message": message,
                 "shot": str(result_shot)}
 
