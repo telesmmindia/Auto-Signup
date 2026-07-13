@@ -402,11 +402,16 @@ def _blocking_fill_and_register(session, phone):
     page.screenshot(path=str(SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png"))
 
     # submit_register clicks REGISTER and, if the register POST is AWS WAF
-    # CAPTCHA-blocked and CAPSOLVER_API_KEY is set, solves it (via CapSolver),
-    # injects the token, and resubmits once -- all shared with the CLI. Without
-    # a key it's a plain submit and `captured` still lets us report the block.
-    outcome, msgs, captured = submit_register(page, context, acct, session.site_url,
-                                              proxy=session.proxy)
+    # CAPTCHA-blocked and CAPSOLVER_API_KEY is set, solves it (via CapSolver)
+    # and resubmits in a FRESH context -- all shared with the CLI. Without a
+    # key it's a plain submit and `captured` still lets us report the block.
+    # It may return a different page/context than we passed in (verified
+    # live: the WAF keeps flagging the original context even with a valid
+    # token, so the retry opens a new one and closes the old) -- sync
+    # session.context/session.page so OTP verify and cleanup use the live one.
+    outcome, msgs, captured, page = submit_register(page, acct, session.site_url,
+                                                     proxy=session.proxy)
+    session.context, session.page = page.context, page
 
     result_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-result.png"
     page.screenshot(path=str(result_shot))

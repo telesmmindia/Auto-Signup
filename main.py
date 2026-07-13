@@ -502,11 +502,21 @@ def click_register_and_wait(page):
     return outcome, msgs, captured
 
 
-def submit_register(page, context, acct, site_url, proxy=None):
+def submit_register(page, acct, site_url, proxy=None):
     """Click REGISTER and, if the register POST is AWS WAF CAPTCHA-blocked and a
-    CapSolver key is configured, solve it, inject the token, reload+refill, and
-    resubmit once. Returns (outcome, msgs, captured). With no key (or a
-    non-WAF site) this is just a plain submit, so cricmatch is unaffected."""
+    CapSolver key is configured, solve it and resubmit in a FRESH browser
+    context. Returns (outcome, msgs, captured, page) -- `page` is the same
+    object passed in, UNLESS a WAF retry happened, in which case it's a new
+    Page in a new context and the caller must switch to using it (and treat
+    the original page/context as already closed). With no key (or a non-WAF
+    site) this is just a plain submit, so cricmatch is unaffected.
+
+    Verified live: injecting a solved token into the SAME context that got
+    challenged still 405s on reload -- AWS WAF keeps flagging that context
+    even with a valid token (something beyond the token cookie is tracked per
+    session). A token injected into a brand-new context works immediately
+    (fresh homepage GET returns 200, real site). So the retry opens a new
+    context rather than reloading in place."""
     outcome, msgs, captured = click_register_and_wait(page)
 
     if outcome in ("error", "timeout") and is_waf_captcha(captured) and capsolver_key():
@@ -515,21 +525,33 @@ def submit_register(page, context, acct, site_url, proxy=None):
             if not challenge:
                 raise RuntimeError("could not parse WAF challenge params")
             token = solve_aws_waf_token(site_url or SITE_URL, challenge, proxy=proxy)
-            apply_waf_token(context, site_url or SITE_URL, token)
         except (RuntimeError, urllib.error.URLError) as e:
-            return outcome, [f"AWS WAF CAPTCHA solve failed: {e}"], captured
+            return outcome, [f"AWS WAF CAPTCHA solve failed: {e}"], captured, page
 
-        # Token injected -- the stuck "Please wait ..." button won't re-fire, so
-        # reload the register page fresh, refill, and resubmit. The cookie now
-        # rides along on the new /sign-up POST.
-        page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
-        page.wait_for_timeout(4000)
-        if not open_signup_modal(page):
-            return "timeout", ["WAF solved but could not reopen the register form"], captured
-        fill_register_form(page, acct)
-        outcome, msgs, captured = click_register_and_wait(page)
+        old_context = page.context
+        browser = old_context.browser
+        try:
+            proxy_conf = parse_proxy(proxy) if proxy else None
+        except ValueError:
+            proxy_conf = None
+        new_context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        apply_waf_token(new_context, site_url or SITE_URL, token)
+        new_page = new_context.new_page()
+        try:
+            old_context.close()
+        except Exception:
+            pass
 
-    return outcome, msgs, captured
+        new_page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        new_page.wait_for_timeout(4000)
+        if not open_signup_modal(new_page):
+            return ("timeout", ["WAF solved but could not reopen the register form"],
+                    captured, new_page)
+        fill_register_form(new_page, acct)
+        outcome, msgs, captured = click_register_and_wait(new_page)
+        return outcome, msgs, captured, new_page
+
+    return outcome, msgs, captured, page
 
 
 def read_result(page):
@@ -753,7 +775,13 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
         result["shot"] = str(filled_shot)
         return result
 
-    outcome, msgs, _ = submit_register(page, page.context, acct, site_url, proxy=proxy)
+    # submit_register may swap in a fresh page/context (see its docstring) if
+    # it had to route around an AWS WAF CAPTCHA -- reassign the local `page`
+    # so every use below (screenshots, phone-taken retry, enter_otp) targets
+    # whichever page is actually live, and stash it in `result` so the caller
+    # knows which context to close (the original may already be closed).
+    outcome, msgs, _, page = submit_register(page, acct, site_url, proxy=proxy)
+    result["page"] = page
 
     attempts = 0
     while outcome == "phone_taken" and interactive and attempts < 5:
@@ -889,6 +917,7 @@ def main():
                 continue
             context = browser.new_context(proxy=proxy_conf) if proxy_conf else None
             page = context.new_page() if context else browser.new_page()
+            res = None
             try:
                 res = signup_once(page, acct, submit=not args.no_submit,
                                   interactive=not args.account_file,
@@ -901,9 +930,27 @@ def main():
                 res = {"account": acct.get("username", "?"), "ok": False,
                        "messages": [f"Browser error (check --proxy?): {str(e)[:200]}"], "shot": None}
             finally:
-                page.close()
-                if context:
-                    context.close()
+                # signup_once() may have swapped in a fresh page/context to
+                # route around an AWS WAF CAPTCHA (submit_register() closes
+                # the original context itself when that happens) -- close
+                # whichever page/context is actually still live, not
+                # blindly re-close the one opened above.
+                final_page = res.get("page") if isinstance(res, dict) else None
+                if final_page and final_page is not page:
+                    try:
+                        final_page.context.close()
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        page.close()
+                    except Exception:
+                        pass
+                    if context:
+                        try:
+                            context.close()
+                        except Exception:
+                            pass
                 stop_bridge(bridge_proc)
             results.append(res)
             print(f"[{'OK ' if res['ok'] else 'FAIL' if res['ok'] is False else '?  '}] "

@@ -568,6 +568,23 @@ Key facts established, so nobody re-litigates this as a bug:
   browser-mode/stealth tweak provides.
 - cricmatch247 does **not** CAPTCHA its register endpoint, which is why the
   same code path works there and not here.
+- **cloudscraper was tried and doesn't work, don't re-try it.** It's built to
+  solve Cloudflare's own JS challenge and has no real JS engine — but
+  Cloudflare here is only the CDN in front; the actual block is AWS WAF, which
+  only issues a token to a client that executes its `challenge.js` in a real
+  browser. Tested live: a `cloudscraper` GET got a normal 200 + valid CSRF
+  token, but the POST to `/sign-up` came back a flat 403 (no token acquired at
+  all). Playwright is the right tool here specifically *because* it's a real
+  browser; anything that isn't one is a step backwards for this particular
+  block.
+- The block is **behavioral/rate-based, not fixed.** Tested live from a clean
+  residential IP (`ip-api.com` confirms `proxy:false, hosting:false`): a fresh
+  browser got 200 on every attempt; after several rapid signups in a row from
+  the same IP, every subsequent attempt became 405 captcha, and continuing to
+  hammer it escalated some attempts to a flat 403 (no CAPTCHA offered at all —
+  CapSolver can't help with that one, there's nothing to solve). This is why
+  pacing signups and rotating proxies matters even with CapSolver wired up:
+  CapSolver handles the 405/captcha state, not the 403 hard-block state.
 
 Getting past this needs one of: (a) the **site owner exempts** the register
 endpoint or a test IP/header from the WAF CAPTCHA rule (cleanest, since this
@@ -586,38 +603,52 @@ unaffected.
 
 The whole flow lives in `main.py` and is shared by the CLI (`signup_once`)
 and the bot (`_blocking_fill_and_register`) through **`submit_register(page,
-context, acct, site_url, proxy)`**:
+acct, site_url, proxy)`** (note: no `context` param — it's derived from
+`page.context`, since a WAF retry may replace both; see below):
 
 1. `click_register_and_wait()` clicks REGISTER and captures the same-origin
    register POST's response (`{"response","action","body"}`), filtering out
    `token.awswaf.com` telemetry noise.
-2. If the outcome is error/timeout and `is_waf_captcha(captured)` (header
-   `x-amzn-waf-action: captcha|challenge`, or a `gokuProps` body) and a key is
-   set: `parse_aws_waf_challenge()` pulls `key`/`iv`/`context` +
-   `challenge.js` from the "Human Verification" page's inline
-   `window.gokuProps`, `solve_aws_waf_token()` hands them to CapSolver
-   (`AntiAwsWafTask`, or `...ProxyLess` when no proxy — the proxy is passed so
-   the token is solved from the same egress IP, since WAF tokens can be
-   IP-bound), and `apply_waf_token()` injects the returned `aws-waf-token`
-   cookie into the context.
-3. Because the site's own submit button is left stuck on "Please wait ..."
-   after the 405, the retry **reloads** the register page, refills via
-   `fill_register_form()`, and resubmits once — the injected cookie rides
-   along on the new `/sign-up` POST.
+2. If the outcome is error/timeout, `is_waf_captcha(captured)` (header
+   `x-amzn-waf-action: captcha|challenge`, or a `gokuProps` body), and a key is
+   set: `parse_aws_waf_challenge()` pulls `key`/`iv`/`context` + `challenge.js`
+   from the "Human Verification" page's inline `window.gokuProps`, and
+   `solve_aws_waf_token()` hands them to CapSolver (`AntiAwsWafTask`, proxy
+   passed so the solve happens from the signup's own egress IP).
+3. **The retry opens a brand-new browser context**, injects the solved token
+   into it via `apply_waf_token()`, closes the old (challenged) context, and
+   resubmits there — deliberately NOT a reload in the original context/page.
+
+**Why a new context, not a reload in place (root-caused live, 2026-07-13):**
+injecting a valid, freshly-solved token into the SAME context that triggered
+the CAPTCHA still returns 405 on the next request — verified by solving a
+real challenge, injecting the token into the original context, and reloading:
+still blocked. Injecting the *identical* token into a brand-new context
+instead: a plain homepage GET immediately returns 200 with real site content.
+So AWS WAF is tracking something beyond the token cookie (almost certainly
+tied to `AWSALB`/session-level state) against that specific context, and no
+cookie swap clears it — only a fresh context does. `submit_register()`
+therefore returns `(outcome, msgs, captured, page)`, where `page` is a *new*
+Page/context on the WAF-retry path and callers **must** switch to it:
+- `signup_once()` reassigns its local `page` and stashes it in
+  `result["page"]` so `main()`'s per-account loop closes the actually-live
+  context instead of double-closing the already-closed original (or leaking
+  the new one) — see the `finally` block in the CLI's per-account loop.
+- `_blocking_fill_and_register()` reassigns its local `page` and resyncs
+  `session.context, session.page = page.context, page` immediately after the
+  call, so `_blocking_verify_otp()` and `_blocking_close_context()` (both
+  read `session.page`/`session.context`) operate on the surviving context.
 
 `fill_register_form()` (the 4 fields + T&C) was extracted so the initial fill
 and the post-solve refill can't drift. `wait_for_register_outcome()` returning
 `(outcome, msgs)` matters here too — a snackbar/toast is read at detection
 time, before it auto-dismisses.
 
-**Verified**: challenge parsing against the real `gokuProps`, WAF detection,
-proxy formatting, cookie injection, and the no-key path (reports `BLOCKED by
-AWS WAF ... -- set CAPSOLVER_API_KEY in .env to auto-solve it`, no crash).
-**Not yet verified end-to-end** (needs a funded CapSolver key + a real phone
-for the OTP): that CapSolver's token actually satisfies this WAF and the
-resubmit reaches the OTP screen. If the token is rejected, the first things to
-try are passing the `/sign-up` endpoint URL as `websiteURL` instead of the
-page URL, and confirming the solve is routed through the signup proxy.
+**Verified end-to-end live** (2026-07-13, funded key): a real spin24star
+signup that hit the WAF CAPTCHA was solved, the fresh-context retry reached
+the real OTP screen (`digits: 6`), and session cleanup closed without error.
+cricmatch (no WAF, no CapSolver involvement) regression-checked clean after
+the signature change.
 
 ## Site-specific notes
 
