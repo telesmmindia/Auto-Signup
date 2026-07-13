@@ -434,16 +434,21 @@ Two files: `main.py` (Playwright driver, sync API) and `db.py` (SQLite storage).
   retrieve exact login credentials later.
 
 
-- `SEL` dict holds all selectors captured from the live modal. If the site's
-  markup changes and the script breaks, re-verify these first. Key ones:
-  open-modal `.registerUserData`, username `#userNameid`, email `#userEmailid`,
-  password `#pass_log_id`, phone `#phoneNumber`, T&C checkbox `#remChck2`,
-  submit `button.cls_register_new`.
+- `SEL` dict holds all selectors captured from the live sites. **It now covers
+  two platforms at once** via comma-joined CSS groups (see "Multi-site
+  support" below): cricmatch247's markup (username `#userNameid`, email
+  `#userEmailid`, password `#pass_log_id`, phone `#phoneNumber`, T&C checkbox
+  `#remChck2`, submit `button.cls_register_new`, open-modal
+  `.registerUserData`) and spin24star's Khelo markup (`#userNameKhelo` /
+  `#emailKhelo` / `#passwordKhelo` / `#phoneKhelo` / `#signUpButtonKhelo`,
+  open via `button.rj__join_now`). If a site's markup changes and the script
+  breaks, re-verify these first.
 - `open_signup_modal()` must first call `dismiss_popups()` — a promo overlay
   loads on page load and covers the header JOIN button. The reliable trigger is
   `.registerUserData`; the header `.headerjoinBtn` is often reported not-visible.
 - The signup form is injected by JS after the JOIN click, so it is NOT in the
-  static HTML. To re-inspect fields, use `inspect_form.py`.
+  static HTML. To re-inspect fields, use `inspect_form.py` (takes an optional
+  URL argument, defaults to cricmatch247).
 - The `page.wait_for_timeout(4000)` right after `page.goto()` in `signup_once()`
   looks like it should be replaceable with a visibility-based wait, but this was
   tested live and reproduced a real failure: `open_signup_modal()` clicked while
@@ -471,15 +476,73 @@ Two files: `main.py` (Playwright driver, sync API) and `db.py` (SQLite storage).
   second, separate OTP widget for "Login with OTP" (`input.otp__digit` WITHOUT
   the `_signup` suffix) — do not target that one.
 
+## Multi-site support (cricmatch247 + spin24star)
+
+The driver supports two sites with **one** `SEL` dict rather than per-site
+profiles: every single-selector key is a comma-joined CSS group
+(`"#userNameid, #userNameKhelo"`), which works because the two platforms'
+ids/classes never coexist on one page — each group resolves to exactly one
+element per site, so Playwright's strict mode never trips. Site selection is
+purely by URL (`--url` / `/seturl`); there is no site flag anywhere.
+
+spin24star.com runs the "Khelo" white-label platform (assets under
+`khelocdn`), inspected live via `inspect_form.py`. Differences that needed
+handling, all inside `main.py`:
+
+- **Register trigger**: no `.registerUserData`; instead several
+  `button.rj__join_now` REGISTER buttons (`onclick="reg_page()"`, navigates
+  to `/join-now` → `/?reg=1`), only one of which is visible. A game section
+  (`.aviator_main_sec_root`) overlays it, so a plain click retries forever on
+  "subtree intercepts pointer events" — the click **must be forced**.
+  `open_signup_modal()` handles this in a dedicated branch (keyed on
+  `SEL["open_modal_khelo"]` matching at all, so cricmatch's path is
+  untouched): it force-clicks the first *visible* `rj__join_now`. It also
+  gained a fast-path that returns immediately if the username field is
+  already visible (Khelo shows the form directly at `/?reg=1`).
+- **Intro overlay**: a full-screen SPRIBE/aviator walkthrough covers the whole
+  page on load; its dismiss control is `div.skip_right_img` ("skip »"), added
+  to `SEL["close_popup"]`.
+- **Form fields**: `#userNameKhelo` / `#emailKhelo` / `#passwordKhelo` /
+  `#phoneKhelo`, submit `#signUpButtonKhelo`. The T&C mark is NOT a real
+  `input[type=checkbox]` (the only real checkbox on the page is the login
+  form's `#rememberMe`) and renders already-checked — nothing to click, and
+  the existing `cb.count()` guard skips `#remChck2` cleanly.
+- **OTP**: 6 boxes `input.regOtpKhelo1`, verify `button.submitRegOtpMain`
+  (appended to the `otp_verify` candidates). Same trap as cricmatch: the page
+  also has separate login-OTP inputs (`input.otpNumberkhelo`) and
+  forgot-password OTP inputs (`input.otpNumberFp`) — do not match those.
+
+- **Error display**: rejections render as a top-right **snackbar**
+  (`div.snackbar-container` holding a bare `<p>`, e.g. "Please enter valid
+  mobile number") with no toast/alert/error class anywhere — none of
+  `read_result()`'s original selectors matched it, which surfaced in
+  production as `Register rejected: unknown error` after the full 12s
+  `wait_for_register_outcome()` timeout. `.snackbar-container` is now in
+  `read_result()`'s selector list; verified live that a rejected REGISTER now
+  returns `outcome=error` immediately with the actual message text.
+
+Verified live (2026-07-12/13): `--no-submit --url https://spin24star.com`
+fills the whole register form correctly (screenshot confirmed all four
+fields + pre-checked T&C), and a REGISTER click that the site rejects is
+detected instantly with the real snackbar message. **Not yet verified live**
+(needs a real phone number): the post-REGISTER OTP screen and OTP verify.
+A taken phone on spin24star surfaces through the snackbar → `read_result()`
+path as a plain `failed` outcome (the bot then just loops to the next
+account) rather than cricmatch's dedicated `phone_taken` status
+(`.err_phone` is cricmatch-specific markup).
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an
   affiliate/tracking tag) rather than the bare domain — every signup, CLI and
   bot alike, goes through this URL since `telegram_bot.py` imports `SITE_URL`
-  from `main.py`.
+  from `main.py`. To run signups against spin24star instead, set
+  `/seturl https://spin24star.com` (bot) or pass `--url` (CLI).
 
 - The real modal has only 4 inputs (username, email, password, mobile) plus an
   "I'm over 18 + accept T&C" checkbox — there is no first/last name or DOB field
   despite what the site's help text suggests.
 - Password policy enforced by the form: min 5 / max 60 chars, at least one
-  digit, one special character, and both upper- and lower-case letters.
+  digit, one special character, and both upper- and lower-case letters
+  (spin24star shows the same rule set as inline indicators on its register
+  form, so one generated password satisfies both sites).

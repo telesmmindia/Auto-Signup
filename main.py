@@ -313,7 +313,11 @@ def read_result(page):
     """Best-effort read of any toast / validation message shown after submit."""
     messages = []
     for sel in [".toast", ".toast-message", ".swal2-title", ".swal2-html-container",
-                ".error_msg", ".invalid_msg", "[class*=toast]", "[class*=alert]"]:
+                ".error_msg", ".invalid_msg", "[class*=toast]", "[class*=alert]",
+                # Khelo (spin24star): errors render as a top-right snackbar --
+                # a bare <p> inside this container, no toast/alert/error class
+                # anywhere, so none of the selectors above can see it.
+                ".snackbar-container"]:
         try:
             loc = page.locator(sel)
             for i in range(min(loc.count(), 5)):
