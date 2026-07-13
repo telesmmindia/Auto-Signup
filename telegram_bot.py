@@ -263,7 +263,10 @@ async def post_init(application):
     command menu, then gives the master and every already-authorized admin
     their role-appropriate menu."""
     bot = application.bot
-    await bot.set_my_commands([], scope=BotCommandScopeDefault())
+    try:
+        await bot.set_my_commands([], scope=BotCommandScopeDefault())
+    except Exception as e:
+        logger.warning(f"Could not clear default command menu: {e}")
     if MASTER_ADMIN_ID:
         try:
             await bot.set_my_commands(MASTER_COMMANDS,
