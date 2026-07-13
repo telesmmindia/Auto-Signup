@@ -922,10 +922,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.row_id = db.insert_account(conn, session.acct)
         await update.message.reply_text("Submitting the signup form and requesting an OTP, one moment...")
 
+        logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
+                    f"(phone {text}, url {session.site_url or SITE_URL}, "
+                    f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'})")
         result = await loop.run_in_executor(
             _pw_executor, _blocking_fill_and_register, session, text)
 
         if result.get("phone_taken"):
+            logger.warning(f"#{session.row_id} {session.acct['username']}: phone taken -- {result['message']}")
             db.update_status(conn, session.row_id, "phone_taken", notes=result["message"])
             await end_session(session)
             await update.message.reply_text(result["message"])
@@ -935,6 +939,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not result["ok"]:
+            logger.error(f"#{session.row_id} {session.acct['username']}: FAILED -- "
+                         f"{result['message']} (screenshot: {result.get('shot')})")
             db.update_status(conn, session.row_id, "failed", notes=result["message"],
                              screenshot=result.get("shot"))
             acct = dict(session.acct)
@@ -947,6 +953,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await begin_signup(update, chat_id)
             return
 
+        logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
         session.stage = "await_otp"
         await update.message.reply_text(
             f"OTP sent to {text}. Send the {result['digits']}-digit code you received."
@@ -961,6 +968,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             _pw_executor, _blocking_verify_otp, session, text)
 
         status = "success" if result["ok"] else "failed"
+        if result["ok"]:
+            logger.info(f"#{session.row_id} {session.acct['username']}: SUCCESS")
+        else:
+            logger.error(f"#{session.row_id} {session.acct['username']}: OTP verify FAILED -- "
+                         f"{result['message']} (screenshot: {result.get('shot')})")
         db.update_status(conn, session.row_id, status,
                          notes=result["message"], screenshot=result.get("shot"))
 
