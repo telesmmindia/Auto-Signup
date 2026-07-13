@@ -571,18 +571,53 @@ Key facts established, so nobody re-litigates this as a bug:
 
 Getting past this needs one of: (a) the **site owner exempts** the register
 endpoint or a test IP/header from the WAF CAPTCHA rule (cleanest, since this
-is the owner's own QA per the Purpose section), or (b) integrating a
-**CAPTCHA-solving service** that supports AWS WAF CAPTCHA (e.g. CapSolver /
-2Captcha) — real cost/work, out of scope for the current code. Do not
-"fix" this in the driver by fiddling selectors or waits; the request is
-being rejected at the edge before the app ever sees it.
+is the owner's own QA per the Purpose section), or (b) a **CAPTCHA-solving
+service** — which is now integrated (CapSolver, see below). Do not "fix" this
+in the driver by fiddling selectors or waits; the request is rejected at the
+edge before the app ever sees it.
 
-`_blocking_fill_and_register()` now makes this legible instead of dumping WAF
-telemetry tokens: it captures the same-origin register POST response (skipping
-`token.awswaf.com` beacons + analytics) and, when the outcome has no visible
-message, reports any `x-amzn-waf-action` header explicitly — e.g. `BLOCKED by
-AWS WAF (x-amzn-waf-action: captcha, HTTP 405) on .../sign-up`. Verified live
-that this is exactly what a spin24star `/newacc` now reports.
+#### CapSolver integration (auto-solving the WAF CAPTCHA)
+
+Set `CAPSOLVER_API_KEY` in `.env` (both the bot and the CLI load it via
+`load_dotenv()`; `main.capsolver_key()` reads it lazily so import order
+doesn't matter). With no key set, everything below is skipped and a WAF block
+is just reported as a clean failure — so cricmatch and key-less runs are
+unaffected.
+
+The whole flow lives in `main.py` and is shared by the CLI (`signup_once`)
+and the bot (`_blocking_fill_and_register`) through **`submit_register(page,
+context, acct, site_url, proxy)`**:
+
+1. `click_register_and_wait()` clicks REGISTER and captures the same-origin
+   register POST's response (`{"response","action","body"}`), filtering out
+   `token.awswaf.com` telemetry noise.
+2. If the outcome is error/timeout and `is_waf_captcha(captured)` (header
+   `x-amzn-waf-action: captcha|challenge`, or a `gokuProps` body) and a key is
+   set: `parse_aws_waf_challenge()` pulls `key`/`iv`/`context` +
+   `challenge.js` from the "Human Verification" page's inline
+   `window.gokuProps`, `solve_aws_waf_token()` hands them to CapSolver
+   (`AntiAwsWafTask`, or `...ProxyLess` when no proxy — the proxy is passed so
+   the token is solved from the same egress IP, since WAF tokens can be
+   IP-bound), and `apply_waf_token()` injects the returned `aws-waf-token`
+   cookie into the context.
+3. Because the site's own submit button is left stuck on "Please wait ..."
+   after the 405, the retry **reloads** the register page, refills via
+   `fill_register_form()`, and resubmits once — the injected cookie rides
+   along on the new `/sign-up` POST.
+
+`fill_register_form()` (the 4 fields + T&C) was extracted so the initial fill
+and the post-solve refill can't drift. `wait_for_register_outcome()` returning
+`(outcome, msgs)` matters here too — a snackbar/toast is read at detection
+time, before it auto-dismisses.
+
+**Verified**: challenge parsing against the real `gokuProps`, WAF detection,
+proxy formatting, cookie injection, and the no-key path (reports `BLOCKED by
+AWS WAF ... -- set CAPSOLVER_API_KEY in .env to auto-solve it`, no crash).
+**Not yet verified end-to-end** (needs a funded CapSolver key + a real phone
+for the OTP): that CapSolver's token actually satisfies this WAF and the
+resubmit reaches the OTP screen. If the token is rejected, the first things to
+try are passing the `/sign-up` endpoint URL as `websiteURL` instead of the
+page URL, and confirming the solve is routed through the signup proxy.
 
 ## Site-specific notes
 

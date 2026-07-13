@@ -95,8 +95,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import db
 from main import (
     SEL, SHOTS_DIR, SITE_URL,
-    check_phone_taken, click_first_visible, extract_referral_code, gen_account,
-    maybe_bridge_proxy, open_signup_modal, parse_proxy, read_result, stop_bridge,
+    capsolver_key, check_phone_taken, click_first_visible, extract_referral_code,
+    fill_register_form, gen_account, is_waf_captcha, maybe_bridge_proxy,
+    open_signup_modal, parse_proxy, read_result, stop_bridge, submit_register,
     wait_for_otp_outcome, wait_for_register_outcome,
 )
 
@@ -394,54 +395,18 @@ def _blocking_fill_and_register(session, phone):
         return {"ok": False, "message": "Could not open the signup modal (JOIN button).",
                 "shot": str(no_modal_shot)}
 
-    for sel, value in [(SEL["username"], acct["username"]),
-                       (SEL["email"], acct["email"]),
-                       (SEL["password"], acct["password"]),
-                       (SEL["phone"], str(phone))]:
-        field = page.locator(sel)
-        field.click()
-        field.press_sequentially(value, delay=30)
-        field.blur()
-
-    try:
-        cb = page.locator(SEL["terms"])
-        if cb.count() and not cb.is_checked():
-            cb.check(force=True)
-    except Exception:
-        pass
+    fill_register_form(page, acct)
 
     SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     page.screenshot(path=str(SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png"))
 
-    # Capture the register POST's own response so an "unknown" outcome (no
-    # visible message -- e.g. the register endpoint silently blocked) is still
-    # diagnosable. The site's register call is a same-origin POST (spin24star:
-    # /sign-up); everything else fired by the click is noise -- AWS WAF's
-    # token.awswaf.com telemetry beacons and analytics -- which we filter out.
-    # When AWS WAF blocks/challenges the call it answers with an
-    # `x-amzn-waf-action` header (e.g. "captcha"/"challenge"), which is the
-    # single most useful thing to surface, so we grab it explicitly.
-    app_responses = []
-    def _track_resp(resp):
-        try:
-            url = resp.url
-            if resp.request.method != "POST":
-                return
-            if "awswaf.com" in url or "google" in url or "gtag" in url or "analytics" in url:
-                return
-            app_responses.append(resp)
-        except Exception:
-            pass
-    page.on("response", _track_resp)
-
-    page.click(SEL["submit"])
-    outcome, msgs = wait_for_register_outcome(page)
-
-    try:
-        page.remove_listener("response", _track_resp)
-    except Exception:
-        pass
+    # submit_register clicks REGISTER and, if the register POST is AWS WAF
+    # CAPTCHA-blocked and CAPSOLVER_API_KEY is set, solves it (via CapSolver),
+    # injects the token, and resubmits once -- all shared with the CLI. Without
+    # a key it's a plain submit and `captured` still lets us report the block.
+    outcome, msgs, captured = submit_register(page, context, acct, session.site_url,
+                                              proxy=session.proxy)
 
     result_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-result.png"
     page.screenshot(path=str(result_shot))
@@ -452,26 +417,16 @@ def _blocking_fill_and_register(session, phone):
 
     if outcome in ("error", "timeout"):
         message = "Register rejected: " + ("; ".join(msgs) or "unknown error")
-        if not msgs:
-            api_notes = []
-            for resp in app_responses[-3:]:
-                try:
-                    waf = resp.headers.get("x-amzn-waf-action")
-                except Exception:
-                    waf = None
-                if waf:
-                    api_notes.append(f"BLOCKED by AWS WAF (x-amzn-waf-action: {waf}, "
-                                     f"HTTP {resp.status}) on {resp.url.split('?')[0][-50:]}")
-                    continue
-                try:
-                    body = " ".join(resp.text()[:150].split())
-                except Exception:
-                    body = ""
-                api_notes.append(f"{resp.status} {resp.url.split('?')[0][-50:]} {body}".strip())
-            if api_notes:
-                message += " | " + " | ".join(api_notes)
-            elif outcome == "timeout":
-                message += " (no register API call was made -- REGISTER click had no effect)"
+        if not msgs and is_waf_captcha(captured):
+            action = captured.get("action") or "captcha"
+            resp = captured.get("response")
+            status = resp.status if resp else "?"
+            hint = ("" if capsolver_key()
+                    else " -- set CAPSOLVER_API_KEY in .env to auto-solve it")
+            message += (f" | BLOCKED by AWS WAF (x-amzn-waf-action: {action}, "
+                        f"HTTP {status}){hint}")
+        elif not msgs and outcome == "timeout":
+            message += " (no register API call was made -- REGISTER click had no effect)"
         return {"ok": False, "message": message,
                 "shot": str(result_shot)}
 

@@ -36,20 +36,40 @@ Other options:
 """
 import argparse
 import json
+import os
 import random
+import re
 import socket
 import string
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError as PWTimeout
 
 import db
 
+# Load .env so the CLI (not just the bot) picks up CAPSOLVER_API_KEY etc.
+load_dotenv()
+
 SITE_URL = "https://cricmatch247.com?btag=211079"
+
+# CapSolver: solves the AWS WAF CAPTCHA that guards spin24star's register
+# endpoint (see the "AWS WAF CAPTCHA" section in CLAUDE.md). The key is read
+# lazily from the environment (via capsolver_key()) rather than cached at
+# import, so `.env` loaded after import still applies. No key -> the solver is
+# simply skipped and a WAF block is reported as a clean failure, unchanged.
+CAPSOLVER_CREATE_URL = "https://api.capsolver.com/createTask"
+CAPSOLVER_RESULT_URL = "https://api.capsolver.com/getTaskResult"
+
+
+def capsolver_key():
+    return os.environ.get("CAPSOLVER_API_KEY", "").strip()
 
 
 def extract_referral_code(url):
@@ -309,6 +329,209 @@ def open_signup_modal(page):
     return False
 
 
+# ---------------------------------------------------------------------------
+# AWS WAF CAPTCHA solving (CapSolver)
+#
+# spin24star's register POST (/sign-up) is guarded by an AWS WAF CAPTCHA
+# action: the POST comes back HTTP 405 with an `x-amzn-waf-action: captcha`
+# header and a "Human Verification" HTML page whose inline `window.gokuProps`
+# carries the challenge key/iv/context. We hand those to CapSolver, get back a
+# solved `aws-waf-token`, inject it as a cookie, and resubmit -- exactly the
+# flow the site's own captcha.js would do after a human solved the puzzle.
+# ---------------------------------------------------------------------------
+
+def parse_aws_waf_challenge(body):
+    """Pull the AWS WAF challenge params out of a 'Human Verification' page.
+    Returns {"key","iv","context","challenge_js"} or None if `body` isn't one
+    (e.g. cricmatch, which never serves this)."""
+    if not body or "gokuProps" not in body:
+        return None
+    m = re.search(r"window\.gokuProps\s*=\s*(\{.*?\})\s*;", body, re.DOTALL)
+    if not m:
+        return None
+    try:
+        props = json.loads(m.group(1))
+    except (ValueError, TypeError):
+        return None
+    if not props.get("key") or not props.get("context"):
+        return None
+    js = re.search(r'src="(https://[^"]*challenge\.js)"', body)
+    return {"key": props.get("key"), "iv": props.get("iv"),
+            "context": props.get("context"),
+            "challenge_js": js.group(1) if js else None}
+
+
+def _capsolver_proxy(proxy_str):
+    """Convert our proxy string into CapSolver's `scheme://user:pass@host:port`
+    form so the token is solved from the same egress IP the signup will use
+    (AWS WAF tokens can be IP-bound). Returns None if no proxy."""
+    if not proxy_str:
+        return None
+    conf = parse_proxy(proxy_str)
+    scheme, hostport = conf["server"].split("://", 1)
+    if scheme not in ("http", "https", "socks5"):
+        scheme = "http"
+    user, pw = conf.get("username"), conf.get("password")
+    if user and pw:
+        return f"{scheme}://{user}:{pw}@{hostport}"
+    return f"{scheme}://{hostport}"
+
+
+def _capsolver_post(url, payload, timeout=30):
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data,
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def solve_aws_waf_token(website_url, challenge, api_key=None, proxy=None, timeout=180):
+    """Solve an AWS WAF CAPTCHA via CapSolver and return the aws-waf-token
+    string. Raises RuntimeError on any failure (no key, API error, timeout)."""
+    api_key = api_key or capsolver_key()
+    if not api_key:
+        raise RuntimeError("CAPSOLVER_API_KEY not set")
+    task = {
+        "type": "AntiAwsWafTaskProxyLess",
+        "websiteURL": website_url,
+        "awsKey": challenge["key"],
+        "awsIv": challenge.get("iv"),
+        "awsContext": challenge["context"],
+    }
+    if challenge.get("challenge_js"):
+        task["awsChallengeJS"] = challenge["challenge_js"]
+    cap_proxy = _capsolver_proxy(proxy)
+    if cap_proxy:
+        task["type"] = "AntiAwsWafTask"
+        task["proxy"] = cap_proxy
+
+    created = _capsolver_post(CAPSOLVER_CREATE_URL, {"clientKey": api_key, "task": task})
+    if created.get("errorId"):
+        raise RuntimeError(f"createTask: {created.get('errorCode')} "
+                           f"{created.get('errorDescription')}")
+    task_id = created.get("taskId")
+    if not task_id:
+        raise RuntimeError(f"createTask returned no taskId: {created}")
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(3)
+        res = _capsolver_post(CAPSOLVER_RESULT_URL, {"clientKey": api_key, "taskId": task_id})
+        if res.get("errorId"):
+            raise RuntimeError(f"getTaskResult: {res.get('errorCode')} "
+                               f"{res.get('errorDescription')}")
+        if res.get("status") == "ready":
+            sol = res.get("solution") or {}
+            token = sol.get("cookie") or sol.get("token")
+            if not token:
+                raise RuntimeError(f"solution had no token: {sol}")
+            return token
+    raise RuntimeError("solve timed out")
+
+
+def apply_waf_token(context, website_url, token):
+    """Inject a solved aws-waf-token into a BrowserContext so the next request
+    to the site carries it."""
+    host = urlsplit(website_url).hostname
+    context.add_cookies([{"name": "aws-waf-token", "value": token,
+                          "domain": host, "path": "/"}])
+
+
+def is_waf_captcha(captured):
+    """True if the captured register response was an AWS WAF CAPTCHA block."""
+    action = (captured.get("action") or "").lower()
+    if action in ("captcha", "challenge"):
+        return True
+    return "gokuProps" in (captured.get("body") or "")
+
+
+def fill_register_form(page, acct):
+    """Fill the 4 register fields and ensure the T&C box is checked. Assumes
+    the register form/modal is already open. Shared by the initial fill and the
+    post-WAF-solve refill so they can't drift."""
+    for sel, value in [(SEL["username"], acct["username"]),
+                       (SEL["email"], acct["email"]),
+                       (SEL["password"], acct["password"]),
+                       (SEL["phone"], str(acct["phone"]))]:
+        field = page.locator(sel)
+        field.click()
+        field.press_sequentially(value, delay=30)
+        field.blur()
+    try:
+        cb = page.locator(SEL["terms"])
+        if cb.count() and not cb.is_checked():
+            cb.check(force=True)
+    except Exception:
+        pass
+
+
+def click_register_and_wait(page):
+    """Click REGISTER, capturing the register POST's response (for AWS WAF
+    detection), and wait for the outcome. Returns (outcome, msgs, captured),
+    where captured has {"response","action","body"} for the register call
+    (empty on sites like cricmatch that don't route through /sign-up + WAF)."""
+    captured = {}
+
+    def on_resp(resp):
+        try:
+            if resp.request.method != "POST":
+                return
+            url = resp.url
+            if "awswaf.com" in url:  # WAF telemetry beacons -- noise
+                return
+            action = resp.headers.get("x-amzn-waf-action")
+            if action or url.rstrip("/").endswith("/sign-up"):
+                captured["response"] = resp
+                captured["action"] = action
+                try:
+                    captured["body"] = resp.text()
+                except Exception:
+                    captured["body"] = ""
+        except Exception:
+            pass
+
+    page.on("response", on_resp)
+    try:
+        page.click(SEL["submit"])
+        outcome, msgs = wait_for_register_outcome(page)
+    finally:
+        try:
+            page.remove_listener("response", on_resp)
+        except Exception:
+            pass
+    return outcome, msgs, captured
+
+
+def submit_register(page, context, acct, site_url, proxy=None):
+    """Click REGISTER and, if the register POST is AWS WAF CAPTCHA-blocked and a
+    CapSolver key is configured, solve it, inject the token, reload+refill, and
+    resubmit once. Returns (outcome, msgs, captured). With no key (or a
+    non-WAF site) this is just a plain submit, so cricmatch is unaffected."""
+    outcome, msgs, captured = click_register_and_wait(page)
+
+    if outcome in ("error", "timeout") and is_waf_captcha(captured) and capsolver_key():
+        try:
+            challenge = parse_aws_waf_challenge(captured.get("body", ""))
+            if not challenge:
+                raise RuntimeError("could not parse WAF challenge params")
+            token = solve_aws_waf_token(site_url or SITE_URL, challenge, proxy=proxy)
+            apply_waf_token(context, site_url or SITE_URL, token)
+        except (RuntimeError, urllib.error.URLError) as e:
+            return outcome, [f"AWS WAF CAPTCHA solve failed: {e}"], captured
+
+        # Token injected -- the stuck "Please wait ..." button won't re-fire, so
+        # reload the register page fresh, refill, and resubmit. The cookie now
+        # rides along on the new /sign-up POST.
+        page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(4000)
+        if not open_signup_modal(page):
+            return "timeout", ["WAF solved but could not reopen the register form"], captured
+        fill_register_form(page, acct)
+        outcome, msgs, captured = click_register_and_wait(page)
+
+    return outcome, msgs, captured
+
+
 def read_result(page):
     """Best-effort read of any toast / validation message shown after submit."""
     messages = []
@@ -492,12 +715,13 @@ def enter_otp(page, acct, result):
     return result
 
 
-def signup_once(page, acct, submit=True, interactive=False, site_url=None):
+def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy=None):
     """Run one signup attempt. Returns a result dict.
 
     If the site rejects the phone number as already registered and
     `interactive` is True, prompts for a different phone number and retries
-    (up to 5 times) instead of failing outright."""
+    (up to 5 times) instead of failing outright. `proxy` (raw string) is only
+    used to route the AWS WAF CAPTCHA solve through the same egress IP."""
     result = {"account": acct.get("username", "?"), "ok": None, "messages": [], "shot": None}
 
     page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
@@ -514,23 +738,9 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None):
         return result
 
     # Type (not fill) so the site's live validation/keyup handlers fire; blur
-    # each field afterward to trigger any on-blur checks.
-    for sel, value in [(SEL["username"], acct["username"]),
-                       (SEL["email"], acct["email"]),
-                       (SEL["password"], acct["password"]),
-                       (SEL["phone"], str(acct["phone"]))]:
-        field = page.locator(sel)
-        field.click()
-        field.press_sequentially(value, delay=30)
-        field.blur()
-
-    # Ensure the "I'm over 18 + T&C" box is checked.
-    try:
-        cb = page.locator(SEL["terms"])
-        if cb.count() and not cb.is_checked():
-            cb.check(force=True)
-    except Exception:
-        pass
+    # each field afterward to trigger any on-blur checks. Also ensures the
+    # "I'm over 18 + T&C" box is checked.
+    fill_register_form(page, acct)
 
     SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -543,8 +753,7 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None):
         result["shot"] = str(filled_shot)
         return result
 
-    page.click(SEL["submit"])
-    outcome, msgs = wait_for_register_outcome(page)
+    outcome, msgs, _ = submit_register(page, page.context, acct, site_url, proxy=proxy)
 
     attempts = 0
     while outcome == "phone_taken" and interactive and attempts < 5:
@@ -683,7 +892,7 @@ def main():
             try:
                 res = signup_once(page, acct, submit=not args.no_submit,
                                   interactive=not args.account_file,
-                                  site_url=acct.get("url"))
+                                  site_url=acct.get("url"), proxy=acct.get("proxy"))
             except PWTimeout as e:
                 res = {"account": acct.get("username", "?"), "ok": False,
                        "messages": [f"Timeout: {str(e)[:120]}"], "shot": None}
