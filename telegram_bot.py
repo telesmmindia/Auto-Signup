@@ -915,14 +915,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if not result["ok"]:
+            # Failure: just a plain confirmation, no photo/caption/CSV -- the
+            # real error is logged to the console and stored in accounts.db
+            # (notes + screenshot columns), retrievable via /list or /export,
+            # rather than pushed into the chat (which would mean sending the
+            # account's username/email/password/phone/proxy on every failure).
             logger.error(f"#{session.row_id} {session.acct['username']}: FAILED -- "
                          f"{result['message']} (screenshot: {result.get('shot')})")
             db.update_status(conn, session.row_id, "failed", notes=result["message"],
                              screenshot=result.get("shot"))
-            acct = dict(session.acct)
-            acct.update(status="failed", notes=f"Signup failed: {result['message']}")
-            await send_result_photo(update, result.get("shot"), build_caption(acct))
-            await send_csv(update, f"{acct['username']}.csv", row_id=session.row_id)
+            await update.message.reply_text(f"Signup failed. (#{session.row_id})")
             await end_session(session)
             del sessions[chat_id]
             if chat_id in looping_chats:
@@ -958,10 +960,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # /export later, but aren't pushed into the chat automatically.
             await update.message.reply_text(f"Signup successful! (#{session.row_id})")
         else:
-            acct = dict(session.acct)
-            acct.update(status=status, notes=f"Verification failed: {result['message']}")
-            await send_result_photo(update, result.get("shot"), build_caption(acct))
-            await send_csv(update, f"{session.acct['username']}.csv", row_id=session.row_id)
+            # Failure: same policy as a register failure above -- no
+            # photo/caption/CSV in chat, error logged + stored in accounts.db.
+            await update.message.reply_text(f"Signup failed. (#{session.row_id})")
 
         await end_session(session)
         del sessions[chat_id]

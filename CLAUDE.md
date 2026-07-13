@@ -294,18 +294,21 @@ produces). `send_result_photo()` sends the screenshot file as a photo with
 that caption, falling back to a plain text message if the file is missing
 (e.g. a very old row from before a given code path started saving one).
 
-**Success and failure are handled differently on purpose.** A *failed*
-signup (registration failure, or OTP rejected/timed out) still goes through
-`send_result_photo()` **and** `send_csv()` — the screenshot and the full
-credentials are the actual diagnostic value there. A *successful* signup gets
-neither: just a plain `f"Signup successful! (#{session.row_id})"` reply, with
-no photo, no caption, and no CSV pushed into the chat — the account's
-credentials stay in `accounts.db` and are retrievable later via `/list` or
-`/export` (or `/photo` for the screenshot, though a working-form screenshot
-adds little). This is deliberate: the admin explicitly asked for successful
-signups to not spam the chat with details, only a bare confirmation. Don't
-reintroduce `send_result_photo()`/`send_csv()` on the success path without
-checking this was a deliberate choice, not an oversight.
+**Success and failure are both terse in chat, by design.** Neither outcome
+pushes `send_result_photo()`/`build_caption()`/`send_csv()` into
+`handle_message()` — a signup gets exactly one of `f"Signup successful!
+(#{row_id})"` or `f"Signup failed. (#{row_id})"`, nothing else. The failure's
+real reason (register-rejected message, WAF block, OTP error, etc.) is
+**not** sent to chat — it's `logger.error()`'d to the console and stored in
+`accounts.db`'s `notes`/`screenshot` columns via `db.update_status()`, same as
+before; only the push-to-chat step was removed. This is deliberate (the admin
+explicitly asked for it): credentials shouldn't land in the chat on every
+failed attempt either, not just on success. `send_result_photo()` /
+`build_caption()` / `send_csv()` still exist and are still used, just not
+here — `/photo <id>` and `/export` are the master-only, explicitly-requested
+ways to pull a screenshot+caption or a CSV for any stored account, success or
+failure. Don't reintroduce them in `handle_message()` without checking this
+was a deliberate choice, not an oversight.
 
 `_blocking_fill_and_register()` takes a `result.png` screenshot right after
 the REGISTER click and returns its path as `"shot"` in every failure branch
