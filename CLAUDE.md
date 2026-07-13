@@ -460,6 +460,21 @@ Two files: `main.py` (Playwright driver, sync API) and `db.py` (SQLite storage).
   actual outcome (OTP screen / phone-taken error / any toast). These check for
   concrete DOM state rather than a generic readiness proxy, which is why they
   were safe to convert where the post-`goto` sleep wasn't.
+- `wait_for_register_outcome()` returns a `(outcome, messages)` **tuple** —
+  `messages` is the `read_result()` snapshot captured the instant the error
+  was spotted. Callers must use that instead of calling `read_result()` again
+  afterward: snackbar toasts (spin24star) auto-dismiss, so a re-read moments
+  later can come back empty and turn a real site message into
+  "unknown error". Both `signup_once()` and the bot's
+  `_blocking_fill_and_register()` were bitten by exactly this before the
+  signature change.
+- If a REGISTER rejection still ends with no visible message, the bot's
+  `_blocking_fill_and_register()` appends the POST responses fired by the
+  click (`status`, URL, first 150 chars of body) to the failure notes via a
+  `page.on("response")` listener — that's the diagnostic for "the register
+  API itself was blocked/hung" (e.g. a WAF-flagged proxy IP), which no
+  screenshot can show. If *no* POST fired at all, the notes say the REGISTER
+  click had no effect.
 - `read_result()` scrapes toast/validation text after submit; success detection
   is a heuristic (absence of words like "already"/"invalid"), so always confirm
   against the `shots/*-result.png` screenshot.

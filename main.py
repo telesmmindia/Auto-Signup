@@ -356,20 +356,26 @@ def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
     instead of blindly sleeping: the OTP screen, the phone-taken error, or any
     other toast/inline error. Measured live: phone-taken typically renders in
     under 0.5s, so polling beats a flat sleep on the common paths without
-    lowering the ceiling for slow ones."""
+    lowering the ceiling for slow ones.
+
+    Returns (outcome, messages): messages is the read_result() snapshot taken
+    the instant the error was spotted. Callers must use it rather than calling
+    read_result() again -- snackbar-style toasts (spin24star) auto-dismiss, so
+    a re-read moments later can come back empty ("unknown error")."""
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         if check_phone_taken(page):
-            return "phone_taken"
+            return "phone_taken", []
         try:
             if page.locator(SEL["otp_digits"]).first.is_visible():
-                return "otp"
+                return "otp", []
         except Exception:
             pass
-        if read_result(page):
-            return "error"
+        msgs = read_result(page)
+        if msgs:
+            return "error", msgs
         page.wait_for_timeout(poll_ms)
-    return "timeout"
+    return "timeout", []
 
 
 def wait_for_otp_outcome(page, timeout_ms=10000, poll_ms=250):
@@ -538,7 +544,7 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None):
         return result
 
     page.click(SEL["submit"])
-    outcome = wait_for_register_outcome(page)
+    outcome, msgs = wait_for_register_outcome(page)
 
     attempts = 0
     while outcome == "phone_taken" and interactive and attempts < 5:
@@ -552,9 +558,9 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None):
         phone_field.press_sequentially(str(acct["phone"]), delay=30)
         phone_field.blur()
         page.click(SEL["submit"])
-        outcome = wait_for_register_outcome(page)
+        outcome, msgs = wait_for_register_outcome(page)
 
-    msgs = read_result(page)
+    msgs = msgs or read_result(page)
     result_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-result.png"
     page.screenshot(path=str(result_shot))
     result["shot"] = str(result_shot)

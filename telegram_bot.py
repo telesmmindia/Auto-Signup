@@ -414,8 +414,26 @@ def _blocking_fill_and_register(session, phone):
     stamp = time.strftime("%Y%m%d-%H%M%S")
     page.screenshot(path=str(SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png"))
 
+    # Capture POST responses fired by the REGISTER click: if the outcome ends
+    # up "unknown" (no visible message -- e.g. the register API blocked/hung
+    # through a flagged proxy, or a snackbar vanished before the screenshot),
+    # the API's own status/body is the only diagnostic left.
+    post_responses = []
+    def _track_post(resp):
+        try:
+            if resp.request.method == "POST":
+                post_responses.append(resp)
+        except Exception:
+            pass
+    page.on("response", _track_post)
+
     page.click(SEL["submit"])
-    outcome = wait_for_register_outcome(page)
+    outcome, msgs = wait_for_register_outcome(page)
+
+    try:
+        page.remove_listener("response", _track_post)
+    except Exception:
+        pass
 
     result_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-result.png"
     page.screenshot(path=str(result_shot))
@@ -425,8 +443,20 @@ def _blocking_fill_and_register(session, phone):
                 "shot": str(result_shot)}
 
     if outcome in ("error", "timeout"):
-        msgs = read_result(page)
-        return {"ok": False, "message": "Register rejected: " + ("; ".join(msgs) or "unknown error"),
+        message = "Register rejected: " + ("; ".join(msgs) or "unknown error")
+        if not msgs:
+            api_notes = []
+            for resp in post_responses[-3:]:
+                try:
+                    body = " ".join(resp.text()[:150].split())
+                except Exception:
+                    body = ""
+                api_notes.append(f"{resp.status} {resp.url.split('?')[0][-60:]} {body}".strip())
+            if api_notes:
+                message += " | API: " + " | ".join(api_notes)
+            elif outcome == "timeout":
+                message += " (no API call was made -- REGISTER click had no effect)"
+        return {"ok": False, "message": message,
                 "shot": str(result_shot)}
 
     digits = page.locator(SEL["otp_digits"]).count()
