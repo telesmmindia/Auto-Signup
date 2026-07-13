@@ -179,6 +179,58 @@ cp .env.example .env
 `telegram_bot.py` loads `.env` via `python-dotenv` at import time; `.env` is
 gitignored so the token (and `MASTER_ADMIN_ID`) never land in a commit.
 
+### Running one bot per site
+
+`telegram_bot.py` supports an optional `--env <path>` CLI flag so the same
+script can run as two (or more) independent bot processes, one per site,
+instead of one bot juggling both via `/seturl`. This gives each site its own
+bot identity/token in Telegram and, more importantly, its own worker
+thread/browser — signups for different sites no longer serialize on the
+single shared `_pw_executor`.
+
+```
+cp .env.example .env.cricmatch      # or .env.cricmatch.example -> .env.cricmatch
+cp .env.example .env.spin24star
+# edit each: a DIFFERENT TELEGRAM_BOT_TOKEN (from a second @BotFather bot),
+# BOT_SITE_URL for that site, and distinct ADMINS_FILE / SETTINGS_FILE paths
+.venv/bin/python telegram_bot.py --env .env.cricmatch
+.venv/bin/python telegram_bot.py --env .env.spin24star   # separate terminal/tmux pane
+```
+
+`--env` is parsed from `sys.argv` at module level, before
+`load_dotenv(_env_file, override=True)` runs. The `override=True` is load-
+bearing, not decorative: `main.py` (which `telegram_bot.py` imports from)
+already runs its own bare `load_dotenv()` as an import-time side effect,
+which happens *before* `telegram_bot.py`'s own `load_dotenv()` call in
+source order. python-dotenv defaults to `override=False` (first load wins),
+so without the explicit `override=True` a real `.env` sitting in the repo
+root would silently win over `--env .env.spin24star` for every key both
+files define — this was caught live by importing the module with a `--env`
+pointing at a throwaway file and asserting `BOT_TOKEN` came from it, not from
+the repo's real `.env`.
+
+Two new env vars support the split, both optional and inert for the
+single-bot case:
+- `BOT_SITE_URL` — locks this instance's default site (falls back to
+  `main.SITE_URL` if unset). Every place the bot used to fall back to the
+  bare `SITE_URL` import now falls back to this instead (`/url`, `/clearurl`,
+  `/btag`, the OTP-flow `page.goto()`, and referral-code extraction) — so
+  `/clearurl` on the spin24star instance resets to spin24star, not
+  cricmatch247. `/seturl` still works per-instance if you want to
+  temporarily point one bot elsewhere; `BOT_SITE_URL` only changes the
+  *default*, it doesn't lock the door.
+- `ADMINS_FILE` / `SETTINGS_FILE` — override the default `admins.json` /
+  `bot_settings.json` paths. Required in practice for a two-process setup:
+  both files are read once at import and rewritten via `save_admin_ids()` /
+  `save_settings()`, so two processes sharing the same filename would
+  clobber each other's admin list / proxy / password / URL on every write.
+  Give each instance its own file (seed both with the same admin IDs via
+  `/addadmin` on each bot if the same people should run both — there's no
+  code-level sharing, just matching content by convention). `accounts.db`
+  itself is NOT split this way — it's intentionally shared across instances
+  since its `url`/`referral_code` columns already distinguish rows by site,
+  so `/list`/`/stats`/`/export` give combined history by default.
+
 ### Roles
 
 Two roles, checked via `is_master(user_id)` / `is_admin(user_id)` (master

@@ -5,9 +5,13 @@ accounts.json
 credentials.log
 accounts.db
 admins.json
+admins.*.json
 bot_settings.json
+bot_settings.*.json
 proxy_settings.json
 url_settings.json
 .env
+.env.*
+!.env.*.example
 __pycache__/
 *.pyc

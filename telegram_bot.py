@@ -75,12 +75,34 @@ every conversation. All Playwright calls run on one dedicated worker thread
 (required by Playwright's sync API), so concurrent /newacc flows from
 different chats are serialized rather than run in parallel; fine for a
 personal QA bot, but worth knowing if several people use it at once.
+
+Running one bot per site:
+    This same script can run as two independent processes, one per site, so
+    signups for different sites don't serialize on the same worker thread and
+    each site gets its own bot identity/token in Telegram. Point each process
+    at its own env file with --env, e.g.:
+
+        cp .env.example .env.cricmatch
+        cp .env.example .env.spin24star
+        # edit each: a DIFFERENT TELEGRAM_BOT_TOKEN (from a second @BotFather
+        # bot), BOT_SITE_URL for that site, and distinct ADMINS_FILE /
+        # SETTINGS_FILE paths so the two processes never write the same file
+        .venv/bin/python telegram_bot.py --env .env.cricmatch
+        .venv/bin/python telegram_bot.py --env .env.spin24star   # separate terminal/tmux pane
+
+    MASTER_ADMIN_ID can be the same value in both files (one operator running
+    both bots); admin_ids are still separate files per instance, just seed
+    them with the same IDs via /addadmin on each bot if you want the same
+    people able to run both. accounts.db is shared (its url/referral_code
+    columns already distinguish rows by site), so /list, /stats, and /export
+    give you combined history across both bots by default.
 """
 import asyncio
 import functools
 import json
 import logging
 import os
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -104,12 +126,30 @@ from main import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# --env <path> selects which env file to load, so the same script can run as
+# two (or more) independent bot processes -- one per site -- each with its own
+# token/admins/settings. Defaults to ".env" for the single-bot case.
+_env_file = ".env"
+if "--env" in sys.argv:
+    _idx = sys.argv.index("--env")
+    if _idx + 1 < len(sys.argv):
+        _env_file = sys.argv[_idx + 1]
+# override=True: main.py (imported above) already ran its own bare
+# load_dotenv() as an import-time side effect, which would otherwise win over
+# an explicit --env file for any key both files define (dotenv's default is
+# override=False, i.e. first load wins).
+load_dotenv(_env_file, override=True)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 # The one, fixed top-level role. Set via .env, not changeable from the bot
 # itself -- a compromised admin session should never be able to promote
 # itself to master.
 MASTER_ADMIN_ID = os.environ.get("MASTER_ADMIN_ID")
+# This instance's home site -- falls back to main.SITE_URL if unset, so a
+# single-bot setup with a plain ".env" behaves exactly as before. Every
+# fallback that used to read the bare SITE_URL import now reads this instead,
+# so /clearurl and the default context.goto() target THIS bot's own site, not
+# necessarily main.py's cricmatch247 default.
+BOT_SITE_URL = os.environ.get("BOT_SITE_URL") or SITE_URL
 
 # Shared across handlers; all handler coroutines run on the same asyncio event
 # loop thread, so one sqlite3 connection is safe to reuse.
@@ -123,10 +163,15 @@ looping_chats = set()
 
 # Telegram user IDs (str) the master admin has authorized, persisted across
 # restarts. Gitignored -- this is access-control state, not project content.
-ADMINS_FILE = Path("admins.json")
-# Proxy/URL are GLOBAL (master-controlled, apply to every admin's signups),
-# not per-chat -- {"proxy": "...", "url": "..."}.
-SETTINGS_FILE = Path("bot_settings.json")
+# Overridable via ADMINS_FILE in .env so two bot processes running out of the
+# same directory (one per site) don't clobber each other's admin list on
+# every write -- each instance gets its own file, even if seeded with the
+# same IDs to keep admin access "shared" in practice.
+ADMINS_FILE = Path(os.environ.get("ADMINS_FILE", "admins.json"))
+# Proxy/URL are GLOBAL PER BOT INSTANCE (master-controlled, apply to every
+# admin's signups on this bot), not per-chat -- {"proxy": "...", "url": "..."}.
+# Overridable via SETTINGS_FILE for the same reason as ADMINS_FILE above.
+SETTINGS_FILE = Path(os.environ.get("SETTINGS_FILE", "bot_settings.json"))
 
 
 def _load_json(path, default):
@@ -307,7 +352,7 @@ class Session:
         self.stage = None  # "await_phone" | "await_otp"
         self.proxy = None  # raw proxy string, or None for a direct connection
         self.bridge_proc = None  # local pproxy process, if the proxy needed one
-        self.site_url = None  # site URL for this signup (falls back to SITE_URL)
+        self.site_url = None  # site URL for this signup (falls back to BOT_SITE_URL)
 
 
 def _valid_phone(text):
@@ -382,7 +427,7 @@ def _blocking_fill_and_register(session, phone):
 
     acct = session.acct
     try:
-        page.goto(session.site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        page.goto(session.site_url or BOT_SITE_URL, wait_until="domcontentloaded", timeout=60000)
     except PWError as e:
         return {"ok": False, "message": f"Couldn't load the site (check the proxy?): {str(e)[:200]}"}
     page.wait_for_timeout(4000)
@@ -636,7 +681,7 @@ async def seturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @require_role(is_master)
 async def show_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = global_settings.get("url")
-    await update.message.reply_text(f"Current global site URL: {url or SITE_URL}"
+    await update.message.reply_text(f"Current global site URL: {url or BOT_SITE_URL}"
                                     + ("" if url else " (default)"))
 
 
@@ -644,7 +689,7 @@ async def show_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clearurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if global_settings.pop("url", None) is not None:
         save_settings()
-        await update.message.reply_text(f"Site URL reset to default: {SITE_URL}")
+        await update.message.reply_text(f"Site URL reset to default: {BOT_SITE_URL}")
     else:
         await update.message.reply_text("No custom site URL was set.")
 
@@ -652,9 +697,9 @@ async def clearurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @require_role(is_master)
 async def btag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Set (or show) just the btag affiliate/referral code, keeping whatever
-    scheme/host/path the global site URL (or the SITE_URL default) already
+    scheme/host/path the global site URL (or this bot's own default) already
     has -- so the master doesn't have to retype the whole URL to swap tags."""
-    current_url = global_settings.get("url") or SITE_URL
+    current_url = global_settings.get("url") or BOT_SITE_URL
     if not context.args:
         code = extract_referral_code(current_url)
         await update.message.reply_text(
@@ -894,12 +939,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.acct["phone"] = text
         session.acct["proxy"] = session.proxy
         session.acct["url"] = session.site_url
-        session.acct["referral_code"] = extract_referral_code(session.site_url or SITE_URL)
+        session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
         session.row_id = db.insert_account(conn, session.acct)
         await update.message.reply_text("Submitting the signup form and requesting an OTP, one moment...")
 
         logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
-                    f"(phone {text}, url {session.site_url or SITE_URL}, "
+                    f"(phone {text}, url {session.site_url or BOT_SITE_URL}, "
                     f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'})")
         result = await loop.run_in_executor(
             _pw_executor, _blocking_fill_and_register, session, text)
@@ -1097,7 +1142,8 @@ def main():
     logger.info("Warming up the shared browser...")
     _pw_executor.submit(_blocking_ensure_browser).result()
 
-    logger.info("Bot starting...")
+    logger.info(f"Bot starting... env={_env_file} site={BOT_SITE_URL} "
+                f"admins_file={ADMINS_FILE} settings_file={SETTINGS_FILE}")
     try:
         app.run_polling()
     finally:
