@@ -75,26 +75,46 @@ LAST_NAMES = ["sharma", "verma", "gupta", "singh", "kumar", "patel", "reddy",
 EMAIL_DOMAIN = "gmail.com"
 
 # Selectors captured from the live signup modal.
+# Selectors cover BOTH supported platforms via comma-joined CSS groups: the
+# original cricmatch247.com markup and the "Khelo" white-label platform
+# (spin24star.com -- ids like #userNameKhelo, verified live via
+# inspect_form.py --url). The two platforms' ids/classes never coexist on one
+# page, so each group resolves to exactly one element per site and strict-mode
+# locators stay happy.
 SEL = {
     "open_modal": [".registerUserData", "button.headerjoinBtn", "button.cls_reg_btn", ".join__btn"],
+    # Khelo platform: REGISTER is a header button (onclick=reg_page()) that
+    # navigates to the register page; several copies exist in the DOM and only
+    # one is visible, so this is handled separately in open_signup_modal().
+    "open_modal_khelo": "button.rj__join_now",
     "close_popup": [".mnPopupClose", ".pgSoftClsBtn", ".support_popup_close",
-                    ".areSurecancelBtn", "button:has-text('Close')"],
-    "username": "#userNameid",
-    "email": "#userEmailid",
-    "password": "#pass_log_id",
-    "phone": "#phoneNumber",
+                    ".areSurecancelBtn", "button:has-text('Close')",
+                    # Khelo (spin24star): full-screen SPRIBE/aviator intro
+                    # walkthrough, dismissed via its "skip >>" control.
+                    ".skip_right_img"],
+    "username": "#userNameid, #userNameKhelo",
+    "email": "#userEmailid, #emailKhelo",
+    "password": "#pass_log_id, #passwordKhelo",
+    "phone": "#phoneNumber, #phoneKhelo",
+    # Khelo's register form has no T&C checkbox; the fill code already skips
+    # the checkbox when this matches nothing.
     "terms": "#remChck2",
-    "submit": "button.cls_register_new",
+    "submit": "button.cls_register_new, button#signUpButtonKhelo",
     # Inline "The mobile number has already been taken." error (a bare <li>
     # inside this <ul> -- NOT caught by the generic toast/.error_msg scraper).
+    # cricmatch-specific; on Khelo sites a taken phone surfaces (if at all)
+    # through read_result()'s generic toast/alert scrape instead.
     "phone_taken_error": ".err_phone",
-    # Signup OTP screen (distinct from the "Login with OTP" widget).
+    # Signup OTP screen (distinct from the "Login with OTP" widget -- both
+    # platforms have separate login-OTP inputs that must NOT be matched:
+    # input.otp__digit on cricmatch, input.otpNumberkhelo on Khelo).
     "otp_popup": ".signup_otp_popup, .otpRegisterForm",
-    "otp_digits": "input.otp__digit_signup",
+    "otp_digits": "input.otp__digit_signup, input.regOtpKhelo1",
     # Ordered candidates for the signup "VERIFY" button; click the first VISIBLE
     # one (the page also has a hidden login-OTP verify button).
     "otp_verify": ["a.get_user_otp", ".vf_otpBtn a", ".vf_num_otpSec a.mb-button",
-                   ".signup_otp_popup a:has-text('Verify')"],
+                   ".signup_otp_popup a:has-text('Verify')",
+                   "button.submitRegOtpMain"],
     "otp_error": ".otp_error",
 }
 
@@ -253,8 +273,32 @@ def dismiss_popups(page):
 
 
 def open_signup_modal(page):
-    """Click JOIN and wait for the register form to appear."""
+    """Click JOIN/REGISTER and wait for the register form to appear."""
     dismiss_popups(page)
+
+    # Already showing? (Khelo sites open the form directly at /?reg=1.)
+    try:
+        if page.locator(SEL["username"]).first.is_visible():
+            return True
+    except Exception:
+        pass
+
+    # Khelo platform (spin24star): several REGISTER buttons in the DOM, only
+    # one visible; a game section overlays it, so the click must be forced --
+    # a plain click retries forever on "subtree intercepts pointer events".
+    khelo = page.locator(SEL["open_modal_khelo"])
+    if khelo.count():
+        for i in range(khelo.count()):
+            btn = khelo.nth(i)
+            try:
+                if btn.is_visible():
+                    btn.click(timeout=4000, force=True)
+                    page.wait_for_selector(SEL["username"], state="visible", timeout=8000)
+                    return True
+            except Exception:
+                continue
+        return False
+
     for sel in SEL["open_modal"]:
         try:
             page.locator(sel).first.click(timeout=4000, force=True)

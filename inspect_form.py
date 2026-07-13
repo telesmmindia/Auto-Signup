@@ -1,10 +1,17 @@
-"""One-off inspector: open the site, click JOIN, dump the signup modal's fields."""
+"""One-off inspector: open the site, click JOIN, dump the signup modal's fields.
+
+Usage: python inspect_form.py [url]   (defaults to cricmatch247.com)
+"""
+import sys
+
 from playwright.sync_api import sync_playwright
+
+URL = sys.argv[1] if len(sys.argv) > 1 else "https://cricmatch247.com/"
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     page = browser.new_page()
-    page.goto("https://cricmatch247.com/", wait_until="domcontentloaded", timeout=60000)
+    page.goto(URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(5000)
 
     # Dismiss any promo / support popups first
@@ -23,7 +30,7 @@ with sync_playwright() as p:
     # Click the JOIN / register button (force past any overlay)
     clicked = False
     for sel in ["button.headerjoinBtn", "button.cls_reg_btn", ".join__btn",
-                ".registerUserData", "text=JOIN"]:
+                ".registerUserData", "button.rj__join_now", "text=JOIN"]:
         try:
             page.locator(sel).first.click(timeout=4000, force=True)
             clicked = True
