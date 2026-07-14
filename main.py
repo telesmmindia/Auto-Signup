@@ -596,6 +596,16 @@ def check_phone_taken(page):
     return None
 
 
+def _looks_like_otp_sent(msgs):
+    """True for a benign 'OTP has been sent' style toast, as opposed to an
+    actual rejection. Confirmed live on cricmatch: this toast can render
+    before the OTP digit boxes do, so catching it here (and continuing to
+    poll for the real OTP screen) avoids misreading a success message as
+    'Register rejected: OTP has been sent.'"""
+    joined = " ".join(msgs).lower()
+    return "otp" in joined and "sent" in joined
+
+
 def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
     """After clicking REGISTER, poll for whichever outcome shows up first
     instead of blindly sleeping: the OTP screen, the phone-taken error, or any
@@ -617,7 +627,7 @@ def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
         except Exception:
             pass
         msgs = read_result(page)
-        if msgs:
+        if msgs and not _looks_like_otp_sent(msgs):
             return "error", msgs
         page.wait_for_timeout(poll_ms)
     return "timeout", []

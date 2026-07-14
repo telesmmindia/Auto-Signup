@@ -150,16 +150,31 @@ MASTER_ADMIN_ID = os.environ.get("MASTER_ADMIN_ID")
 # so /clearurl and the default context.goto() target THIS bot's own site, not
 # necessarily main.py's cricmatch247 default.
 BOT_SITE_URL = os.environ.get("BOT_SITE_URL") or SITE_URL
+# How many signups this bot instance can run at once. Each slot is its own
+# Chromium process + dedicated worker thread (see the worker-pool comment
+# below) -- raising this increases real request concurrency against the
+# target site, so it should track how many *distinct* proxies/IPs are
+# actually available, not just "more is faster". Defaults to 1 (old
+# single-worker behavior) if unset.
+BOT_CONCURRENCY = max(1, int(os.environ.get("BOT_CONCURRENCY", "1")))
 
 # Shared across handlers; all handler coroutines run on the same asyncio event
 # loop thread, so one sqlite3 connection is safe to reuse.
 conn = db.get_connection()
 
-# chat_id -> Session, for signups currently in progress.
+# chat_id -> {sub_id: Session}, for signups currently in progress. A chat can
+# run several signups at once (see /newacc <n>) -- each gets its own sub_id
+# (1, 2, 3, ...) so replies can be routed to the right one via a leading
+# "<sub_id> " prefix. When only one sub_id is active in a chat, the prefix is
+# optional (a bare phone/OTP routes to that one session).
 sessions = {}
-# chat_ids currently in continuous mode: a new signup auto-starts after each
-# one finishes, until /done or /cancel removes the chat_id from this set.
+# (chat_id, sub_id) pairs currently in continuous mode: that lane
+# auto-restarts a fresh signup after each one finishes, until /done or
+# /cancel removes it from this set.
 looping_chats = set()
+# Hard ceiling on /newacc <n> so a fat-fingered count can't spawn an
+# unreasonable number of Chromium contexts at once.
+MAX_PARALLEL_NEWACC = 10
 
 # Telegram user IDs (str) the master admin has authorized, persisted across
 # restarts. Gitignored -- this is access-control state, not project content.
@@ -337,13 +352,26 @@ async def send_csv(update, filename, row_id=None, limit=None, status=None, url=N
         Path(tmp_path).unlink(missing_ok=True)
 
 
-# One Chromium process for the bot's whole lifetime, plus the single worker
-# thread all Playwright calls must run on (sync API is thread-affine). Each
-# session gets its own BrowserContext (isolated cookies/storage) opened from
-# this already-running browser, instead of launching a new process every time.
-_pw_executor = ThreadPoolExecutor(max_workers=1)
-_playwright = None
-_browser = None
+# BOT_CONCURRENCY independent (executor, Chromium) slots rather than one
+# shared browser. Playwright's sync API is thread-affine -- every call for a
+# given browser/context/page must run on the OS thread that created it -- so
+# "N-way parallel" means N separate ThreadPoolExecutor(max_workers=1) pools,
+# each pinned to its own Chromium process, NOT one bigger pool sharing a
+# single browser. A Session picks one slot index (round-robin, see
+# _next_slot()) in begin_signup() and must route every Playwright call for
+# its lifetime through that same slot's executor/browser -- mixing slots for
+# the same session would violate the thread-affinity requirement.
+_pw_executors = [ThreadPoolExecutor(max_workers=1) for _ in range(BOT_CONCURRENCY)]
+_playwrights = [None] * BOT_CONCURRENCY
+_browsers = [None] * BOT_CONCURRENCY
+_slot_counter = 0
+
+
+def _next_slot():
+    global _slot_counter
+    slot = _slot_counter % BOT_CONCURRENCY
+    _slot_counter += 1
+    return slot
 
 
 class Session:
@@ -356,39 +384,40 @@ class Session:
         self.proxy = None  # raw proxy string, or None for a direct connection
         self.bridge_proc = None  # local pproxy process, if the proxy needed one
         self.site_url = None  # site URL for this signup (falls back to BOT_SITE_URL)
+        self.slot = 0  # index into _pw_executors/_browsers, fixed for this session's life
+        self.sub_id = 1  # this chat's lane number, for routing replies when >1 lane is active
 
 
 def _valid_phone(text):
     return text.isdigit() and 7 <= len(text) <= 15
 
 
-def _blocking_ensure_browser():
-    """Launch the shared Chromium instance once; reused by every session."""
-    global _playwright, _browser
-    if _browser is None:
-        _playwright = sync_playwright().start()
-        _browser = _playwright.chromium.launch(headless=True)
-    return _browser
+def _blocking_ensure_browser(slot):
+    """Launch this slot's Chromium instance once; reused by every session
+    routed to this slot. Must run on _pw_executors[slot]'s worker thread."""
+    if _browsers[slot] is None:
+        _playwrights[slot] = sync_playwright().start()
+        _browsers[slot] = _playwrights[slot].chromium.launch(headless=True)
+    return _browsers[slot]
 
 
-def _blocking_shutdown_browser():
-    global _playwright, _browser
+def _blocking_shutdown_browser(slot):
     try:
-        if _browser:
-            _browser.close()
+        if _browsers[slot]:
+            _browsers[slot].close()
     except Exception:
         pass
     try:
-        if _playwright:
-            _playwright.stop()
+        if _playwrights[slot]:
+            _playwrights[slot].stop()
     except Exception:
         pass
-    _browser = None
-    _playwright = None
+    _browsers[slot] = None
+    _playwrights[slot] = None
 
 
 def _blocking_close_context(session):
-    """Must run on _pw_executor's worker thread -- Playwright's sync API
+    """Must run on session.slot's worker thread -- Playwright's sync API
     requires teardown to happen on the same thread the object was created on."""
     try:
         if session.context:
@@ -402,23 +431,22 @@ def _blocking_close_context(session):
 
 
 async def close_browser(session):
-    """Tear down just this session's browser context (keeping the shared
+    """Tear down just this session's browser context (keeping its slot's
     Chromium process running) so a retry (e.g. 'phone already taken') is fast."""
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(_pw_executor, _blocking_close_context, session)
+    await loop.run_in_executor(_pw_executors[session.slot], _blocking_close_context, session)
 
 
 async def end_session(session):
-    """Alias kept for call-site clarity; the shared browser process itself
+    """Alias kept for call-site clarity; the slot's browser process itself
     outlives any single session and is only shut down when the bot exits."""
     await close_browser(session)
 
 
 def _blocking_fill_and_register(session, phone):
-    """Runs on _pw_executor's single worker thread. Opens a fresh browser
-    context on the shared browser, fills the form, submits, and waits for the
-    OTP screen."""
-    browser = _blocking_ensure_browser()
+    """Runs on session.slot's worker thread. Opens a fresh browser context on
+    that slot's browser, fills the form, submits, and waits for the OTP screen."""
+    browser = _blocking_ensure_browser(session.slot)
     proxy_conf = parse_proxy(session.proxy) if session.proxy else None
     try:
         proxy_conf, session.bridge_proc = maybe_bridge_proxy(proxy_conf)
@@ -528,10 +556,10 @@ def _blocking_verify_otp(session, otp):
     return {"ok": True, "message": "OTP verified — account registered.", "shot": str(otp_result)}
 
 
-async def begin_signup(update, chat_id):
-    """Generate a new account and start a fresh session. Shared by /newacc
-    (the first one) and the continuous-mode auto-restart in handle_message()
-    after a signup finishes."""
+async def begin_signup(update, chat_id, sub_id):
+    """Generate a new account and start a fresh session in lane sub_id.
+    Shared by /newacc (each initial lane) and the continuous-mode
+    auto-restart in handle_message() after that lane's signup finishes."""
     session = Session()
     session.acct = gen_account()
     # A master-set fixed password (/setpassword) overrides the random one
@@ -544,52 +572,100 @@ async def begin_signup(update, chat_id):
     # applying to every admin's signups -- not a per-chat setting.
     session.proxy = global_settings.get("proxy")
     session.site_url = global_settings.get("url")
-    sessions[chat_id] = session
+    session.sub_id = sub_id
+    # Pins this session to one (executor, Chromium) slot for its whole life --
+    # round-robin across BOT_CONCURRENCY slots so concurrent lanes (whether
+    # from different chats or several lanes in one /newacc <n>) run on
+    # different browsers/threads instead of queuing behind each other.
+    session.slot = _next_slot()
+    sessions.setdefault(chat_id, {})[sub_id] = session
 
-    await update.message.reply_text("Send the phone number to use for this signup.")
+    await update.message.reply_text(f"[#{sub_id}] Send the phone number to use for this signup.")
 
 
 @require_role(is_admin)
 async def newacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    if chat_id in sessions:
+    if sessions.get(chat_id):
+        active = ", ".join(str(i) for i in sorted(sessions[chat_id]))
         await update.message.reply_text(
-            "You already have a signup in progress. Reply with the phone "
-            "number/OTP it's waiting for, or send /cancel."
+            f"You already have signup(s) in progress (lane(s) {active}). Reply with "
+            "\"<lane> <phone/OTP>\" for the one it's waiting on, or send /cancel."
         )
         return
 
-    # /newacc now runs continuously: after each signup finishes, a new one
-    # starts automatically until /done (or /cancel) is sent.
-    looping_chats.add(chat_id)
-    await begin_signup(update, chat_id)
+    count = 1
+    if context.args:
+        arg = context.args[0]
+        if not arg.isdigit() or not (1 <= int(arg) <= MAX_PARALLEL_NEWACC):
+            await update.message.reply_text(
+                f"Usage: /newacc [count]  (count 1-{MAX_PARALLEL_NEWACC}, default 1)"
+            )
+            return
+        count = int(arg)
+
+    # Each lane now runs continuously: after that lane's signup finishes, a
+    # new one starts automatically in the same lane until /done (or /cancel)
+    # removes it.
+    for sub_id in range(1, count + 1):
+        looping_chats.add((chat_id, sub_id))
+        await begin_signup(update, chat_id, sub_id)
 
 
 @require_role(is_admin)
 async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    was_looping = chat_id in looping_chats
-    looping_chats.discard(chat_id)
-    if chat_id in sessions:
-        await update.message.reply_text(
-            "Will stop after the current signup finishes." if was_looping
-            else "Not in continuous mode -- nothing to stop."
-        )
+    if context.args and context.args[0].isdigit():
+        lanes = [int(context.args[0])]
     else:
-        await update.message.reply_text(
-            "Continuous mode stopped." if was_looping
-            else "Not in continuous mode."
-        )
+        lanes = sorted({sid for (cid, sid) in looping_chats if cid == chat_id}
+                        | set(sessions.get(chat_id, {})))
+    if not lanes:
+        await update.message.reply_text("Not in continuous mode.")
+        return
+
+    stopped, in_progress = [], []
+    for sub_id in lanes:
+        was_looping = (chat_id, sub_id) in looping_chats
+        looping_chats.discard((chat_id, sub_id))
+        if not was_looping:
+            continue
+        (in_progress if sub_id in sessions.get(chat_id, {}) else stopped).append(sub_id)
+
+    if not stopped and not in_progress:
+        await update.message.reply_text("Not in continuous mode.")
+        return
+    parts = []
+    if in_progress:
+        parts.append(f"Will stop after the current signup finishes (lane(s) {', '.join(map(str, in_progress))}).")
+    if stopped:
+        parts.append(f"Continuous mode stopped (lane(s) {', '.join(map(str, stopped))}).")
+    await update.message.reply_text(" ".join(parts))
 
 
 @require_role(is_admin)
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    looping_chats.discard(chat_id)
-    session = sessions.pop(chat_id, None)
-    if session:
-        await end_session(session)
-        await update.message.reply_text("Cancelled the in-progress signup.")
+    if context.args and context.args[0].isdigit():
+        lanes = [int(context.args[0])]
+    else:
+        lanes = sorted({sid for (cid, sid) in looping_chats if cid == chat_id}
+                        | set(sessions.get(chat_id, {})))
+
+    cancelled = []
+    for sub_id in lanes:
+        looping_chats.discard((chat_id, sub_id))
+        session = sessions.get(chat_id, {}).pop(sub_id, None)
+        if session:
+            await end_session(session)
+            cancelled.append(sub_id)
+    if chat_id in sessions and not sessions[chat_id]:
+        del sessions[chat_id]
+
+    if cancelled:
+        await update.message.reply_text(
+            f"Cancelled signup(s) in lane(s) {', '.join(map(str, cancelled))}."
+        )
     else:
         await update.message.reply_text("No signup in progress.")
 
@@ -718,7 +794,9 @@ async def btag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _blocking_test_proxy_once(proxy_conf, timeout_ms=30000):
-    browser = _blocking_ensure_browser()
+    # Always slot 0 -- this is an on-demand diagnostic, not a throughput path,
+    # so it's fine to briefly share slot 0's browser with a live signup.
+    browser = _blocking_ensure_browser(0)
     bridge_proc = None
     try:
         proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
@@ -738,7 +816,7 @@ def _blocking_test_proxy_once(proxy_conf, timeout_ms=30000):
 
 
 def _blocking_test_proxy(proxy_conf):
-    """Runs on _pw_executor. Opens a throwaway context with the given proxy
+    """Runs on _pw_executors[0]. Opens a throwaway context with the given proxy
     and hits an IP-echo service to confirm it actually routes traffic. If an
     http(s):// proxy times out, automatically retries once as socks5:// --
     many proxy resellers (ProxyCheap included) issue SOCKS5-only endpoints
@@ -776,7 +854,7 @@ async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Testing {mask_proxy_display(raw)} (may take up to 30-60s)...")
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(_pw_executor, _blocking_test_proxy, proxy_conf)
+    result = await loop.run_in_executor(_pw_executors[0], _blocking_test_proxy, proxy_conf)
     if result["ok"]:
         reply = f"Proxy works. Exit IP: {result['ip_info']}"
         if result.get("note"):
@@ -923,43 +1001,72 @@ async def export_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_csv(update, filename, limit=limit, status=status, url=url)
 
 
+def _resolve_lane(chat_id, text):
+    """Pick which lane a plain-text reply belongs to. Returns
+    (session, rest_of_text, error_message) -- error_message is set (and the
+    other two meaningless) if the reply couldn't be routed."""
+    chat_sessions = sessions.get(chat_id)
+    if not chat_sessions:
+        return None, text, "No signup in progress. Send /newacc to start one."
+    if len(chat_sessions) == 1:
+        return next(iter(chat_sessions.values())), text, None
+    # Multiple lanes active in this chat -- require a leading "<lane> " prefix
+    # to disambiguate which one this phone/OTP is for.
+    parts = text.split(maxsplit=1)
+    if len(parts) == 2 and parts[0].isdigit() and int(parts[0]) in chat_sessions:
+        return chat_sessions[int(parts[0])], parts[1].strip(), None
+    active = ", ".join(str(i) for i in sorted(chat_sessions))
+    return None, text, (f"Multiple signups in progress (lane(s) {active}). Prefix your "
+                         "reply with the lane number, e.g. \"1 9876543210\".")
+
+
+def _pop_session(chat_id, sub_id):
+    chat_sessions = sessions.get(chat_id)
+    if not chat_sessions:
+        return
+    chat_sessions.pop(sub_id, None)
+    if not chat_sessions:
+        del sessions[chat_id]
+
+
 @require_role(is_admin)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    session = sessions.get(chat_id)
-    if not session:
-        await update.message.reply_text("No signup in progress. Send /newacc to start one.")
+    raw_text = (update.message.text or "").strip()
+    session, text, error = _resolve_lane(chat_id, raw_text)
+    if error:
+        await update.message.reply_text(error)
         return
-
-    text = (update.message.text or "").strip()
+    sub_id = session.sub_id
     loop = asyncio.get_running_loop()
 
     if session.stage == "await_phone":
         if not _valid_phone(text):
-            await update.message.reply_text("That doesn't look like a valid phone number "
-                                             "(digits only, 7-15 characters). Try again.")
+            await update.message.reply_text(f"[#{sub_id}] That doesn't look like a valid phone "
+                                             "number (digits only, 7-15 characters). Try again.")
             return
         session.acct["phone"] = text
         session.acct["proxy"] = session.proxy
         session.acct["url"] = session.site_url
         session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
         session.row_id = db.insert_account(conn, session.acct)
-        await update.message.reply_text("Submitting the signup form and requesting an OTP, one moment...")
+        await update.message.reply_text(f"[#{sub_id}] Submitting the signup form and "
+                                         "requesting an OTP, one moment...")
 
         logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
                     f"(phone {text}, url {session.site_url or BOT_SITE_URL}, "
                     f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'})")
         result = await loop.run_in_executor(
-            _pw_executor, _blocking_fill_and_register, session, text)
+            _pw_executors[session.slot], _blocking_fill_and_register, session, text)
 
         if result.get("phone_taken"):
             logger.warning(f"#{session.row_id} {session.acct['username']}: phone taken -- {result['message']}")
             db.update_status(conn, session.row_id, "phone_taken", notes=result["message"])
             await end_session(session)
-            await update.message.reply_text(result["message"])
-            del sessions[chat_id]
-            if chat_id in looping_chats:
-                await begin_signup(update, chat_id)
+            await update.message.reply_text(f"[#{sub_id}] {result['message']}")
+            _pop_session(chat_id, sub_id)
+            if (chat_id, sub_id) in looping_chats:
+                await begin_signup(update, chat_id, sub_id)
             return
 
         if not result["ok"]:
@@ -972,26 +1079,26 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"{result['message']} (screenshot: {result.get('shot')})")
             db.update_status(conn, session.row_id, "failed", notes=result["message"],
                              screenshot=result.get("shot"))
-            await update.message.reply_text(f"Signup failed. (#{session.row_id})")
+            await update.message.reply_text(f"[#{sub_id}] Signup failed. (#{session.row_id})")
             await end_session(session)
-            del sessions[chat_id]
-            if chat_id in looping_chats:
-                await begin_signup(update, chat_id)
+            _pop_session(chat_id, sub_id)
+            if (chat_id, sub_id) in looping_chats:
+                await begin_signup(update, chat_id, sub_id)
             return
 
         logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
         session.stage = "await_otp"
         await update.message.reply_text(
-            f"OTP sent to {text}. Send the {result['digits']}-digit code you received."
+            f"[#{sub_id}] OTP sent to {text}. Send the {result['digits']}-digit code you received."
         )
 
     elif session.stage == "await_otp":
         if not text.isdigit():
-            await update.message.reply_text("Send just the numeric OTP code.")
+            await update.message.reply_text(f"[#{sub_id}] Send just the numeric OTP code.")
             return
 
         result = await loop.run_in_executor(
-            _pw_executor, _blocking_verify_otp, session, text)
+            _pw_executors[session.slot], _blocking_verify_otp, session, text)
 
         status = "success" if result["ok"] else "failed"
         if result["ok"]:
@@ -1006,16 +1113,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Success: just a plain confirmation, no photo/caption/CSV -- the
             # account details stay in accounts.db, retrievable via /list or
             # /export later, but aren't pushed into the chat automatically.
-            await update.message.reply_text(f"Signup successful! (#{session.row_id})")
+            await update.message.reply_text(f"[#{sub_id}] Signup successful! (#{session.row_id})")
         else:
             # Failure: same policy as a register failure above -- no
             # photo/caption/CSV in chat, error logged + stored in accounts.db.
-            await update.message.reply_text(f"Signup failed. (#{session.row_id})")
+            await update.message.reply_text(f"[#{sub_id}] Signup failed. (#{session.row_id})")
 
         await end_session(session)
-        del sessions[chat_id]
-        if chat_id in looping_chats:
-            await begin_signup(update, chat_id)
+        _pop_session(chat_id, sub_id)
+        if (chat_id, sub_id) in looping_chats:
+            await begin_signup(update, chat_id, sub_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1025,10 +1132,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_master(user_id):
         await update.message.reply_text(
             "Commands (master admin):\n"
-            "/newacc - start continuous test signups (asks for phone, then OTP, "
-            "then starts the next one automatically)\n"
-            "/done - stop after the current signup finishes\n"
-            "/cancel - abandon an in-progress signup (also stops looping)\n"
+            "/newacc [count] - start continuous test signups (asks for phone, then OTP, "
+            "then starts the next one automatically). count runs that many in parallel "
+            f"(1-{MAX_PARALLEL_NEWACC}, default 1) -- reply with \"<lane> <phone/OTP>\" when "
+            "more than one is active\n"
+            "/done [lane] - stop after the current signup finishes (all lanes, or just one)\n"
+            "/cancel [lane] - abandon in-progress signup(s) (also stops looping)\n"
             "/stats - counts of signups by status and by btag\n"
             "/stats <btag> - status breakdown for just that btag\n"
             "/list [N] - most recent N stored accounts\n"
@@ -1054,10 +1163,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif is_admin(user_id):
         await update.message.reply_text(
             "Commands (admin):\n"
-            "/newacc - start continuous test signups (asks for phone, then OTP, "
-            "then starts the next one automatically)\n"
-            "/done - stop after the current signup finishes\n"
-            "/cancel - abandon an in-progress signup (also stops looping)"
+            "/newacc [count] - start continuous test signups (asks for phone, then OTP, "
+            "then starts the next one automatically). count runs that many in parallel "
+            f"(1-{MAX_PARALLEL_NEWACC}, default 1) -- reply with \"<lane> <phone/OTP>\" when "
+            "more than one is active\n"
+            "/done [lane] - stop after the current signup finishes (all lanes, or just one)\n"
+            "/cancel [lane] - abandon in-progress signup(s) (also stops looping)"
         )
     else:
         await update.message.reply_text(
@@ -1142,16 +1253,19 @@ def main():
     app.add_handler(CommandHandler("admins", list_admins))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Warming up the shared browser...")
-    _pw_executor.submit(_blocking_ensure_browser).result()
+    logger.info(f"Warming up {BOT_CONCURRENCY} browser slot(s)...")
+    for slot in range(BOT_CONCURRENCY):
+        _pw_executors[slot].submit(_blocking_ensure_browser, slot).result()
 
     logger.info(f"Bot starting... env={_env_file} site={BOT_SITE_URL} "
+                f"concurrency={BOT_CONCURRENCY} "
                 f"admins_file={ADMINS_FILE} settings_file={SETTINGS_FILE}")
     try:
         app.run_polling()
     finally:
-        _pw_executor.submit(_blocking_shutdown_browser).result()
-        _pw_executor.shutdown(wait=False)
+        for slot in range(BOT_CONCURRENCY):
+            _pw_executors[slot].submit(_blocking_shutdown_browser, slot).result()
+            _pw_executors[slot].shutdown(wait=False)
 
 
 if __name__ == "__main__":
