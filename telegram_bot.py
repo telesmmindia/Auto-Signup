@@ -197,7 +197,7 @@ ADMINS_FILE = Path(os.environ.get("ADMINS_FILE", "admins.json"))
 # admin's signups on this bot), not per-chat -- {"proxy": "...", "url": "..."}.
 # Overridable via SETTINGS_FILE for the same reason as ADMINS_FILE above.
 SETTINGS_FILE = Path(os.environ.get("SETTINGS_FILE", "bot_settings.json"))
-# Account "pairs" for hedge betting (see /cpair, /run). Overridable per bot
+# Account "pairs" for hedge betting (see /pair, /run). Overridable per bot
 # instance for the same reason as ADMINS_FILE/SETTINGS_FILE above. Stores
 # plaintext passwords, so it is gitignored.
 PAIRS_FILE = Path(os.environ.get("PAIRS_FILE", "pairs.json"))
@@ -301,7 +301,7 @@ MASTER_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("clearproxy", "Clear the global proxy"),
     BotCommand("testproxy", "Check a proxy actually works"),
     BotCommand("testbaccarat", "Login + place a real Baccarat bet (smoke test)"),
-    BotCommand("cpair", "Create an account pair for hedge betting"),
+    BotCommand("pair", "Create an account pair for hedge betting"),
     BotCommand("pairs", "List stored account pairs"),
     BotCommand("delpair", "Delete a stored pair"),
     BotCommand("run", "Run a paired hedge: acc1 Banker vs acc2 Player"),
@@ -1012,13 +1012,13 @@ def _blocking_run_pair(loop, bot, chat_id, banker_creds, player_creds, amount, r
 
 @require_role(is_master)
 async def cpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/cpair <user1> <pass1> <user2> <pass2> -- store an account pair for hedge
+    """/pair <user1> <pass1> <user2> <pass2> -- store an account pair for hedge
     betting. Account 1 always bets BANKER, account 2 always bets PLAYER.
     Master-only; the reply never echoes the passwords back."""
     args = context.args
     if len(args) != 4:
         await update.message.reply_text(
-            "Usage: /cpair <user1> <pass1> <user2> <pass2>\n"
+            "Usage: /pair <user1> <pass1> <user2> <pass2>\n"
             "Creates a pair: account 1 bets BANKER, account 2 bets PLAYER.")
         return
     u1, p1, u2, p2 = args
@@ -1044,7 +1044,7 @@ async def cpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def pairs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/pairs -- list stored pairs (passwords omitted)."""
     if not pairs["pairs"]:
-        await update.message.reply_text("No pairs yet. Create one with /cpair.")
+        await update.message.reply_text("No pairs yet. Create one with /pair.")
         return
     lines = ["👥 <b>Stored pairs</b>", "━━━━━━━━━━━━━━"]
     for pid, rec in sorted(pairs["pairs"].items(), key=lambda kv: int(kv[0])):
@@ -1570,7 +1570,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/export [N] [status] [url] — CSV (successful by default; 'all' for every status)\n"
             "\n"
             "🎰 Casino / hedge betting\n"
-            "/cpair <u1> <p1> <u2> <p2> — create a pair (acc1 Banker, acc2 Player)\n"
+            "/pair <u1> <p1> <u2> <p2> — create a pair (acc1 Banker, acc2 Player)\n"
             "/pairs — list pairs   ·   /delpair <id> — remove one\n"
             "/run <pair> <amount> <rounds> — run the hedge   ·   /stoprun — halt it\n"
             "/runs [pair] — run history   ·   /runlog <run_id> — round-by-round\n"
@@ -1682,7 +1682,7 @@ def main():
     app.add_handler(CommandHandler("clearproxy", clearproxy))
     app.add_handler(CommandHandler("testproxy", testproxy))
     app.add_handler(CommandHandler("testbaccarat", testbaccarat))
-    app.add_handler(CommandHandler("cpair", cpair))
+    app.add_handler(CommandHandler("pair", cpair))
     app.add_handler(CommandHandler("pairs", pairs_cmd))
     app.add_handler(CommandHandler("delpair", delpair))
     app.add_handler(CommandHandler("run", run_cmd))

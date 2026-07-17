@@ -812,7 +812,7 @@ Key facts established live, so nobody re-guesses this:
   100 in the same session) is real money, same as any other bet on the
   site.
 
-## Paired-account hedge betting (`/cpair`, `/pairs`, `/run`, `/stoprun`, `/runs`, `/runlog`)
+## Paired-account hedge betting (`/pair`, `/pairs`, `/run`, `/stoprun`, `/runs`, `/runlog`)
 
 A second, higher-level casino test built on the same engine: two accounts on
 the **same live baccarat table** bet opposite sides (one Banker, one Player)
@@ -822,7 +822,7 @@ bleeds out on a Banker win — so you can generate large, controlled betting
 volume to smoke-test the platform without draining balance fast.
 
 Bot commands (all **master-only**, `@require_role(is_master)`):
-- `/cpair <user1> <pass1> <user2> <pass2>` — store a pair; **acc1 always bets
+- `/pair <user1> <pass1> <user2> <pass2>` — store a pair; **acc1 always bets
   Banker, acc2 always Player** (fixed). Returns a numeric pair id. Replies
   never echo passwords.
 - `/pairs` — list stored pairs (id, banker username, player username, created);
