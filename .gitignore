@@ -8,6 +8,10 @@ admins.json
 admins.*.json
 bot_settings.json
 bot_settings.*.json
+pairs.json
+pairs.*.json
+pair_runs.json
+pair_runs.*.json
 proxy_settings.json
 url_settings.json
 .env

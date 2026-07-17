@@ -489,14 +489,11 @@ Two files: `main.py` (Playwright driver, sync API) and `db.py` (SQLite storage).
   retrieve exact login credentials later.
 
 
-- `SEL` dict holds all selectors captured from the live sites. **It now covers
-  two platforms at once** via comma-joined CSS groups (see "Multi-site
-  support" below): cricmatch247's markup (username `#userNameid`, email
-  `#userEmailid`, password `#pass_log_id`, phone `#phoneNumber`, T&C checkbox
-  `#remChck2`, submit `button.cls_register_new`, open-modal
-  `.registerUserData`) and spin24star's Khelo markup (`#userNameKhelo` /
-  `#emailKhelo` / `#passwordKhelo` / `#phoneKhelo` / `#signUpButtonKhelo`,
-  open via `button.rj__join_now`). If a site's markup changes and the script
+- Per-site selectors + behavior live in **one profile file per site** under
+  `sites/` (`sites/cricmatch.py`, `sites/spin24star.py`), each a `SiteProfile`
+  (`sites/base.py`); the engine reads `profile_for(page.url).sel[...]` — there
+  is no module-level `SEL` dict anymore (see "Multi-site support" below). If a
+  site's markup changes and the script
   breaks, re-verify these first.
 - `open_signup_modal()` must first call `dismiss_popups()` — a promo overlay
   loads on page load and covers the header JOIN button. The reliable trigger is
@@ -548,12 +545,34 @@ Two files: `main.py` (Playwright driver, sync API) and `db.py` (SQLite storage).
 
 ## Multi-site support (cricmatch247 + spin24star)
 
-The driver supports two sites with **one** `SEL` dict rather than per-site
-profiles: every single-selector key is a comma-joined CSS group
-(`"#userNameid, #userNameKhelo"`), which works because the two platforms'
-ids/classes never coexist on one page — each group resolves to exactly one
-element per site, so Playwright's strict mode never trips. Site selection is
-purely by URL (`--url` / `/seturl`); there is no site flag anywhere.
+The driver keeps **one shared engine** (`main.py`) and puts everything that
+differs per site into **one profile file per site** under `sites/`. Each
+`sites/<site>.py` exposes a `PROFILE = SiteProfile(...)` (`sites/base.py`)
+holding that site's `sel` (selectors, single values) plus behavior flags:
+`register_trigger` (`"modal"` vs `"forced_join"`), `has_terms_checkbox`,
+`phone_taken_selector`, `result_selectors`, `tracking_param`,
+`supports_casino`. `sites/__init__.py` registers them (`PROFILES`) and
+`profile_for(url)` maps a URL's hostname to its profile (falling back to
+`DEFAULT_PROFILE` = cricmatch for `None`/`about:blank`/unknown hosts, so no
+call site crashes). Engine helpers resolve `prof = profile_for(page.url)` and
+read `prof.sel[...]`; site selection is still purely by URL (`--url` /
+`/seturl` / `BOT_SITE_URL`), no site flag. This replaced an earlier single
+`SEL` dict of comma-joined cross-site groups (`"#userNameid, #userNameKhelo"`),
+which didn't scale as sites diverged.
+
+### Adding a new site (one-file-per-site workflow)
+
+1. Capture its selectors: `.venv/bin/python inspect_form.py --url <newsite>`
+   (the register form is JS-injected, so this drives the live page).
+2. Copy `sites/spin24star.py` → `sites/<site>.py`; set `hostnames`, fill `sel`,
+   and the behavior flags; register it in `sites/__init__.py`'s `PROFILES`.
+3. `cp .env.spin24star.example .env.<site>`; set its `TELEGRAM_BOT_TOKEN`,
+   `BOT_SITE_URL`, and **distinct** `ADMINS_FILE` / `SETTINGS_FILE` /
+   `PAIRS_FILE` / `PAIR_RUNS_FILE` (two processes must not share these).
+4. `.venv/bin/python telegram_bot.py --env .env.<site>` — that bot now runs
+   only that site, no engine edits. (`supports_casino` defaults to False, so
+   the casino/hedge commands refuse cleanly until you inspect + wire that
+   site's login/casino selectors and flip it on.)
 
 spin24star.com runs the "Khelo" white-label platform (assets under
 `khelocdn`), inspected live via `inspect_form.py`. Differences that needed
@@ -704,6 +723,183 @@ signup that hit the WAF CAPTCHA was solved, the fresh-context retry reached
 the real OTP screen (`digits: 6`), and session cleanup closed without error.
 cricmatch (no WAF, no CapSolver involvement) regression-checked clean after
 the signature change.
+
+## Casino game smoke test (login + place a Baccarat bet)
+
+A separate feature from signup: `login()` / `open_casino_lobby()` /
+`search_and_open_game()` / `place_baccarat_bet()` / `test_baccarat()` in
+`main.py`, and `/testbaccarat <username> <password> [amount]` in
+`telegram_bot.py` (master-only, mirrors `/testproxy`'s "share slot 0,
+throwaway context, always clean up" pattern). Logs into an **existing**
+account (not a freshly-generated one -- credentials are explicit args, not
+looked up from `accounts.db`) and places a real bet on both Player and
+Banker in a live Baccarat table, to confirm the third-party casino game
+integration itself works, not just that the site loads. Doesn't write to
+`accounts.db` -- different data lifecycle than the rest of this file (it
+tests an account someone already has).
+
+**Verified live only against cricmatch247** (2026-07-16, real account, a
+real ₹100 bet on Player confirmed placed and read back via the game's own
+UI). spin24star is not covered at all -- the new `SEL` keys
+(`open_login`/`login_username`/`login_password`/`login_submit`/
+`logged_in_indicator`/`casino_nav`) are single cricmatch247 values, not the
+usual comma-joined cross-site groups the signup selectors use.
+
+Key facts established live, so nobody re-guesses this:
+- Login: click `a.cls_loginbtn` → fill `#user_login_id` / `#passwordId` →
+  click `#loginbutton`. A logged-in session shows `#acctSec` (an "Account"
+  link) in the header; that's the success indicator `login()` polls for.
+- Casino nav: `a:has-text('Live Casino')`, then a category filter tab
+  `a:has-text('Baccarat')` (there is no free-text game search box, only
+  category tabs) -- both clicks must be **forced**, since cricmatch247 shows
+  the same SPRIBE/Aviator walkthrough overlay documented for spin24star
+  under Multi-site support above (`.skip_right_img`), which intercepts
+  plain clicks on the nav the same way.
+- Opening a game tile (e.g. `text=Baccarat A`) opens a **brand-new browser
+  tab**, cross-origin at `ezugi.evo-games.com` (Evolution/Ezugi) -- the game
+  is never embedded in the cricmatch247 page itself. Callers must track
+  `context.pages` for the new tab and eventually close it separately
+  (`test_baccarat()` does this in a `finally`).
+- The bet table itself is a `<canvas>` video feed, but the **Player/Banker
+  bet spots are real DOM elements**, not canvas-drawn -- confirmed by
+  successfully reading the game's own "TOTAL BET" counter go from 0 to 100
+  after a real click. This was the single biggest open risk going in (most
+  live-dealer providers render everything on canvas/WebGL) and it did NOT
+  materialize here; no coordinate-based clicking was needed.
+- Bet-spot targeting is still the fragile part. Element class names are
+  hashed/dynamic (e.g. `B5xqBh`, `Lnk7iq`) and not usable directly. Worse:
+  the game's *collapsed* paytable/bet-limits tooltip contains the literal
+  text "BANKER" (and every other spot's label) even while hidden, and a
+  naive "find any element whose text matches the label" search can
+  mistarget it -- this happened live and the resulting click bounced the
+  page out to the general Evolution game lobby instead of placing a bet
+  (caught safely: no money moved, see below). `main.py`'s
+  `_TAG_BET_SPOT_JS` fixes this by excluding any element inside
+  `[data-role*="bet-limits"]` / `[data-role*="tooltip"]`, plus anything
+  off-screen, zero-sized, or larger than a small label box, before picking
+  the smallest remaining match. The fix was applied but **not yet
+  re-verified live** for the Banker side specifically (Player-side targeting
+  was verified live and worked; live testing was paused by the user before
+  a full Player+Banker round could be re-run against the hardened version).
+- A decorative SVG "glow" overlay sits on top of the real bet-spot div,
+  so `frame.locator(...).click()` needs `force=True` -- same
+  "subtree intercepts pointer events" trap as the Khelo REGISTER button and
+  the SPRIBE overlay elsewhere in this file.
+- **Chip denomination is not selectable by this code.** Clicking a bet spot
+  places whatever chip the game UI currently has pre-selected (observed
+  live: this defaults to the table minimum). `amount` is therefore
+  advisory -- `place_baccarat_bet()` never trusts it blindly; it reads the
+  game's own "TOTAL BET" counter after each click and refuses to proceed
+  (or reports a mismatch) if the actual placed amount doesn't match.
+- **Table minimum is ₹100 per side** on both "Baccarat A" and "Baccarat B"
+  (the only two live tables under cricmatch247's Baccarat category) --
+  confirmed via the in-game "BET LIMITS" panel, twice. `/testbaccarat`
+  defaults `amount` to 100 for this reason. A round-window retry loop
+  (`place_baccarat_bet`'s `round_attempts`) exists because a click during
+  the results/reveal phase between rounds is a silent no-op -- Evolution
+  only accepts new bets during the live betting countdown.
+- **Confirmed live: leaving the table before a round's betting timer
+  expires voids any staged-but-unsubmitted chip placement, at no cost.**
+  Evolution stages chip clicks client-side and only submits them to the
+  server when the betting countdown naturally ends. During live testing, a
+  mistargeted click navigated away from the table with a ₹100 Player chip
+  already "placed" in the UI; the site's own wallet (`MY WALLET` /
+  `EXPOSURE` in cricmatch247's header, independent of the Evolution iframe)
+  confirmed afterward that balance and exposure were both unchanged from
+  before the test began. Don't rely on this as a safety net going
+  forward, though -- it's an artifact of leaving *before* the timer ends,
+  not a guarantee; a bet that fully registers (like the confirmed Player
+  100 in the same session) is real money, same as any other bet on the
+  site.
+
+## Paired-account hedge betting (`/cpair`, `/pairs`, `/run`, `/stoprun`, `/runs`, `/runlog`)
+
+A second, higher-level casino test built on the same engine: two accounts on
+the **same live baccarat table** bet opposite sides (one Banker, one Player)
+of the **same hand** each round. Because both bets ride one result, money
+mostly just moves between the two accounts — only the ~5% banker commission
+bleeds out on a Banker win — so you can generate large, controlled betting
+volume to smoke-test the platform without draining balance fast.
+
+Bot commands (all **master-only**, `@require_role(is_master)`):
+- `/cpair <user1> <pass1> <user2> <pass2>` — store a pair; **acc1 always bets
+  Banker, acc2 always Player** (fixed). Returns a numeric pair id. Replies
+  never echo passwords.
+- `/pairs` — list stored pairs (id, banker username, player username, created);
+  passwords omitted.
+- `/delpair <id>` — remove a pair.
+- `/run <pair_id> <amount> <rounds>` — log both accounts in, join the same
+  table, and each round place `amount` on Banker (acc1) and `amount` on Player
+  (acc2) on the same hand, until `rounds` is reached, either balance `< amount`,
+  a round goes unhedged, or `/stoprun`. Streams per-round progress to the chat.
+- `/stoprun` — stop the active run after the current round.
+- `/runs [pair_id]` — list past runs (most recent first; all pairs, or one
+  pair). Each line shows run id, pair id, both usernames, `rounds_done/
+  requested`, amount, stop reason, and net balance change per side.
+- `/runlog <run_id>` — the per-round balance progression of one past run
+  (start balance → each round's B/P balance → final + net), plus any messages.
+
+Persistence: two gitignored JSON files, both per-instance (env-overridable like
+`ADMINS_FILE`/`SETTINGS_FILE`):
+- **`pairs.json`** (override `PAIRS_FILE`) — the pair credentials. Holds
+  **plaintext passwords**, gitignored via `pairs.json` / `pairs.*.json`.
+  Structure: `{"next_id": N, "pairs": {"<id>": {"banker": {...},
+  "player": {...}, "created_at": iso}}}`.
+- **`pair_runs.json`** (override `PAIR_RUNS_FILE`) — the run history that
+  `/runs`/`/runlog` read. **No passwords** (usernames + balances only), but
+  still gitignored (`pair_runs.json` / `pair_runs.*.json`) since it's the
+  owner's operational betting data. Structure: `{"next_id": N, "runs": [
+  {run_id, pair_id, banker_username, player_username, amount,
+  requested_rounds, rounds_done, stop_reason, started_at, ended_at,
+  start_balance, final_balance, rounds:[{round,amount,banker,player}],
+  messages, shots} ]}`. One record is appended by `run_cmd` after **every**
+  `/run` (success or any stop reason), then `save_pair_runs()`. The per-round
+  `rounds` list and `start_balance`/`ended_at` all come from the
+  `run_paired_hedge` summary (`main.py`), which was extended to record them —
+  don't drop those keys, `/runlog` reads them.
+
+Engine: `run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
+site_url, progress, should_stop)` in `main.py` reuses `login()` /
+`open_casino_lobby()` / `search_and_open_game()` / `find_game_frame()` /
+`wait_for_live_table()` / `_click_bet_spot()` / `_read_total_bet()`, plus new
+`read_game_balance(frame)` (reads the Evolution frame's own
+`data-role="balance-label-value"` readout, e.g. `₹1,891`) and `_open_table_for`
+/ `_table_id` helpers. Key facts, all money-relevant:
+
+- **Same physical table is required and confirmed.** Both accounts opening
+  "Baccarat A" land on the same Evolution `table_id` (`oytmvb9m1zysmc44`,
+  extracted from the game-tab URL). `run_paired_hedge` compares both tabs'
+  `table_id` and aborts before any bet if they differ — otherwise the two bets
+  wouldn't be on the same hand and it isn't a hedge.
+- **Both bets go down back-to-back in one open window**, same fix as
+  `place_baccarat_bet` (a >1s gap loses the window). Both contexts are driven
+  from the **one slot-0 worker thread** (Playwright is thread-affine), so the
+  two clicks are sequential but sub-second apart.
+- **Partial round → stop immediately** (deliberate choice): if only one side's
+  bet lands (unhedged real exposure), the run halts, names the exposed account,
+  and screenshots both tabs (`shots/hedge-partial-*.png`).
+- **v1 does NOT select a chip denomination.** It bets the table's default chip
+  (the minimum, ~₹100 on Baccarat A) and verifies the actual size via each
+  side's TOTAL BET. If `amount` doesn't match what the table placed, it stops
+  after **one** (hedged, safe) round and tells you the real size to re-run with
+  (`amount_mismatch`). Arbitrary chip selection is a future enhancement — the
+  selectable chip rail is complex SVG (the `data-role="chip"` nodes found were
+  hidden 0-value templates), so it was deliberately deferred rather than
+  guessed at with real money.
+- **One run at a time.** `_run_active` / `_run_stop` (a `threading.Event`) gate
+  it; a `/run` monopolizes slot 0's browser+thread for minutes, so signups on
+  that slot queue behind it. `/stoprun` sets the event, checked between rounds.
+- **Progress from the worker thread → chat** uses
+  `asyncio.run_coroutine_threadsafe(bot.send_message(...), loop)` (the loop is
+  captured in `run_cmd` and passed into `_blocking_run_pair`) — a new
+  thread→async bridge; the rest of the bot only ever sends before/after
+  `run_in_executor`, not mid-blocking-call.
+
+**Verified**: read-only checks confirmed the same-`table_id` assumption,
+`read_game_balance`, and the loading-screen/window timing on a live table
+(no money). The full paired placement needs a **second** real account (only
+`asha788` was on hand) and spends real money hedged; test with `/run <id> 100 1`
+first, then scale.
 
 ## Site-specific notes
 

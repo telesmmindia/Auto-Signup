@@ -99,11 +99,13 @@ Running one bot per site:
 """
 import asyncio
 import functools
+import html
 import json
 import logging
 import os
 import sys
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -112,15 +114,17 @@ from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
 import db
+from sites import profile_for
 from main import (
-    SEL, SHOTS_DIR, SITE_URL,
+    SHOTS_DIR, SITE_URL,
     capsolver_key, check_phone_taken, click_first_visible, extract_referral_code,
     fill_register_form, gen_account, is_waf_captcha, maybe_bridge_proxy,
-    open_signup_modal, parse_proxy, read_result, stop_bridge, submit_register,
-    wait_for_otp_outcome, wait_for_register_outcome,
+    open_signup_modal, parse_proxy, read_result, run_paired_hedge, stop_bridge,
+    submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -176,6 +180,12 @@ looping_chats = set()
 # unreasonable number of Chromium contexts at once.
 MAX_PARALLEL_NEWACC = 10
 
+# Paired-hedge run state. Only one /run at a time -- it monopolizes slot 0's
+# worker thread (and browser) for minutes while driving TWO contexts. _run_stop
+# is set by /stoprun and checked between rounds inside the blocking loop.
+_run_active = False
+_run_stop = threading.Event()
+
 # Telegram user IDs (str) the master admin has authorized, persisted across
 # restarts. Gitignored -- this is access-control state, not project content.
 # Overridable via ADMINS_FILE in .env so two bot processes running out of the
@@ -187,6 +197,14 @@ ADMINS_FILE = Path(os.environ.get("ADMINS_FILE", "admins.json"))
 # admin's signups on this bot), not per-chat -- {"proxy": "...", "url": "..."}.
 # Overridable via SETTINGS_FILE for the same reason as ADMINS_FILE above.
 SETTINGS_FILE = Path(os.environ.get("SETTINGS_FILE", "bot_settings.json"))
+# Account "pairs" for hedge betting (see /cpair, /run). Overridable per bot
+# instance for the same reason as ADMINS_FILE/SETTINGS_FILE above. Stores
+# plaintext passwords, so it is gitignored.
+PAIRS_FILE = Path(os.environ.get("PAIRS_FILE", "pairs.json"))
+# Per-run hedge history so a pair's past runs can be reviewed later via /runs.
+# Holds account usernames + balances (no passwords), so it's gitignored like
+# pairs.json all the same; give each bot instance its own via PAIR_RUNS_FILE.
+PAIR_RUNS_FILE = Path(os.environ.get("PAIR_RUNS_FILE", "pair_runs.json"))
 
 
 def _load_json(path, default):
@@ -204,6 +222,12 @@ def _save_json(path, data):
 
 admin_ids = set(_load_json(ADMINS_FILE, []))
 global_settings = _load_json(SETTINGS_FILE, {})
+# {"next_id": int, "pairs": {"<id>": {"banker": {"username","password"},
+#  "player": {"username","password"}, "created_at": iso}}}. acc1 -> banker,
+# acc2 -> player (fixed, so a pair always bets the same side per account).
+pairs = _load_json(PAIRS_FILE, {"next_id": 1, "pairs": {}})
+# {"next_id": int, "runs": [ {run record, one per /run, see run_cmd} ]}.
+pair_runs = _load_json(PAIR_RUNS_FILE, {"next_id": 1, "runs": []})
 
 
 def save_admin_ids():
@@ -212,6 +236,14 @@ def save_admin_ids():
 
 def save_settings():
     _save_json(SETTINGS_FILE, global_settings)
+
+
+def save_pairs():
+    _save_json(PAIRS_FILE, pairs)
+
+
+def save_pair_runs():
+    _save_json(PAIR_RUNS_FILE, pair_runs)
 
 
 def is_master(user_id):
@@ -229,6 +261,11 @@ def require_role(check):
     def decorator(func):
         @functools.wraps(func)
         async def wrapper(update, context):
+            # Telegram delivers some updates with no user attached (channel
+            # posts, my_chat_member changes, etc.) -- ignore those rather than
+            # crashing on update.effective_user.id being None.
+            if update.effective_user is None:
+                return
             user_id = update.effective_user.id
             if not check(user_id):
                 await update.message.reply_text(
@@ -263,6 +300,14 @@ MASTER_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("proxy", "Show the global proxy"),
     BotCommand("clearproxy", "Clear the global proxy"),
     BotCommand("testproxy", "Check a proxy actually works"),
+    BotCommand("testbaccarat", "Login + place a real Baccarat bet (smoke test)"),
+    BotCommand("cpair", "Create an account pair for hedge betting"),
+    BotCommand("pairs", "List stored account pairs"),
+    BotCommand("delpair", "Delete a stored pair"),
+    BotCommand("run", "Run a paired hedge: acc1 Banker vs acc2 Player"),
+    BotCommand("stoprun", "Stop the active hedge run"),
+    BotCommand("runs", "List past hedge runs (optionally by pair id)"),
+    BotCommand("runlog", "Per-round detail of one past run"),
     BotCommand("seturl", "Set the global site URL for all signups"),
     BotCommand("url", "Show the global site URL"),
     BotCommand("clearurl", "Reset to the default site URL"),
@@ -511,7 +556,7 @@ def _blocking_fill_and_register(session, phone):
         return {"ok": False, "message": message,
                 "shot": str(result_shot)}
 
-    digits = page.locator(SEL["otp_digits"]).count()
+    digits = page.locator(profile_for(page.url).sel["otp_digits"]).count()
     if digits == 0:
         return {"ok": False, "message": "OTP screen detected but no digit inputs found.",
                 "shot": str(result_shot)}
@@ -522,7 +567,8 @@ def _blocking_verify_otp(session, otp):
     """Runs on the SAME worker thread as _blocking_fill_and_register."""
     page = session.page
     acct = session.acct
-    boxes = page.locator(SEL["otp_digits"])
+    prof = profile_for(page.url)
+    boxes = page.locator(prof.sel["otp_digits"])
     for i, ch in enumerate(otp):
         box = boxes.nth(i)
         box.click()
@@ -533,7 +579,7 @@ def _blocking_verify_otp(session, otp):
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
     page.screenshot(path=str(otp_filled))
 
-    if not click_first_visible(page, SEL["otp_verify"], timeout=6000):
+    if not click_first_visible(page, prof.sel["otp_verify"], timeout=6000):
         return {"ok": False, "message": "Could not find a visible Verify button.", "shot": str(otp_filled)}
     outcome = wait_for_otp_outcome(page)
 
@@ -543,7 +589,7 @@ def _blocking_verify_otp(session, otp):
     if outcome == "error":
         err = ""
         try:
-            e = page.locator(SEL["otp_error"]).first
+            e = page.locator(prof.sel["otp_error"]).first
             if e.count() and e.is_visible():
                 err = (e.inner_text() or "").strip()
         except Exception:
@@ -580,7 +626,7 @@ async def begin_signup(update, chat_id, sub_id):
     session.slot = _next_slot()
     sessions.setdefault(chat_id, {})[sub_id] = session
 
-    await update.message.reply_text(f"[#{sub_id}] Send the phone number to use for this signup.")
+    await update.message.reply_text(f"📱 [#{sub_id}] Send the phone number to use for this signup.")
 
 
 @require_role(is_admin)
@@ -664,7 +710,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if cancelled:
         await update.message.reply_text(
-            f"Cancelled signup(s) in lane(s) {', '.join(map(str, cancelled))}."
+            f"🛑 Cancelled signup(s) in lane(s) {', '.join(map(str, cancelled))}."
         )
     else:
         await update.message.reply_text("No signup in progress.")
@@ -682,14 +728,14 @@ async def setpassword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if global_settings.pop("password", None) is not None:
             save_settings()
         await update.message.reply_text(
-            "Password mode: RANDOM — each new signup gets its own random password again."
+            "🔑 Password mode: RANDOM — each new signup gets its own random password again."
         )
         return
     password = context.args[0]
     global_settings["password"] = password
     save_settings()
     await update.message.reply_text(
-        f"Password mode: FIXED — every future signup will use: {password}\n"
+        f"🔑 Password mode: FIXED — every future signup will use: {password}\n"
         "Use /setpassword --random to go back to random passwords."
     )
 
@@ -698,9 +744,9 @@ async def setpassword(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pw = global_settings.get("password")
     if pw:
-        await update.message.reply_text(f"Current password mode: FIXED — {pw}")
+        await update.message.reply_text(f"🔑 Password mode: FIXED — {pw}")
     else:
-        await update.message.reply_text("Current password mode: RANDOM (default, per-signup)")
+        await update.message.reply_text("🔑 Password mode: RANDOM (default, per-signup)")
 
 
 @require_role(is_master)
@@ -720,8 +766,8 @@ async def setproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global_settings["proxy"] = raw
     save_settings()
     await update.message.reply_text(
-        f"Global proxy set for all admins' signups: {mask_proxy_display(raw)}\n"
-        "Tip: /testproxy to confirm it works before running /newacc."
+        f"🌐 Global proxy set: {mask_proxy_display(raw)}\n"
+        "💡 Tip: /testproxy to confirm it works before /newacc."
     )
 
 
@@ -729,16 +775,16 @@ async def setproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def show_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = global_settings.get("proxy")
     if raw:
-        await update.message.reply_text(f"Current global proxy: {mask_proxy_display(raw)}")
+        await update.message.reply_text(f"🌐 Current global proxy: {mask_proxy_display(raw)}")
     else:
-        await update.message.reply_text("No proxy set — signups use a direct connection.")
+        await update.message.reply_text("🌐 No proxy set — signups use a direct connection.")
 
 
 @require_role(is_master)
 async def clearproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if global_settings.pop("proxy", None) is not None:
         save_settings()
-        await update.message.reply_text("Global proxy cleared — signups will use a direct connection.")
+        await update.message.reply_text("🌐 Global proxy cleared — signups will use a direct connection.")
     else:
         await update.message.reply_text("No proxy was set.")
 
@@ -754,13 +800,13 @@ async def seturl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global_settings["url"] = url
     save_settings()
-    await update.message.reply_text(f"Global site URL set for all admins' signups: {url}")
+    await update.message.reply_text(f"🔗 Global site URL set: {url}")
 
 
 @require_role(is_master)
 async def show_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = global_settings.get("url")
-    await update.message.reply_text(f"Current global site URL: {url or BOT_SITE_URL}"
+    await update.message.reply_text(f"🔗 Current global site URL: {url or BOT_SITE_URL}"
                                     + ("" if url else " (default)"))
 
 
@@ -768,7 +814,7 @@ async def show_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clearurl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if global_settings.pop("url", None) is not None:
         save_settings()
-        await update.message.reply_text(f"Site URL reset to default: {BOT_SITE_URL}")
+        await update.message.reply_text(f"🔗 Site URL reset to default: {BOT_SITE_URL}")
     else:
         await update.message.reply_text("No custom site URL was set.")
 
@@ -782,7 +828,7 @@ async def btag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         code = extract_referral_code(current_url)
         await update.message.reply_text(
-            f"Current btag: {code}" if code else "No btag set on the current site URL."
+            f"🏷 Current btag: {code}" if code else "🏷 No btag set on the current site URL."
         )
         return
     code = context.args[0]
@@ -790,7 +836,7 @@ async def btag_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     new_url = urlunsplit((parts.scheme, parts.netloc, parts.path, f"btag={code}", parts.fragment))
     global_settings["url"] = new_url
     save_settings()
-    await update.message.reply_text(f"Global site URL set for all admins' signups: {new_url}")
+    await update.message.reply_text(f"🏷 Global site URL set: {new_url}")
 
 
 def _blocking_test_proxy_once(proxy_conf, timeout_ms=30000):
@@ -874,6 +920,381 @@ async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(reply)
 
 
+def _blocking_test_baccarat(username, password, amount):
+    """Runs on _pw_executors[0]. Opens a throwaway context (mirrors
+    _blocking_test_proxy_once's "share slot 0, always clean up" pattern) and
+    calls main.test_baccarat() to log in and place a real bet. Does not take
+    a proxy -- this command is about confirming the game integration works,
+    not testing proxy routing."""
+    browser = _blocking_ensure_browser(0)
+    context = browser.new_context()
+    try:
+        page = context.new_page()
+        return test_baccarat(page, username, password, amount, site_url=BOT_SITE_URL)
+    except PWError as e:
+        return {"ok": False, "messages": [f"Playwright error: {str(e)[:300]}"], "shot": None}
+    finally:
+        context.close()
+
+
+@require_role(is_master)
+async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Login + place a REAL bet on both Player and Banker in a live Baccarat
+    table, to smoke-test that the third-party casino game integration works.
+    Master-only: this spends real money and takes another account's
+    credentials as a chat argument, so it gets the same restricted scope as
+    /testproxy and /setpassword rather than being admin-usable. Verified live
+    against cricmatch247 only -- see main.py's casino-testing section."""
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "Usage: /testbaccarat <username> <password> [amount]\n\n"
+            "Logs into an EXISTING account and places a REAL bet on both "
+            "Player and Banker in a live Baccarat table, to confirm the "
+            "casino game integration actually works. This spends real "
+            "money -- amount defaults to 100 (the table's minimum). Chip "
+            "denomination isn't selectable, so the amount placed may not "
+            "exactly match what you ask for; the reply reports what was "
+            "actually placed, read back from the game itself."
+        )
+        return
+
+    username, password = args[0], args[1]
+    amount = 100
+    if len(args) >= 3:
+        try:
+            amount = int(args[2])
+        except ValueError:
+            await update.message.reply_text("Amount must be a whole number.")
+            return
+        if amount <= 0:
+            await update.message.reply_text("Amount must be positive.")
+            return
+
+    await update.message.reply_text(
+        f"Testing Baccarat as {username}: {amount} on Player + {amount} on Banker "
+        "(real money, may take up to a minute)..."
+    )
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(_pw_executors[0], _blocking_test_baccarat,
+                                        username, password, amount)
+
+    status = "OK" if result["ok"] else "FAILED"
+    caption = f"Baccarat test [{status}] for {username}\n" + "\n".join(result["messages"])
+    await send_result_photo(update, result.get("shot"), caption[:1024])
+
+
+# --- Paired-account hedge betting (create pairs, run opposite-side bets) ---
+
+def _blocking_run_pair(loop, bot, chat_id, banker_creds, player_creds, amount, rounds):
+    """Runs on _pw_executors[0]. Drives TWO contexts on slot 0's browser via
+    main.run_paired_hedge, streaming per-round progress back to the chat with
+    run_coroutine_threadsafe (the asyncio loop lives on the bot's own thread,
+    not this worker thread)."""
+    browser = _blocking_ensure_browser(0)
+
+    def progress(text):
+        try:
+            asyncio.run_coroutine_threadsafe(bot.send_message(chat_id, text), loop)
+        except Exception:
+            pass
+
+    try:
+        return run_paired_hedge(
+            browser, banker_creds, player_creds, amount, rounds,
+            site_url=BOT_SITE_URL, progress=progress, should_stop=_run_stop.is_set)
+    except PWError as e:
+        return {"ok": False, "rounds_done": 0, "requested_rounds": rounds,
+                "stop_reason": "playwright_error",
+                "messages": [f"Playwright error: {str(e)[:300]}"],
+                "shots": [], "final_balance": {"banker": None, "player": None}}
+
+
+@require_role(is_master)
+async def cpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/cpair <user1> <pass1> <user2> <pass2> -- store an account pair for hedge
+    betting. Account 1 always bets BANKER, account 2 always bets PLAYER.
+    Master-only; the reply never echoes the passwords back."""
+    args = context.args
+    if len(args) != 4:
+        await update.message.reply_text(
+            "Usage: /cpair <user1> <pass1> <user2> <pass2>\n"
+            "Creates a pair: account 1 bets BANKER, account 2 bets PLAYER.")
+        return
+    u1, p1, u2, p2 = args
+    pid = str(pairs["next_id"])
+    pairs["next_id"] += 1
+    pairs["pairs"][pid] = {
+        "banker": {"username": u1, "password": p1},
+        "player": {"username": u2, "password": p2},
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    save_pairs()
+    await update.message.reply_text(
+        f"✅ <b>Pair #{pid} created</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🔴 Banker  <b>{html.escape(u1)}</b>\n"
+        f"🔵 Player  <b>{html.escape(u2)}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"▶️ Run it: /run {pid} &lt;amount&gt; &lt;rounds&gt;",
+        parse_mode="HTML")
+
+
+@require_role(is_master)
+async def pairs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/pairs -- list stored pairs (passwords omitted)."""
+    if not pairs["pairs"]:
+        await update.message.reply_text("No pairs yet. Create one with /cpair.")
+        return
+    lines = ["👥 <b>Stored pairs</b>", "━━━━━━━━━━━━━━"]
+    for pid, rec in sorted(pairs["pairs"].items(), key=lambda kv: int(kv[0])):
+        created = (rec.get("created_at") or "").replace("T", " ")[:16]
+        lines.append(
+            f"<b>#{pid}</b>   🔴 {html.escape(rec['banker']['username'])}"
+            f"   🔵 {html.escape(rec['player']['username'])}\n"
+            f"   🕒 {created}")
+    lines.append("\n▶️ Run one with /run &lt;id&gt; &lt;amount&gt; &lt;rounds&gt;")
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+@require_role(is_master)
+async def delpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delpair <id> -- remove a stored pair."""
+    if not context.args:
+        await update.message.reply_text("Usage: /delpair <id>")
+        return
+    pid = context.args[0]
+    if pid not in pairs["pairs"]:
+        await update.message.reply_text(f"No pair #{pid}. See /pairs.")
+        return
+    pairs["pairs"].pop(pid)
+    save_pairs()
+    await update.message.reply_text(f"🗑 Pair #{pid} deleted.")
+
+
+@require_role(is_master)
+async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/run <pair_id> <amount> <rounds> -- run the paired hedge: acc1 bets
+    Banker and acc2 bets Player, <amount> each, on the SAME hand, repeating
+    until <rounds> or one account runs low on balance. Real money."""
+    global _run_active
+    args = context.args
+    if len(args) != 3:
+        await update.message.reply_text(
+            "Usage: /run <pair_id> <amount> <rounds>\n"
+            "Logs into the pair, joins the SAME baccarat table, and each round "
+            "bets <amount> on Banker (acc1) and <amount> on Player (acc2) on the "
+            "same hand, until <rounds> is reached or one account runs low. Real "
+            "money. v1 uses the table's default chip (~Rs.100); if <amount> "
+            "doesn't match, it stops after one hedged round and reports the real "
+            "size.")
+        return
+    pid, amount_s, rounds_s = args
+    if pid not in pairs["pairs"]:
+        await update.message.reply_text(f"No pair #{pid}. See /pairs.")
+        return
+    try:
+        amount, rounds = int(amount_s), int(rounds_s)
+    except ValueError:
+        await update.message.reply_text("amount and rounds must be whole numbers.")
+        return
+    if amount <= 0 or rounds <= 0:
+        await update.message.reply_text("amount and rounds must be positive.")
+        return
+    if _run_active:
+        await update.message.reply_text("A run is already in progress. /stoprun first.")
+        return
+
+    rec = pairs["pairs"][pid]
+    _run_active = True
+    _run_stop.clear()
+    await update.message.reply_text(
+        f"🎰 <b>Run started · Pair #{pid}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🔴 Banker  <b>{html.escape(rec['banker']['username'])}</b>\n"
+        f"🔵 Player  <b>{html.escape(rec['player']['username'])}</b>\n"
+        f"💵 Stake   <b>₹{amount:,}</b> / side\n"
+        f"🔁 Rounds  up to <b>{rounds}</b>\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"⚠️ Real money · send /stoprun to halt",
+        parse_mode="HTML")
+    loop = asyncio.get_running_loop()
+    try:
+        summary = await loop.run_in_executor(
+            _pw_executors[0], _blocking_run_pair, loop, context.bot,
+            update.effective_chat.id, rec["banker"], rec["player"], amount, rounds)
+    finally:
+        _run_active = False
+
+    # Persist the run so it can be reviewed later via /runs, then save.
+    run_id = pair_runs["next_id"]
+    pair_runs["next_id"] += 1
+    pair_runs["runs"].append({
+        "run_id": run_id,
+        "pair_id": pid,
+        "banker_username": rec["banker"]["username"],
+        "player_username": rec["player"]["username"],
+        "amount": amount,
+        "requested_rounds": summary["requested_rounds"],
+        "rounds_done": summary["rounds_done"],
+        "stop_reason": summary["stop_reason"],
+        "started_at": summary.get("started_at"),
+        "ended_at": summary.get("ended_at"),
+        "start_balance": summary.get("start_balance", {}),
+        "final_balance": summary.get("final_balance", {}),
+        "rounds": summary.get("rounds", []),
+        "messages": summary.get("messages", []),
+        "shots": summary.get("shots", []),
+    })
+    save_pair_runs()
+
+    sb, fb = summary.get("start_balance", {}), summary.get("final_balance", {})
+    done, req = summary["rounds_done"], summary["requested_rounds"]
+    icon = "✅" if summary.get("ok") else "⚠️"
+    b_user = html.escape(rec["banker"]["username"])
+    p_user = html.escape(rec["player"]["username"])
+    lines = [
+        f"{icon} <b>Run #{run_id} finished · Pair #{pid}</b>",
+        f"━━━━━━━━━━━━━━",
+        f"🎯 Rounds hedged  <b>{done}/{req}</b>",
+        f"🛑 {_reason_label(summary['stop_reason'])}",
+        f"━━━━━━━━━━━━━━",
+        f"🔴 {b_user}   {_bal(fb.get('banker'))}  ({_net_tag(sb.get('banker'), fb.get('banker'))})",
+        f"🔵 {p_user}   {_bal(fb.get('player'))}  ({_net_tag(sb.get('player'), fb.get('player'))})",
+    ]
+    notes = [m for m in summary.get("messages", []) if m]
+    if notes:
+        lines.append("━━━━━━━━━━━━━━")
+        lines += [f"ℹ️ {html.escape(m)}" for m in notes]
+    lines.append(f"\n📄 History: /runs {pid}  ·  /runlog {run_id}")
+    await update.message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
+    for shot in summary.get("shots", []):
+        try:
+            with open(shot, "rb") as f:
+                await update.message.reply_photo(photo=f)
+        except Exception:
+            pass
+
+
+@require_role(is_master)
+async def stoprun(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/stoprun -- ask the active run to stop after the current round."""
+    if not _run_active:
+        await update.message.reply_text("No run is in progress.")
+        return
+    _run_stop.set()
+    await update.message.reply_text("🛑 Stopping after the current round…")
+
+
+def _net(start, final):
+    """Signed net change (final - start) as a display string, or '?' if either
+    balance couldn't be read."""
+    if start is None or final is None:
+        return "?"
+    d = final - start
+    return f"+{d}" if d >= 0 else str(d)
+
+
+# Human-readable labels for run stop reasons (plain words, per user preference).
+_REASON_LABEL = {
+    "completed": "Completed all rounds",
+    "stopped_by_user": "Stopped by you",
+    "no_open_window": "No open betting window in time",
+    "setup_failed": "Could not open the tables",
+    "different_tables": "Accounts landed on different tables",
+    "partial_unhedged": "Safety stop (one side only)",
+    "amount_mismatch": "Chip size didn't match",
+    "banker_out_of_balance": "Banker ran low on balance",
+    "player_out_of_balance": "Player ran low on balance",
+    "playwright_error": "Browser error",
+}
+
+
+def _reason_label(reason):
+    return _REASON_LABEL.get(reason, (reason or "unknown").replace("_", " "))
+
+
+def _bal(v):
+    """Format a balance value for chat, or an em-dash if unknown."""
+    return f"₹{v:,}" if isinstance(v, int) else "—"
+
+
+def _net_tag(start, final):
+    """Net change with a sign and colour word, e.g. '+₹100'. '—' if unknown."""
+    if not isinstance(start, int) or not isinstance(final, int):
+        return "—"
+    d = final - start
+    return f"+₹{d:,}" if d >= 0 else f"−₹{abs(d):,}"
+
+
+@require_role(is_master)
+async def runs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/runs [pair_id] -- list past hedge runs, most recent first (all pairs,
+    or just one pair_id). Use /runlog <run_id> for a run's per-round detail."""
+    runs = pair_runs["runs"]
+    if context.args:
+        pid = context.args[0]
+        runs = [r for r in runs if r.get("pair_id") == pid]
+        header = f"Hedge runs · Pair #{pid}"
+        empty = f"No runs recorded for pair #{pid} yet."
+    else:
+        header = "Recent hedge runs"
+        empty = "No runs recorded yet. Start one with /run."
+    if not runs:
+        await update.message.reply_text(empty)
+        return
+    lines = [f"📊 <b>{header}</b>", "━━━━━━━━━━━━━━"]
+    for r in list(reversed(runs))[:15]:
+        sb, fb = r.get("start_balance", {}), r.get("final_balance", {})
+        icon = "✅" if r["stop_reason"] == "completed" else "⚠️"
+        ended = (r.get("ended_at") or "").replace("T", " ")[:16]
+        lines.append(
+            f"{icon} <b>Run #{r['run_id']}</b> · pair {r['pair_id']} · "
+            f"{r['rounds_done']}/{r['requested_rounds']} @ ₹{r['amount']:,}\n"
+            f"   🔴 {html.escape(r['banker_username'])} {_net_tag(sb.get('banker'), fb.get('banker'))}"
+            f"   🔵 {html.escape(r['player_username'])} {_net_tag(sb.get('player'), fb.get('player'))}\n"
+            f"   {_reason_label(r['stop_reason'])} · {ended}")
+    lines.append("\n📄 /runlog &lt;run_id&gt; for round-by-round detail")
+    await update.message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
+
+
+@require_role(is_master)
+async def runlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/runlog <run_id> -- per-round balance progression of one past run."""
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("Usage: /runlog <run_id>  (ids from /runs)")
+        return
+    rid = int(context.args[0])
+    rec = next((r for r in pair_runs["runs"] if r["run_id"] == rid), None)
+    if rec is None:
+        await update.message.reply_text(f"No run #{rid}. See /runs.")
+        return
+    sb, fb = rec.get("start_balance", {}), rec.get("final_balance", {})
+    b_user = html.escape(rec["banker_username"])
+    p_user = html.escape(rec["player_username"])
+    started = (rec.get("started_at") or "").replace("T", " ")
+    ended = (rec.get("ended_at") or "").replace("T", " ")
+    lines = [
+        f"📄 <b>Run #{rid} · Pair #{rec['pair_id']}</b>",
+        f"🔴 {b_user} (Banker)  vs  🔵 {p_user} (Player)",
+        f"💵 ₹{rec['amount']:,}/side · 🎯 {rec['rounds_done']}/{rec['requested_rounds']} rounds",
+        f"🛑 {_reason_label(rec['stop_reason'])}",
+        f"🕒 {started} → {ended}",
+        "━━━━━━━━━━━━━━",
+        f"Start   🔴 {_bal(sb.get('banker'))}   🔵 {_bal(sb.get('player'))}",
+    ]
+    for rr in rec.get("rounds", []):
+        lines.append(f"R{rr['round']}      🔴 {_bal(rr.get('banker'))}   🔵 {_bal(rr.get('player'))}")
+    lines.append(
+        f"Final   🔴 {_bal(fb.get('banker'))} ({_net_tag(sb.get('banker'), fb.get('banker'))})"
+        f"   🔵 {_bal(fb.get('player'))} ({_net_tag(sb.get('player'), fb.get('player'))})")
+    notes = [m for m in rec.get("messages", []) if m]
+    if notes:
+        lines.append("━━━━━━━━━━━━━━")
+        lines += [f"ℹ️ {html.escape(m)}" for m in notes]
+    await update.message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
+
+
 @require_role(is_master)
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """No args: overall status breakdown plus a per-btag count. One arg (a
@@ -888,10 +1309,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"No signups recorded for btag {btag}.")
             return
         total = sum(c for _, c in rows)
-        lines = [f"Signups for btag {btag}: {total}"]
+        lines = [f"📊 <b>btag {html.escape(btag)} — {total} signups</b>", "━━━━━━━━━━━━━━"]
         for status, count in rows:
-            lines.append(f"  {status}: {count}")
-        await update.message.reply_text("\n".join(lines))
+            lines.append(f"   {html.escape(status)}:  <b>{count}</b>")
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
         return
 
     cur = conn.execute("SELECT status, COUNT(*) FROM accounts GROUP BY status")
@@ -900,20 +1321,20 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not rows:
         await update.message.reply_text("No signups recorded yet.")
         return
-    lines = [f"Total signups recorded: {total}", "", "By status:"]
+    lines = [f"📊 <b>Signups — {total} total</b>", "━━━━━━━━━━━━━━", "<b>By status</b>"]
     for status, count in rows:
-        lines.append(f"  {status}: {count}")
+        lines.append(f"   {html.escape(status)}:  <b>{count}</b>")
 
     btag_rows = conn.execute(
         "SELECT COALESCE(referral_code, '(none)'), COUNT(*) FROM accounts "
         "GROUP BY referral_code ORDER BY COUNT(*) DESC"
     ).fetchall()
     lines.append("")
-    lines.append("By btag:")
+    lines.append("<b>By btag</b>")
     for code, count in btag_rows:
-        lines.append(f"  {code}: {count}")
+        lines.append(f"   {html.escape(str(code))}:  <b>{count}</b>")
 
-    await update.message.reply_text("\n".join(lines))
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
 @require_role(is_master)
@@ -933,18 +1354,18 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in rows:
         r = dict(zip(db.COLUMNS, row))
         line = (
-            f"#{r['id']} [{r['status']}] {r['created_at']}\n"
-            f"  username: {r['username']}\n"
-            f"  email: {r['email']}\n"
-            f"  password: {r['password']}\n"
-            f"  phone: {r['phone']}"
+            f"🧾 #{r['id']} · {r['status']} · {r['created_at']}\n"
+            f"👤 {r['username']}\n"
+            f"✉️ {r['email']}\n"
+            f"🔑 {r['password']}\n"
+            f"📱 {r['phone']}"
         )
         if r["proxy"]:
-            line += f"\n  proxy: {mask_proxy_display(r['proxy'])}"
+            line += f"\n🌐 {mask_proxy_display(r['proxy'])}"
         if r["screenshot"]:
-            line += f"\n  screenshot: {r['screenshot']}"
+            line += f"\n🖼 {r['screenshot']}"
         if r["notes"]:
-            line += f"\n  notes: {r['notes']}"
+            line += f"\n📝 {r['notes']}"
         lines.append(line)
 
     # Telegram caps messages at ~4096 chars; chunk to stay safely under that.
@@ -1042,7 +1463,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if session.stage == "await_phone":
         if not _valid_phone(text):
-            await update.message.reply_text(f"[#{sub_id}] That doesn't look like a valid phone "
+            await update.message.reply_text(f"⚠️ [#{sub_id}] That doesn't look like a valid phone "
                                              "number (digits only, 7-15 characters). Try again.")
             return
         session.acct["phone"] = text
@@ -1050,8 +1471,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.acct["url"] = session.site_url
         session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
         session.row_id = db.insert_account(conn, session.acct)
-        await update.message.reply_text(f"[#{sub_id}] Submitting the signup form and "
-                                         "requesting an OTP, one moment...")
+        await update.message.reply_text(f"⏳ [#{sub_id}] Submitting the signup form and "
+                                         "requesting an OTP, one moment…")
 
         logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
                     f"(phone {text}, url {session.site_url or BOT_SITE_URL}, "
@@ -1063,7 +1484,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"#{session.row_id} {session.acct['username']}: phone taken -- {result['message']}")
             db.update_status(conn, session.row_id, "phone_taken", notes=result["message"])
             await end_session(session)
-            await update.message.reply_text(f"[#{sub_id}] {result['message']}")
+            await update.message.reply_text(f"⚠️ [#{sub_id}] {result['message']}")
             _pop_session(chat_id, sub_id)
             if (chat_id, sub_id) in looping_chats:
                 await begin_signup(update, chat_id, sub_id)
@@ -1079,7 +1500,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"{result['message']} (screenshot: {result.get('shot')})")
             db.update_status(conn, session.row_id, "failed", notes=result["message"],
                              screenshot=result.get("shot"))
-            await update.message.reply_text(f"[#{sub_id}] Signup failed. (#{session.row_id})")
+            await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
             await end_session(session)
             _pop_session(chat_id, sub_id)
             if (chat_id, sub_id) in looping_chats:
@@ -1089,12 +1510,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
         session.stage = "await_otp"
         await update.message.reply_text(
-            f"[#{sub_id}] OTP sent to {text}. Send the {result['digits']}-digit code you received."
+            f"📩 [#{sub_id}] OTP sent to {text}. Send the {result['digits']}-digit code you received."
         )
 
     elif session.stage == "await_otp":
         if not text.isdigit():
-            await update.message.reply_text(f"[#{sub_id}] Send just the numeric OTP code.")
+            await update.message.reply_text(f"⚠️ [#{sub_id}] Send just the numeric OTP code.")
             return
 
         result = await loop.run_in_executor(
@@ -1113,11 +1534,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Success: just a plain confirmation, no photo/caption/CSV -- the
             # account details stay in accounts.db, retrievable via /list or
             # /export later, but aren't pushed into the chat automatically.
-            await update.message.reply_text(f"[#{sub_id}] Signup successful! (#{session.row_id})")
+            await update.message.reply_text(f"✅ [#{sub_id}] Signup successful! (#{session.row_id})")
         else:
             # Failure: same policy as a register failure above -- no
             # photo/caption/CSV in chat, error logged + stored in accounts.db.
-            await update.message.reply_text(f"[#{sub_id}] Signup failed. (#{session.row_id})")
+            await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
 
         await end_session(session)
         _pop_session(chat_id, sub_id)
@@ -1128,51 +1549,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Not role-gated -- shows role-appropriate content instead of a blanket
     rejection, since an unauthorized user still needs to see their own ID."""
+    if update.effective_user is None:
+        return
     user_id = update.effective_user.id
     if is_master(user_id):
         await update.message.reply_text(
-            "Commands (master admin):\n"
-            "/newacc [count] - start continuous test signups (asks for phone, then OTP, "
-            "then starts the next one automatically). count runs that many in parallel "
-            f"(1-{MAX_PARALLEL_NEWACC}, default 1) -- reply with \"<lane> <phone/OTP>\" when "
-            "more than one is active\n"
-            "/done [lane] - stop after the current signup finishes (all lanes, or just one)\n"
-            "/cancel [lane] - abandon in-progress signup(s) (also stops looping)\n"
-            "/stats - counts of signups by status and by btag\n"
-            "/stats <btag> - status breakdown for just that btag\n"
-            "/list [N] - most recent N stored accounts\n"
-            "/photo <id> - resend a stored account's screenshot with its details as caption\n"
-            "/export [N] [status] [url] - CSV of successful signups by default; "
-            "/export all for every status, /export failed for a specific one, "
-            "/export https://example.com to filter by site URL\n"
-            "/setpassword <pw> - fixed password for every future signup (--random to revert)\n"
-            "/password - show the current password mode\n"
-            "/setproxy <proxy> - set the GLOBAL proxy for every admin's signups\n"
-            "/proxy - show the global proxy\n"
-            "/clearproxy - clear the global proxy\n"
-            "/testproxy [proxy] - check a proxy actually works\n"
-            "/seturl <url> - set the GLOBAL site URL for every admin's signups\n"
-            "/url - show the global site URL\n"
-            "/clearurl - reset to the default site URL\n"
-            "/btag <code> - set just the btag on the global site URL (keeps scheme/host/path)\n"
-            "/btag - show the current btag\n"
-            "/addadmin <user_id> - authorize a new admin\n"
-            "/removeadmin <user_id> - revoke an admin\n"
-            "/admins - list current admins"
+            "🤖 Master admin — commands\n"
+            "━━━━━━━━━━━━━━\n"
+            "📝 Signups\n"
+            f"/newacc [count] — start continuous test signups (asks phone → OTP, then "
+            f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
+            "reply \"<lane> <phone/OTP>\" when more than one is active\n"
+            "/done [lane] — stop after the current signup finishes\n"
+            "/cancel [lane] — abandon in-progress signup(s)\n"
+            "\n"
+            "📊 Data\n"
+            "/list [N] — recent stored accounts\n"
+            "/stats [btag] — counts by status (and btag)\n"
+            "/photo <id> — resend an account's screenshot\n"
+            "/export [N] [status] [url] — CSV (successful by default; 'all' for every status)\n"
+            "\n"
+            "🎰 Casino / hedge betting\n"
+            "/cpair <u1> <p1> <u2> <p2> — create a pair (acc1 Banker, acc2 Player)\n"
+            "/pairs — list pairs   ·   /delpair <id> — remove one\n"
+            "/run <pair> <amount> <rounds> — run the hedge   ·   /stoprun — halt it\n"
+            "/runs [pair] — run history   ·   /runlog <run_id> — round-by-round\n"
+            "/testbaccarat <user> <pass> [amount] — single-account bet test\n"
+            "\n"
+            "⚙️ Settings (global)\n"
+            "/setpassword <pw> | --random   ·   /password\n"
+            "/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]\n"
+            "/seturl <url> · /url · /clearurl · /btag [code]\n"
+            "\n"
+            "👥 Admins\n"
+            "/addadmin <id> · /removeadmin <id> · /admins"
         )
     elif is_admin(user_id):
         await update.message.reply_text(
-            "Commands (admin):\n"
-            "/newacc [count] - start continuous test signups (asks for phone, then OTP, "
-            "then starts the next one automatically). count runs that many in parallel "
-            f"(1-{MAX_PARALLEL_NEWACC}, default 1) -- reply with \"<lane> <phone/OTP>\" when "
-            "more than one is active\n"
-            "/done [lane] - stop after the current signup finishes (all lanes, or just one)\n"
-            "/cancel [lane] - abandon in-progress signup(s) (also stops looping)"
+            "🤖 Admin — commands\n"
+            "━━━━━━━━━━━━━━\n"
+            f"/newacc [count] — start continuous test signups (asks phone → OTP, then "
+            f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
+            "reply \"<lane> <phone/OTP>\" when more than one is active\n"
+            "/done [lane] — stop after the current signup finishes\n"
+            "/cancel [lane] — abandon in-progress signup(s)"
         )
     else:
         await update.message.reply_text(
-            "You are not authorized to use this bot.\n"
+            "🔒 You are not authorized to use this bot.\n"
             f"Your Telegram user ID: {user_id}\n"
             "Share this with the master admin to request access."
         )
@@ -1194,7 +1618,7 @@ async def addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                           scope=BotCommandScopeChat(chat_id=int(new_id)))
     except Exception as e:
         logger.warning(f"Could not set command menu for new admin {new_id}: {e}")
-    await update.message.reply_text(f"Added admin: {new_id}")
+    await update.message.reply_text(f"✅ Added admin: {new_id}")
 
 
 @require_role(is_master)
@@ -1212,7 +1636,7 @@ async def removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(old_id)))
     except Exception as e:
         logger.warning(f"Could not clear command menu for removed admin {old_id}: {e}")
-    await update.message.reply_text(f"Removed admin: {old_id}")
+    await update.message.reply_text(f"✅ Removed admin: {old_id}")
 
 
 @require_role(is_master)
@@ -1220,7 +1644,20 @@ async def list_admins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not admin_ids:
         await update.message.reply_text("No admins yet. Use /addadmin <user_id> to add one.")
         return
-    await update.message.reply_text("Admins:\n" + "\n".join(sorted(admin_ids)))
+    await update.message.reply_text("👥 Admins\n━━━━━━━━━━━━━━\n" + "\n".join(f"• {a}" for a in sorted(admin_ids)))
+
+
+async def on_error(update, context):
+    """Global error handler. Transient long-poll network hiccups (ReadError,
+    Bad Gateway, timeouts) are expected and auto-retried by PTB -- log them as a
+    single WARNING line instead of the full 'No error handlers are registered'
+    traceback that was tripping the log monitor. Anything else is a real bug and
+    gets logged with its traceback."""
+    err = context.error
+    if isinstance(err, (NetworkError, TimedOut)):
+        logger.warning("Transient Telegram network error (auto-retried): %s", err)
+        return
+    logger.error("Unhandled exception in handler:", exc_info=err)
 
 
 def main():
@@ -1244,6 +1681,14 @@ def main():
     app.add_handler(CommandHandler("proxy", show_proxy))
     app.add_handler(CommandHandler("clearproxy", clearproxy))
     app.add_handler(CommandHandler("testproxy", testproxy))
+    app.add_handler(CommandHandler("testbaccarat", testbaccarat))
+    app.add_handler(CommandHandler("cpair", cpair))
+    app.add_handler(CommandHandler("pairs", pairs_cmd))
+    app.add_handler(CommandHandler("delpair", delpair))
+    app.add_handler(CommandHandler("run", run_cmd))
+    app.add_handler(CommandHandler("stoprun", stoprun))
+    app.add_handler(CommandHandler("runs", runs_cmd))
+    app.add_handler(CommandHandler("runlog", runlog_cmd))
     app.add_handler(CommandHandler("seturl", seturl))
     app.add_handler(CommandHandler("url", show_url))
     app.add_handler(CommandHandler("clearurl", clearurl))
@@ -1252,6 +1697,7 @@ def main():
     app.add_handler(CommandHandler("removeadmin", removeadmin))
     app.add_handler(CommandHandler("admins", list_admins))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(on_error)
 
     logger.info(f"Warming up {BOT_CONCURRENCY} browser slot(s)...")
     for slot in range(BOT_CONCURRENCY):
@@ -1259,9 +1705,14 @@ def main():
 
     logger.info(f"Bot starting... env={_env_file} site={BOT_SITE_URL} "
                 f"concurrency={BOT_CONCURRENCY} "
-                f"admins_file={ADMINS_FILE} settings_file={SETTINGS_FILE}")
+                f"admins_file={ADMINS_FILE} settings_file={SETTINGS_FILE} "
+                f"pairs_file={PAIRS_FILE} pair_runs_file={PAIR_RUNS_FILE}")
     try:
-        app.run_polling()
+        # bootstrap_retries=-1: keep retrying the startup get_me() on transient
+        # network errors instead of aborting the whole process if Telegram is
+        # momentarily unreachable at boot (a bad token still fails fast -- that's
+        # an auth error, not a network error, so it isn't retried).
+        app.run_polling(bootstrap_retries=-1)
     finally:
         for slot in range(BOT_CONCURRENCY):
             _pw_executors[slot].submit(_blocking_shutdown_browser, slot).result()
