@@ -879,7 +879,10 @@ def login(page, username, password, site_url=None):
     if not prof.supports_casino:
         return "error", [f"Login/casino is not supported for {prof.key} "
                          "(its login/casino selectors are not inspected)."]
-    page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+    except PWError as e:
+        return "error", [f"Couldn't load the site (check the proxy?): {str(e)[:150]}"]
     page.wait_for_timeout(4000)
 
     # Retry finding the LOGIN button over a longer window, dismissing popups
@@ -1346,11 +1349,13 @@ def _setup_fail(context, page, username, step, reason):
     raise RuntimeError(reason + shot)
 
 
-def _open_table_for(browser, username, password, site_url, category, tile_text):
+def _open_table_for(browser, username, password, site_url, category, tile_text,
+                    proxy_conf=None):
     """Log a fresh context into `username` and open the given live table.
     Returns (context, main_page, game_page, frame) or raises RuntimeError with
-    a human-readable reason. Caller owns closing the context."""
-    context = browser.new_context()
+    a human-readable reason. Caller owns closing the context. `proxy_conf` is a
+    Playwright proxy dict (already bridged for SOCKS5-auth) or None for direct."""
+    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
     page = context.new_page()
     outcome, msgs = login(page, username, password, site_url=site_url)
     if outcome != "ok":
@@ -1412,7 +1417,7 @@ def _open_table_for(browser, username, password, site_url, category, tile_text):
 
 
 def _open_table_with_retry(browser, creds, site_url, category, tile_text,
-                           label, progress, attempts=4):
+                           label, progress, attempts=4, proxy_conf=None):
     """_open_table_for with fresh-context retries. Login + the Live Casino nav
     are intermittently flaky in stretches (site-side; observed live 2026-07-17:
     fine at 21:58 and 22:15, failing repeatedly at 21:52 and 22:06), so a failed
@@ -1423,7 +1428,7 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
     for i in range(1, attempts + 1):
         try:
             return _open_table_for(browser, creds["username"], creds["password"],
-                                   site_url, category, tile_text)
+                                   site_url, category, tile_text, proxy_conf=proxy_conf)
         except RuntimeError as e:
             last = e
             if i < attempts:
@@ -1447,7 +1452,7 @@ def _now_iso():
 
 def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                      site_url=None, category="Baccarat", tile_text="Baccarat A",
-                     progress=None, should_stop=None):
+                     progress=None, should_stop=None, proxy=None):
     """Run up to `rounds` hedged rounds: `banker_creds` bets Banker and
     `player_creds` bets Player, `amount` each, on the SAME table/hand, until
     `rounds` is reached OR either balance drops below `amount` OR a round goes
@@ -1455,7 +1460,10 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
 
     `*_creds` are dicts {"username","password"}. `progress(str)` (optional) is
     called with a human-readable line each round. `should_stop()` (optional)
-    returns True to stop after the current round.
+    returns True to stop after the current round. `proxy` (optional raw string)
+    routes BOTH accounts' contexts through the same exit IP -- required when the
+    box running the bot has a datacenter IP that the site's WAF 403-blocks
+    (login just returns a "Forbidden" page otherwise).
 
     Returns a summary dict: {"ok", "rounds_done", "requested_rounds",
     "stop_reason", "messages", "final_balance": {"banker","player"},
@@ -1472,15 +1480,25 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                "start_balance": {"banker": None, "player": None},
                "final_balance": {"banker": None, "player": None}}
 
-    ctx_b = ctx_p = gp_b = gp_p = fr_b = fr_p = None
+    ctx_b = ctx_p = gp_b = gp_p = fr_b = fr_p = bridge_proc = None
     try:
+        # Both accounts share one exit IP: parse + (for SOCKS5-auth) bridge the
+        # proxy once, then hand the same proxy_conf to both contexts. stop_bridge
+        # runs in the finally so the local pproxy subprocess never leaks.
+        proxy_conf = parse_proxy(proxy) if proxy else None
+        try:
+            proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+        except RuntimeError as e:
+            summary["stop_reason"] = "setup_failed"
+            summary["messages"].append(f"Proxy bridge failed to start: {e}")
+            return summary
         try:
             ctx_b, _, gp_b, fr_b = _open_table_with_retry(
                 browser, banker_creds, site_url, category, tile_text,
-                "Banker", progress)
+                "Banker", progress, proxy_conf=proxy_conf)
             ctx_p, _, gp_p, fr_p = _open_table_with_retry(
                 browser, player_creds, site_url, category, tile_text,
-                "Player", progress)
+                "Player", progress, proxy_conf=proxy_conf)
         except RuntimeError as e:
             summary["stop_reason"] = "setup_failed"
             summary["messages"].append(str(e))
@@ -1624,6 +1642,7 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                     closer.close()
             except Exception:
                 pass
+        stop_bridge(bridge_proc)
 
 
 def _screenshot_pair(gp_b, gp_p, summary, tag):

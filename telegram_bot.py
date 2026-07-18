@@ -923,11 +923,18 @@ async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def _blocking_test_baccarat(username, password, amount):
     """Runs on _pw_executors[0]. Opens a throwaway context (mirrors
     _blocking_test_proxy_once's "share slot 0, always clean up" pattern) and
-    calls main.test_baccarat() to log in and place a real bet. Does not take
-    a proxy -- this command is about confirming the game integration works,
-    not testing proxy routing."""
+    calls main.test_baccarat() to log in and place a real bet. Uses the global
+    proxy (like signups/hedge) so a datacenter box whose IP the site WAF-blocks
+    can still reach the login/casino."""
     browser = _blocking_ensure_browser(0)
-    context = browser.new_context()
+    raw = global_settings.get("proxy")
+    proxy_conf = parse_proxy(raw) if raw else None
+    bridge_proc = None
+    try:
+        proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+    except RuntimeError as e:
+        return {"ok": False, "messages": [f"Proxy bridge failed to start: {e}"], "shot": None}
+    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
     try:
         page = context.new_page()
         return test_baccarat(page, username, password, amount, site_url=BOT_SITE_URL)
@@ -935,6 +942,7 @@ def _blocking_test_baccarat(username, password, amount):
         return {"ok": False, "messages": [f"Playwright error: {str(e)[:300]}"], "shot": None}
     finally:
         context.close()
+        stop_bridge(bridge_proc)
 
 
 @require_role(is_master)
@@ -1002,7 +1010,8 @@ def _blocking_run_pair(loop, bot, chat_id, banker_creds, player_creds, amount, r
     try:
         return run_paired_hedge(
             browser, banker_creds, player_creds, amount, rounds,
-            site_url=BOT_SITE_URL, progress=progress, should_stop=_run_stop.is_set)
+            site_url=BOT_SITE_URL, progress=progress, should_stop=_run_stop.is_set,
+            proxy=global_settings.get("proxy"))
     except PWError as e:
         return {"ok": False, "rounds_done": 0, "requested_rounds": rounds,
                 "stop_reason": "playwright_error",
@@ -1108,6 +1117,9 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rec = pairs["pairs"][pid]
     _run_active = True
     _run_stop.clear()
+    raw_proxy = global_settings.get("proxy")
+    proxy_line = (f"🌐 Proxy   {html.escape(mask_proxy_display(raw_proxy))}"
+                  if raw_proxy else "🌐 Proxy   none (direct connection)")
     await update.message.reply_text(
         f"🎰 <b>Run started · Pair #{pid}</b>\n"
         f"━━━━━━━━━━━━━━\n"
@@ -1115,6 +1127,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔵 Player  <b>{html.escape(rec['player']['username'])}</b>\n"
         f"💵 Stake   <b>₹{amount:,}</b> / side\n"
         f"🔁 Rounds  up to <b>{rounds}</b>\n"
+        f"{proxy_line}\n"
         f"━━━━━━━━━━━━━━\n"
         f"⚠️ Real money · send /stoprun to halt",
         parse_mode="HTML")
