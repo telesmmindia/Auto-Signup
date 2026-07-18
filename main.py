@@ -1416,16 +1416,27 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     return context, page, game_page, frame
 
 
+class _HedgeStopped(Exception):
+    """Raised inside setup when should_stop() is set, so /stoprun can abort a
+    run that's still opening tables (setup can take minutes over its retries)."""
+
+
 def _open_table_with_retry(browser, creds, site_url, category, tile_text,
-                           label, progress, attempts=4, proxy_conf=None):
+                           label, progress, attempts=4, proxy_conf=None,
+                           should_stop=None):
     """_open_table_for with fresh-context retries. Login + the Live Casino nav
     are intermittently flaky in stretches (site-side; observed live 2026-07-17:
     fine at 21:58 and 22:15, failing repeatedly at 21:52 and 22:06), so a failed
     open is usually cleared by retrying from a brand-new context -- with a pause
-    between attempts so a bad stretch has time to pass. Raises the last
-    RuntimeError if every attempt fails. `progress(str)` reports each retry."""
+    between attempts so a bad stretch has time to pass. Checks should_stop()
+    between attempts (and during the pause) so /stoprun aborts setup promptly.
+    Raises the last RuntimeError if every attempt fails, or _HedgeStopped if
+    stopped. `progress(str)` reports each retry."""
+    should_stop = should_stop or (lambda: False)
     last = None
     for i in range(1, attempts + 1):
+        if should_stop():
+            raise _HedgeStopped()
         try:
             return _open_table_for(browser, creds["username"], creds["password"],
                                    site_url, category, tile_text, proxy_conf=proxy_conf)
@@ -1434,7 +1445,10 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
             if i < attempts:
                 progress(f"⏳ Opening {label} table for {creds['username']} — "
                          f"attempt {i}/{attempts} didn't connect, trying a fresh session…")
-                time.sleep(10)
+                for _ in range(10):  # pause, but stay responsive to /stoprun
+                    if should_stop():
+                        raise _HedgeStopped()
+                    time.sleep(1)
     raise last
 
 
@@ -1495,10 +1509,13 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
         try:
             ctx_b, _, gp_b, fr_b = _open_table_with_retry(
                 browser, banker_creds, site_url, category, tile_text,
-                "Banker", progress, proxy_conf=proxy_conf)
+                "Banker", progress, proxy_conf=proxy_conf, should_stop=should_stop)
             ctx_p, _, gp_p, fr_p = _open_table_with_retry(
                 browser, player_creds, site_url, category, tile_text,
-                "Player", progress, proxy_conf=proxy_conf)
+                "Player", progress, proxy_conf=proxy_conf, should_stop=should_stop)
+        except _HedgeStopped:
+            summary["stop_reason"] = "stopped_by_user"
+            return summary
         except RuntimeError as e:
             summary["stop_reason"] = "setup_failed"
             summary["messages"].append(str(e))
