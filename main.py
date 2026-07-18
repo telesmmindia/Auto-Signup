@@ -838,6 +838,40 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
 # anything off-screen or oversized, then picks the smallest remaining match.
 # ---------------------------------------------------------------------------
 
+def _page_debug_info(page):
+    """URL + title + a snippet of visible text, for diagnosing a login failure
+    on a remote/prod machine we can't watch -- e.g. a WAF/403 block page served
+    to a datacenter IP has a telltale title/text and no login button. Goes into
+    the error message itself, so it shows up right in the chat."""
+    try:
+        title = ""
+        try:
+            title = page.title()
+        except Exception:
+            pass
+        body = ""
+        try:
+            body = page.locator("body").inner_text(timeout=2000)
+        except Exception:
+            pass
+        body = " ".join(body.split())[:200]
+        return f"[page URL: {page.url} | title: {title!r} | text: {body!r}]"
+    except Exception:
+        return ""
+
+
+def _login_debug_shot(page, username):
+    """Save a screenshot of the page at a login failure (on the server running
+    the bot), so a remote failure has visual evidence. Returns a path suffix."""
+    try:
+        SHOTS_DIR.mkdir(exist_ok=True)
+        path = SHOTS_DIR / f"login-fail-{username}-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        page.screenshot(path=str(path))
+        return f" [screenshot: {path}]"
+    except Exception:
+        return ""
+
+
 def login(page, username, password, site_url=None):
     """Log into an EXISTING account (not signup). Returns (outcome, messages)
     where outcome is "ok", "error", or "timeout"."""
@@ -847,16 +881,31 @@ def login(page, username, password, site_url=None):
                          "(its login/casino selectors are not inspected)."]
     page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(4000)
-    dismiss_popups(page)
 
-    if not click_first_visible(page, [prof.sel["open_login"]], timeout=5000):
-        return "timeout", ["Could not find the LOGIN button."]
+    # Retry finding the LOGIN button over a longer window, dismissing popups
+    # each pass. On a slow/remote (prod) machine the homepage can take longer to
+    # render and a promo overlay can cover the button; a single 5s attempt then
+    # fails. If it never appears, capture what the page actually is -- a WAF/403
+    # block page (served to datacenter IPs) has no login button at all.
+    clicked = False
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        dismiss_popups(page)
+        if click_first_visible(page, [prof.sel["open_login"]], timeout=3000):
+            clicked = True
+            break
+        page.wait_for_timeout(1000)
+    if not clicked:
+        info = _page_debug_info(page)
+        shot = _login_debug_shot(page, username)
+        return "timeout", [f"Could not find the LOGIN button. {info}{shot}"]
     page.wait_for_timeout(1000)
 
     try:
         page.wait_for_selector(prof.sel["login_username"], state="visible", timeout=8000)
     except PWTimeout:
-        return "timeout", ["Login form did not appear."]
+        return "timeout", [f"Login form did not appear. {_page_debug_info(page)}"
+                           f"{_login_debug_shot(page, username)}"]
 
     user_field = page.locator(prof.sel["login_username"])
     user_field.click()
