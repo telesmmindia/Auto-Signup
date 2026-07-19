@@ -883,6 +883,30 @@ site_url, progress, should_stop)` in `main.py` reuses `login()` /
 - **Partial round → stop immediately** (deliberate choice): if only one side's
   bet lands (unhedged real exposure), the run halts, names the exposed account,
   and screenshots both tabs (`shots/hedge-partial-*.png`).
+- **Setup (login → table-live) is inherently slow and sequential, by design
+  necessity, not a bug.** Both accounts are opened via `_open_table_for()` on
+  the **one slot-0 worker thread** one after another (Playwright's sync API is
+  thread-affine to the browser it launched, so true parallel setup would need
+  a second browser process + a second thread, and then the round-loop's
+  clicks — which must land in the SAME sub-second window — would need
+  cross-thread coordination too; not attempted, see below). Each account's
+  setup is a real login + a real live-video game load, routed through a
+  residential proxy when one is set — easily 1-2+ minutes per account, so 2-4
+  minutes total is normal, not a sign anything is stuck. `_open_table_for()`
+  takes `progress(str)` and reports one line per phase (🔑 login, 🎰 casino
+  lobby, 🃏 joining the table, 📡 waiting for it to load, ✅ ready) for each
+  account, so `/run` no longer goes silent for minutes — don't drop these
+  calls if you touch this function. `open_casino_lobby()`'s poll loop checks
+  the lobby's own visibility BEFORE paying `dismiss_popups()`'s wait (only
+  falling back to it if not yet visible), shaving up to ~1.3s per loop
+  iteration on the common (already-open) path — a real, safe trim; the other
+  fixed sleeps in this setup chain are left alone since several were
+  confirmed-live load-bearing (see `signup_once`'s post-`goto` sleep note) and
+  weren't re-verified safe to touch here.
+  True parallel setup (two browsers/threads, ~halving the 2-4 min) is possible
+  but requires dispatching every round-loop Playwright call (bet-spot clicks,
+  balance reads, `_betting_open` checks) through two separate thread pools
+  instead of one — a real refactor of the tested round loop, not attempted.
 - **v1 does NOT select a chip denomination.** It bets the table's default chip
   (the minimum, ~₹100 on Baccarat A) and verifies the actual size via each
   side's TOTAL BET. If `amount` doesn't match what the table placed, it stops

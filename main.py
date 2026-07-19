@@ -967,7 +967,17 @@ def open_casino_lobby(page, timeout_ms=15000):
             page.locator(casino_nav).first.click(timeout=5000)
         except Exception:
             pass
-        page.wait_for_timeout(1500)
+        # Check success BEFORE paying dismiss_popups' own wait -- on the common
+        # (fast) path the nav already worked and there's no popup blocking
+        # anything else, so this skips ~800ms of unnecessary waiting per
+        # account. Only fall back to the heavier dismiss_popups() pass (as
+        # before) if the lobby isn't visible yet.
+        page.wait_for_timeout(1000)
+        try:
+            if page.locator("a:has-text('Baccarat')").first.is_visible():
+                return True
+        except Exception:
+            pass
         dismiss_popups(page)
         try:
             if page.locator("a:has-text('Baccarat')").first.is_visible():
@@ -1350,17 +1360,26 @@ def _setup_fail(context, page, username, step, reason):
 
 
 def _open_table_for(browser, username, password, site_url, category, tile_text,
-                    proxy_conf=None):
+                    proxy_conf=None, progress=None, label=""):
     """Log a fresh context into `username` and open the given live table.
     Returns (context, main_page, game_page, frame) or raises RuntimeError with
     a human-readable reason. Caller owns closing the context. `proxy_conf` is a
-    Playwright proxy dict (already bridged for SOCKS5-auth) or None for direct."""
+    Playwright proxy dict (already bridged for SOCKS5-auth) or None for direct.
+    `progress(str)` (optional), if given, is called once per phase (login,
+    casino lobby, game join, live table) -- this whole function is naturally
+    slow (a real login + a real live-video game loading, done sequentially for
+    two accounts, easily 1-2+ min each over a proxy), so without these the
+    chat goes silent for minutes with no sign anything is happening."""
+    progress = progress or (lambda _msg: None)
+    tag = f" ({label})" if label else ""
+    progress(f"🔑 Logging in{tag}…")
     context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
     page = context.new_page()
     outcome, msgs = login(page, username, password, site_url=site_url)
     if outcome != "ok":
         context.close()
         raise RuntimeError(f"login failed for {username}: {'; '.join(msgs) or outcome}")
+    progress(f"🎰 Opening the Live Casino{tag}…")
     # The Live Casino nav is intermittently flaky in stretches (site-side; see
     # open_casino_lobby's docstring). Recovery ladder: (1) the SPA click loop,
     # (2) a direct goto to /live-casino -- documented risk is landing on a
@@ -1397,6 +1416,7 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
         if not lobby_ok:
             _setup_fail(context, page, username, "lobby",
                         f"could not open the casino lobby for {username}")
+    progress(f"🃏 Joining {tile_text}{tag}…")
     game_page = None
     for _ in range(3):
         game_page = search_and_open_game(page, category, tile_text)
@@ -1410,9 +1430,11 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     if frame is None:
         context.close()
         raise RuntimeError(f"game tab opened but its UI frame never loaded for {username}")
+    progress(f"📡 Waiting for the live table to load{tag}…")
     if not wait_for_live_table(frame, game_page):
         context.close()
         raise RuntimeError(f"table never became live (stuck loading) for {username}")
+    progress(f"✅ Table ready{tag}")
     return context, page, game_page, frame
 
 
@@ -1439,7 +1461,8 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
             raise _HedgeStopped()
         try:
             return _open_table_for(browser, creds["username"], creds["password"],
-                                   site_url, category, tile_text, proxy_conf=proxy_conf)
+                                   site_url, category, tile_text, proxy_conf=proxy_conf,
+                                   progress=progress, label=f"{label}: {creds['username']}")
         except RuntimeError as e:
             last = e
             if i < attempts:
