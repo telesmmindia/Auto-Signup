@@ -1012,6 +1012,21 @@ site_url, progress, should_stop, browser=None)` in `main.py` reuses `login()` /
 `data-role="balance-label-value"` readout, e.g. `₹1,891`) and `_open_table_for`
 / `_table_id` helpers. Key facts, all money-relevant:
 
+- **Accounts with a bonus balance launch the game differently (confirmed
+  live 2026-07-19).** New accounts carry bonus chips, so clicking a game tile
+  pops a "CHOOSE CHIPS: bonus or real" gate. Two traps found live: the
+  "REAL CHIPS" *label* has no click handler — the clickable element is
+  `div.cls_play_act_bal.redirectLink` (the red amount button) — and choosing
+  it navigates the *same tab* to the provider (`vt_id=` in the URL) instead
+  of opening a new tab (`table_id=`). `_dismiss_choose_chips_modal()`,
+  `search_and_open_game()` (returns the same Page on this path), and
+  `_table_id()` all handle this now. Accounts with no bonus (ali789/asha788)
+  never see the gate and keep the old new-tab flow — which is why runs on
+  pair 1 worked while every fresh-account pair failed with "could not open
+  the table" (and on throttled accounts, the session-dropped message).
+  Untested edge: a pair where only ONE account has bonus chips would get
+  `vt_id` on one side and `table_id` on the other, and the same-table check
+  would abort (safely, no bets) even if both are on the same table.
 - **Same physical table is required and confirmed.** Both accounts opening
   "Baccarat A" land on the same Evolution `table_id` (`oytmvb9m1zysmc44`,
   extracted from the game-tab URL). `run_paired_hedge` compares both tabs'

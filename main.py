@@ -1223,9 +1223,14 @@ def _dismiss_choose_chips_modal(page):
     bonus balance -- via a plain text locator (no stable class name was
     needed to identify it live)."""
     try:
-        loc = page.locator("text=REAL CHIPS")
-        if loc.count() and loc.first.is_visible():
-            loc.first.click(timeout=2000, force=True)
+        # The "REAL CHIPS" label itself has no click handler (verified live
+        # 2026-07-19: clicking it leaves the modal up and the game never
+        # launches). The actual button is the red amount div below it.
+        btn = page.locator("div.cls_play_act_bal.redirectLink")
+        if not (btn.count() and btn.first.is_visible()):
+            btn = page.locator("text=REAL CHIPS")
+        if btn.count() and btn.first.is_visible():
+            btn.first.click(timeout=2000, force=True)
             page.wait_for_timeout(1000)
     except Exception:
         pass
@@ -1258,6 +1263,17 @@ def search_and_open_game(page, category, tile_text):
             new_page = context.pages[-1]
             new_page.wait_for_timeout(3000)
             return new_page
+        # Bonus-balance accounts don't get a new tab at all: choosing REAL
+        # CHIPS in the CHOOSE CHIPS gate navigates THIS tab straight to the
+        # provider (confirmed live 2026-07-19, url -> ezugi.evo-games.com).
+        try:
+            if "evo-games" in page.url or "ezugi" in page.url:
+                page.wait_for_timeout(3000)
+                return page
+        except Exception:
+            pass
+        # The gate can also appear later than the first dismiss attempt.
+        _dismiss_choose_chips_modal(page)
         page.wait_for_timeout(500)
     return None
 
@@ -1748,7 +1764,9 @@ def _launch_pw_browser():
 def _table_id(game_page):
     """Extract Evolution's table_id from a game tab URL (the two accounts must
     share it for the hedge to be on the same hand)."""
-    m = re.search(r"table_id=([a-z0-9]+)", game_page.url or "")
+    # New-tab launches carry table_id=; the same-tab launch used by
+    # bonus-balance accounts (REAL CHIPS gate) carries vt_id= instead.
+    m = re.search(r"(?:table_id|vt_id)=([a-z0-9]+)", game_page.url or "")
     return m.group(1) if m else None
 
 
