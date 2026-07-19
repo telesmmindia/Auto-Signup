@@ -54,6 +54,11 @@ path so credentials can be retrieved later:
 # target a different site (defaults to SITE_URL in main.py)
 .venv/bin/python main.py --url "https://example.com?tag=123"
 
+# skip the browser entirely, hit the register API directly (cricmatch only,
+# see "--fast: HTTP-only signup" below; falls back to the browser for sites
+# that don't support it)
+.venv/bin/python main.py --fast --phone 9876543210
+
 # export every stored account to a CSV file and exit
 .venv/bin/python main.py --export-csv                    # writes accounts_export.csv
 .venv/bin/python main.py --export-csv my_accounts.csv
@@ -163,6 +168,79 @@ Prefer a **residential** proxy over datacenter for this site, and verify with
 `/testproxy` (or the CLI equivalent below) before relying on it for a real
 signup — a working-but-blocked proxy looks identical to a broken one until
 you check the exit IP's reputation and confirm the actual site loads.
+
+### `--fast`: HTTP-only signup, no browser at all
+
+`main.py --fast` skips Chromium/Playwright entirely and hits cricmatch247's
+register endpoint with plain `requests` calls. Discovered by capturing a real
+Playwright run's network traffic (`page.on("request"/"response")`), then
+confirmed live end-to-end with a raw `curl` replay that got back byte-
+identical JSON to the browser flow, with **zero cookies/state carried over
+from any earlier browser session** — a fresh `curl -c cookies.txt` run from
+scratch worked, so this isn't riding on some Playwright-established session.
+The whole thing turns out to be a stock Laravel app with no WAF/JS challenge
+on this endpoint:
+
+1. `GET /` → an `X-CSRF-TOKEN`/`_token` from the `<meta name="csrf-token">`
+   tag, plus session cookies (`laravel_session`, `XSRF-TOKEN`, `AWSALB*`) set
+   on the response — no JS execution needed to get either.
+2. `POST /register` with `username, email, password, phone, otp=""` + the
+   token → triggers the SMS, e.g.
+   `{"status":205,"message":"OTP has been sent.","message_class":"success"}`.
+3. The **same** `POST /register` again, now with the real `otp=<code>` →
+   verifies it, e.g. `{"status":206,"message":"Please enter valid OTP",
+   "message_class":"danger"}` for a wrong code.
+
+This is ~10-20x faster (no browser launch, no page render, no adaptive-poll
+waits) and lighter to run many of, but is a **more fragile, less honest**
+test than driving the real UI: it hard-codes today's field names and JSON
+response shape rather than exercising the actual form/JS, so a backend change
+(renamed field, added CAPTCHA, different response shape) breaks it silently
+instead of surfacing as a missing-selector error the way the browser path
+does. Prefer `--fast` for volume/speed; prefer the default browser path when
+you actually want to confirm the live UI still works end-to-end.
+
+Implementation lives in `main.py`: `_http_session_for()` (builds a
+`requests.Session`, translating a `--proxy` string the same way
+`parse_proxy()` does — `requests` can authenticate to SOCKS5 directly via
+PySocks, so unlike Chromium it needs no `pproxy` bridge), `http_fetch_csrf()`,
+`http_register_call()`, and `http_signup_once()` (same result-dict shape as
+`signup_once()` — `{"account","ok","messages","shot"}` — except `shot` is
+always `None`, since there's no browser to screenshot). Site support is a
+`SiteProfile` flag (`sites/base.py`): `supports_http_fast` (only
+`sites/cricmatch.py` sets it `True`), plus `http_register_path` (default
+`/register`) and `http_otp_digits` (default 6, since there's no DOM to count
+digit boxes in without a browser). `main()` checks this flag per-account and
+falls back to the normal Playwright path automatically for any site that
+doesn't support it (spin24star: its register POST is gated by a real AWS WAF
+JS challenge — see below — so `supports_http_fast` stays `False` there, by
+design, not an oversight); a mixed batch (`--account-file` with accounts
+across sites) only launches Chromium at all if at least one account in the
+batch actually needs it.
+
+`--fast --no-submit` is rejected outright (`--no-submit`'s whole point is
+filling the DOM form without clicking submit; there's no DOM here to fill).
+The interactive phone-number reprompt for a taken number still works the
+same way as the browser path (`prompt_phone()`, up to 5 retries when
+`interactive` — i.e. not `--account-file` batch mode); the OTP prompt
+(`prompt_otp()`) is unconditional either way, same as `enter_otp()` in the
+browser path.
+
+**Not yet verified live: the "phone already taken" JSON shape.**
+`_http_is_phone_taken()` guesses at it (`"taken"` + `"mobile"`/`"phone"` in
+the message, modeled on the DOM error's known wording — see
+`check_phone_taken()`) because triggering it for real requires a phone number
+that already completed a full, verified registration, which wasn't available
+to test against. If the guess is wrong, nothing is silently swallowed — the
+raw server message still lands in `result["messages"]` via the generic-error
+fallback, it just won't trigger the automatic re-prompt-for-a-different-
+number behavior.
+
+Verified live 2026-07-19: a real `--fast` run (dummy phone, dummy OTP) got
+the SMS-sent response, prompted for the OTP exactly like the browser path,
+correctly reported the server's real "Please enter valid OTP" rejection, and
+stored the attempt in `accounts.db` with `screenshot=NULL` — no Chromium
+process was ever spawned for the run.
 
 ## Telegram bot
 
@@ -294,10 +372,68 @@ accounts, text), `/photo <id>` (resend
 any past account's screenshot + caption, id from `/list`), `/export [N]
 [status] [url]` (CSV, defaults to successful signups only), `/setpassword
 <pw>` / `/setpassword --random` / `/password` (global fixed-or-random
-password mode), `/setproxy <proxy>` / `/proxy` / `/clearproxy` /
+password mode), `/fast on` / `/fast off` / `/fast` (global HTTP-fast signup
+mode, see below), `/setproxy <proxy>` / `/proxy` / `/clearproxy` /
 `/testproxy [proxy]` (global proxy), `/seturl <url>` / `/url` / `/clearurl`
 (global site URL), `/btag <code>` / `/btag` (global site URL's `btag` query
 param only, see below), `/addadmin <id>` / `/removeadmin <id>` / `/admins`.
+
+### `/fast`: HTTP-fast signup mode (bot side)
+
+Same feature as the CLI's `--fast` (see the "`--fast`: HTTP-only signup, no
+browser at all" section above), wired into the bot's chat-driven flow.
+`/fast on` / `/fast off` sets `global_settings["fast"]` (persisted via
+`save_settings()`, same as `proxy`/`url`/`password` — global across every
+admin's `/newacc`, not per-chat); `/fast` with no args shows the current
+state.
+
+Whether a given signup actually goes through HTTP or the browser is decided
+**once**, in `begin_signup()`, at the moment the session starts — not
+per-message — since the site URL (which decides `supports_http_fast` via
+`profile_for()`) is fixed for that session's whole life anyway:
+`session.use_fast = fast_wanted and profile_for(session.site_url or
+BOT_SITE_URL).supports_http_fast`. If `/fast` is ON but the resolved site
+doesn't support it (spin24star), `begin_signup()` says so right in the
+"send the phone number" prompt and falls back to the browser for that one
+signup, same fallback behavior as the CLI.
+
+`handle_message()`'s `await_phone`/`await_otp` branches each check
+`session.use_fast` and dispatch to `_blocking_http_register()` /
+`_blocking_http_verify_otp()` instead of `_blocking_fill_and_register()` /
+`_blocking_verify_otp()` — both pairs return the same result-dict shape
+(`ok`/`phone_taken`/`message`/`shot`, plus `digits` on a successful register),
+so the rest of `handle_message()` (the phone-taken/failure/success reply
+logic, `db.update_status()`, the continuous-loop auto-restart) doesn't need
+to know or care which path ran. `shot` is always `None` for the fast path —
+no browser, no screenshot — which `send_result_photo()` already handles by
+falling back to a plain text message, so no changes were needed there.
+
+**Load-bearing difference from the browser path: no thread-affinity
+requirement.** `_blocking_fill_and_register()`/`_blocking_verify_otp()` MUST
+run on `_pw_executors[session.slot]` (Playwright's sync API requires every
+call for a given browser to happen on the thread that launched it — see the
+module-level comment above `_pw_executors`). The HTTP-fast helpers touch no
+Playwright object at all, so `handle_message()` dispatches them via
+`loop.run_in_executor(None, ...)` (asyncio's default thread pool) instead —
+meaning HTTP-fast signups don't consume, queue behind, or block a
+`_pw_executors` slot at all, even if browser-based signups are running
+concurrently on the same bot. `session.slot` is still assigned in
+`begin_signup()` for a fast session (simpler than special-casing it there),
+it's just never used.
+
+State between the two HTTP calls (register, then OTP-verify) — the
+`requests.Session`'s cookies and the CSRF token — lives on
+`session.http_session` / `session.http_csrf`, the fast-path equivalent of
+`session.context` / `session.page` for the browser path.
+`_blocking_close_context()` resets both alongside `context`/`page` on every
+`end_session()` call, whichever path was actually used (harmless no-op
+reset for the one that wasn't).
+
+Verified live 2026-07-19 by calling `_blocking_http_register()` then
+`_blocking_http_verify_otp()` directly (bypassing Telegram itself): got the
+real "OTP has been sent" response, then the real "Please enter valid OTP"
+rejection for a dummy code — same round trip as the CLI's `--fast`, now
+proven through the bot's own code path.
 
 `/btag <code>` rebuilds the global site URL keeping whatever scheme/host/path
 the current one (or, if none is set, `SITE_URL`) already has, and replaces
@@ -836,8 +972,13 @@ Bot commands (all **master-only**, `@require_role(is_master)`):
 - `/run <pair_id> <amount> <rounds>` — log both accounts in, join the same
   table, and each round place `amount` on Banker (acc1) and `amount` on Player
   (acc2) on the same hand, until `rounds` is reached, either balance `< amount`,
-  a round goes unhedged, or `/stoprun`. Streams per-round progress to the chat.
-- `/stoprun` — stop the active run after the current round.
+  a round goes unhedged, or `/stoprun`. Streams per-round progress to the chat,
+  each line prefixed `[Pair #<id>]` so concurrent runs stay distinguishable.
+  **Multiple different pairs can run at once** (see "Concurrent runs" below);
+  a pair already running, or one sharing an account with a running pair, is
+  refused a second `/run` until it stops.
+- `/stoprun [pair_id]` — stop one run after its current round, or with no
+  argument, every currently-active run.
 - `/runs [pair_id]` — list past runs (most recent first; all pairs, or one
   pair). Each line shows run id, pair id, both usernames, `rounds_done/
   requested`, amount, stop reason, and net balance change per side.
@@ -863,8 +1004,8 @@ Persistence: two gitignored JSON files, both per-instance (env-overridable like
   `run_paired_hedge` summary (`main.py`), which was extended to record them —
   don't drop those keys, `/runlog` reads them.
 
-Engine: `run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
-site_url, progress, should_stop)` in `main.py` reuses `login()` /
+Engine: `run_paired_hedge(banker_creds, player_creds, amount, rounds,
+site_url, progress, should_stop, browser=None)` in `main.py` reuses `login()` /
 `open_casino_lobby()` / `search_and_open_game()` / `find_game_frame()` /
 `wait_for_live_table()` / `_click_bet_spot()` / `_read_total_bet()`, plus new
 `read_game_balance(frame)` (reads the Evolution frame's own
@@ -898,8 +1039,12 @@ site_url, progress, should_stop)` in `main.py` reuses `login()` /
   see git history if you need the old single-thread version).**
   `run_paired_hedge` launches a **second, temporary** Playwright browser +
   single-worker `ThreadPoolExecutor` (`player_exec`, via `_launch_pw_browser`)
-  just for the Player side; the Banker side keeps using the caller's existing
-  `browser`/thread (e.g. the bot's slot 0) unchanged. `_open_table_with_retry`
+  for the Player side; the Banker side either reuses a caller-supplied
+  `browser` (an optional param, kept for ad-hoc/test callers) or, the bot's
+  normal path since concurrent runs shipped, launches its own temporary
+  browser the same way via `_launch_pw_browser`, inline on whichever thread
+  is running this call (see "Concurrent runs" below) — the two sides never
+  share a browser or thread either way. `_open_table_with_retry`
   for the Player side is `player_exec.submit(...)`'d *before* the Banker call
   runs inline, so both accounts' login → casino lobby → join table → wait for
   live all happen concurrently — roughly halving the old 2-4 minute setup to
@@ -937,9 +1082,34 @@ site_url, progress, should_stop)` in `main.py` reuses `login()` /
   selectable chip rail is complex SVG (the `data-role="chip"` nodes found were
   hidden 0-value templates), so it was deliberately deferred rather than
   guessed at with real money.
-- **One run at a time.** `_run_active` / `_run_stop` (a `threading.Event`) gate
-  it; a `/run` monopolizes slot 0's browser+thread for minutes, so signups on
-  that slot queue behind it. `/stoprun` sets the event, checked between rounds.
+- **Concurrent runs (multiple pairs at once), added 2026-07-19.** Each `/run`
+  is fully self-contained — `run_paired_hedge` launches its OWN temporary
+  Banker browser (via `_launch_pw_browser`, `browser=None` default) in
+  addition to the temporary Player browser it already launched — so two
+  different pairs' runs share no browser, thread, or Playwright object with
+  each other, or with regular signups on `_pw_executors`. `telegram_bot.py`
+  dispatches each `/run` onto `_run_executor`, a module-level
+  `ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS)` (env-overridable,
+  default 3) — as many `/run`s as there are free workers actually run in
+  parallel; a `/run` beyond that queues on the executor rather than being
+  rejected outright, though `run_cmd` also refuses new `/run`s once
+  `len(_active_runs) >= MAX_CONCURRENT_RUNS` so the reply is immediate rather
+  than a silent queue wait. `_active_runs` (module-level dict, `pair_id ->
+  {"stop_event", "banker", "player"}`) replaced the old single `_run_active`
+  bool / `_run_stop` Event — each run gets its own `threading.Event`, so
+  `/stoprun <pair_id>` stops just that one and a bare `/stoprun` stops every
+  active run. `run_cmd` refuses a second concurrent `/run` for a pair already
+  in `_active_runs`, **and** refuses a pair that shares either account
+  (username) with any other currently-active pair — betting the same login
+  from two contexts at once would corrupt both runs' hedge, not just add
+  parallelism. `/pairs` shows a `🏃 running` tag next to an active pair, and
+  `/delpair` refuses to remove one mid-run. Every `progress()` line for a run
+  is prefixed `[Pair #<id>]` (set in `_blocking_run_pair`) since concurrent
+  runs' messages land in the same chat interleaved. **Not yet verified live
+  with two pairs running simultaneously** — needs two real pairs (four
+  accounts) to confirm the parallel-runs path; the underlying per-run engine
+  (`run_paired_hedge` with `browser=None`) is otherwise identical to the
+  already-verified single-run path, just without a pre-warmed slot-0 browser.
 - **Progress from the worker thread → chat** uses
   `asyncio.run_coroutine_threadsafe(bot.send_message(...), loop)` (the loop is
   captured in `run_cmd` and passed into `_blocking_run_pair`) — a new

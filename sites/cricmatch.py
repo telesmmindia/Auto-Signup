@@ -18,6 +18,10 @@ PROFILE = SiteProfile(
     result_selectors=GENERIC_RESULT_SELECTORS,
     tracking_param="btag",
     supports_casino=True,
+    # Confirmed live 2026-07-19: /register is a plain Laravel JSON endpoint,
+    # CSRF via a static per-session token (meta[name=csrf-token] + cookies),
+    # no WAF/JS challenge -- see the "HTTP-fast signup" section of CLAUDE.md.
+    supports_http_fast=True,
     sel={
         # ---- signup ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",

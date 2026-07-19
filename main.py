@@ -33,6 +33,10 @@ Other options:
     python main.py --account-file accounts.json  # batch from a JSON file
     python main.py --proxy host:port:username:password  # route through a proxy
     python main.py --proxy http://username:password@host:port
+    python main.py --fast             # no browser -- plain HTTP register API
+                                       # calls (cricmatch247 only; falls back
+                                       # to the browser for sites that don't
+                                       # support it -- see CLAUDE.md)
 """
 import argparse
 import json
@@ -50,6 +54,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
+import requests
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError as PWTimeout
 
@@ -804,6 +809,180 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
 
 
 # ---------------------------------------------------------------------------
+# HTTP-fast signup (no browser at all)
+#
+# For sites with supports_http_fast=True, the register form turns out to be a
+# plain 2-call JSON API, discovered by capturing a real Playwright run's
+# network traffic and then confirming live with a raw `curl` replay (see the
+# "HTTP-fast signup" section of CLAUDE.md):
+#   1. GET the site -> a `csrf-token` meta tag + session cookies
+#   2. POST /register with otp="" -> triggers the SMS, e.g.
+#      {"status":205,"message":"OTP has been sent.","message_class":"success"}
+#   3. POST /register again with otp=<code> -> verifies it
+# No JS execution, no WAF challenge on this endpoint (cricmatch only --
+# spin24star's register POST IS WAF-gated and has supports_http_fast=False,
+# see the AWS WAF section elsewhere in this file). Roughly 10-20x faster than
+# the Playwright path since there's no browser launch/render/wait at all, but
+# more fragile: it hard-codes today's field names/response shape instead of
+# driving the real UI, so a backend change breaks it silently rather than
+# surfacing as a missing selector.
+# ---------------------------------------------------------------------------
+
+_HTTP_FAST_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+
+
+def http_session_for(proxy_str):
+    """Build a requests.Session for the given proxy string (parse_proxy()'s
+    format). Unlike Chromium, requests can authenticate to SOCKS5 proxies
+    directly (via PySocks) -- the pproxy bridge in maybe_bridge_proxy() works
+    around a Chromium-specific limitation that doesn't apply here."""
+    session = requests.Session()
+    session.headers.update({"User-Agent": _HTTP_FAST_USER_AGENT})
+    if proxy_str:
+        conf = parse_proxy(proxy_str)
+        scheme, hostport = conf["server"].split("://", 1)
+        user, pw = conf.get("username"), conf.get("password")
+        auth = f"{user}:{pw}@" if user and pw else ""
+        proxy_url = f"{scheme}://{auth}{hostport}"
+        session.proxies = {"http": proxy_url, "https": proxy_url}
+    return session
+
+
+def http_fetch_csrf(session, site_url):
+    """GET the site and pull the Laravel csrf-token meta tag out of the
+    response (also seeds the session's cookies -- laravel_session, XSRF-TOKEN,
+    AWSALB* -- for the register calls that follow)."""
+    resp = session.get(site_url, timeout=20)
+    resp.raise_for_status()
+    m = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text)
+    if not m:
+        raise RuntimeError("csrf-token meta tag not found on the homepage response "
+                           "(site markup may have changed).")
+    return m.group(1)
+
+
+def http_register_call(session, csrf_token, acct, site_url, otp=""):
+    """POST the register endpoint. `otp=""` triggers the SMS; a follow-up call
+    with the real code verifies it -- same endpoint both times, confirmed live.
+    Returns the parsed JSON body (or a synthetic error dict if the response
+    isn't JSON, e.g. an unexpected block page)."""
+    prof = profile_for(site_url)
+    parts = urlsplit(site_url)
+    register_url = f"{parts.scheme}://{parts.netloc}{prof.http_register_path}"
+    data = {
+        "username": acct["username"],
+        "email": acct["email"],
+        "password": acct["password"],
+        "phone": str(acct["phone"]),
+        "otp": otp,
+        "_token": csrf_token,
+    }
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "X-CSRF-TOKEN": csrf_token,
+        "Referer": site_url,
+    }
+    resp = session.post(register_url, data=data, headers=headers, timeout=20)
+    try:
+        return resp.json()
+    except ValueError:
+        return {"status": None, "message_class": "danger",
+                "message": f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"}
+
+
+def http_is_error(resp_json):
+    return (resp_json.get("message_class") or "").lower() in ("danger", "error")
+
+
+def http_is_phone_taken(resp_json):
+    """Best-effort text match on the JSON error message. NOT yet verified live
+    against a genuine taken-phone response (only reachable with a number that
+    already completed a real registration) -- modeled on the DOM error's known
+    wording ("The mobile number has already been taken.", see
+    check_phone_taken()). If this misclassifies, the raw message still reaches
+    result["messages"] via the generic-error fallback, so nothing is hidden."""
+    msg = (resp_json.get("message") or "").lower()
+    return "taken" in msg and ("mobile" in msg or "phone" in msg)
+
+
+def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=None):
+    """HTTP-only signup for sites with supports_http_fast=True. Same result
+    shape as signup_once() ({"account","ok","messages","shot"}) so callers can
+    treat both interchangeably, except "shot" is always None -- no browser, no
+    screenshot to take."""
+    url = site_url or SITE_URL
+    prof = profile_for(url)
+    result = {"account": acct.get("username", "?"), "ok": None, "messages": [], "shot": None}
+
+    try:
+        session = http_session_for(proxy)
+    except ValueError as e:
+        result["ok"] = False
+        result["messages"] = [f"Bad --proxy value: {e}"]
+        return result
+
+    try:
+        csrf = http_fetch_csrf(session, url)
+    except (requests.RequestException, RuntimeError) as e:
+        result["ok"] = False
+        result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
+        return result
+
+    if not submit:
+        result["ok"] = True
+        result["messages"] = ["--no-submit has nothing to fill in --fast mode "
+                              "(no browser/form) -- confirmed the site loads and "
+                              "handed back a csrf token instead."]
+        return result
+
+    attempts = 0
+    resp_json = {}
+    while True:
+        try:
+            resp_json = http_register_call(session, csrf, acct, url, otp="")
+        except requests.RequestException as e:
+            result["ok"] = False
+            result["messages"] = [f"Register request failed: {str(e)[:200]}"]
+            return result
+
+        if not http_is_error(resp_json):
+            break  # OTP triggered
+
+        if http_is_phone_taken(resp_json) and interactive and attempts < 5:
+            attempts += 1
+            print(f"\n{resp_json.get('message')} Try a different phone number.")
+            acct["phone"] = prompt_phone()
+            continue
+
+        result["ok"] = False
+        result["messages"] = [resp_json.get("message") or f"Register rejected: {resp_json}"]
+        if attempts:
+            result["messages"].append(f"Gave up after {attempts} retr{'y' if attempts == 1 else 'ies'}.")
+        return result
+
+    print(f"\nOTP requested — an SMS code was sent to {acct.get('phone', 'your phone')}.")
+    print(f"  server says: {resp_json.get('message')}")
+    otp = prompt_otp(prof.http_otp_digits)
+
+    try:
+        verify_json = http_register_call(session, csrf, acct, url, otp=otp)
+    except requests.RequestException as e:
+        result["ok"] = False
+        result["messages"] = [f"OTP verify request failed: {str(e)[:200]}"]
+        return result
+
+    if http_is_error(verify_json):
+        result["ok"] = False
+        result["messages"] = [f"OTP rejected: {verify_json.get('message') or verify_json}"]
+        return result
+
+    result["ok"] = True
+    result["messages"] = [verify_json.get("message") or "OTP verified — account appears registered."]
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Casino game smoke test (login + place a live Baccarat bet)
 #
 # Separate from the signup flow above: logs into an EXISTING account (not a
@@ -1504,9 +1683,9 @@ def _now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
+def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                      site_url=None, category="Baccarat", tile_text="Baccarat A",
-                     progress=None, should_stop=None, proxy=None):
+                     progress=None, should_stop=None, proxy=None, browser=None):
     """Run up to `rounds` hedged rounds: `banker_creds` bets Banker and
     `player_creds` bets Player, `amount` each, on the SAME table/hand, until
     `rounds` is reached OR either balance drops below `amount` OR a round goes
@@ -1519,18 +1698,25 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
     box running the bot has a datacenter IP that the site's WAF 403-blocks
     (login just returns a "Forbidden" page otherwise).
 
-    `browser` is the Banker side's browser (reused from the caller, e.g. the
-    bot's slot 0) -- the Banker side runs entirely on the calling thread, same
-    as before. The Player side gets its OWN temporary browser + single-worker
-    thread (`player_exec`, launched via `_launch_pw_browser`), so its login +
-    table-join runs concurrently with the Banker side's setup instead of
-    serialized after it -- this roughly halves setup time. Every call touching
-    the Player side's context/page/frame is dispatched through `player_exec`;
-    round-loop reads (balance, betting-open, total-bet) and the two bet-spot
-    clicks are similarly fired on both threads back-to-back (Player submitted
-    first, Banker run inline, then join) rather than one waiting on the other.
-    `player_exec` and its temporary browser are torn down in the `finally`
-    alongside the Banker context, on every exit path.
+    `browser`, if given, is a pre-launched browser the Banker side reuses (runs
+    on the calling thread, no extra thread spun up) -- kept only so a caller
+    with an already-warm browser (e.g. a single ad-hoc run) can skip a launch.
+    When omitted (the normal case, since concurrent /run calls must NOT share
+    a browser or they'd serialize on it), this function launches its own
+    temporary Banker browser via `_launch_pw_browser` inline on the calling
+    thread and closes it in the `finally` alongside the context -- this is
+    what makes the whole call self-contained enough for several to run truly
+    in parallel, one per worker thread, with zero shared Playwright state
+    between them. The Player side always gets its OWN temporary browser +
+    single-worker thread (`player_exec`, launched via `_launch_pw_browser`),
+    so its login + table-join runs concurrently with the Banker side's setup
+    instead of serialized after it -- this roughly halves setup time. Every
+    call touching the Player side's context/page/frame is dispatched through
+    `player_exec`; round-loop reads (balance, betting-open, total-bet) and the
+    two bet-spot clicks are similarly fired on both threads back-to-back
+    (Player submitted first, Banker run inline, then join) rather than one
+    waiting on the other. `player_exec` and its temporary browser are torn
+    down in the `finally` alongside the Banker context, on every exit path.
 
     Returns a summary dict: {"ok", "rounds_done", "requested_rounds",
     "stop_reason", "messages", "final_balance": {"banker","player"},
@@ -1550,13 +1736,23 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
     ctx_b = ctx_p = gp_b = gp_p = fr_b = fr_p = bridge_proc = None
     # The Player side gets its own temporary browser + single-worker thread so
     # its login + table-join runs concurrently with the Banker side (which
-    # reuses the caller's `browser`/current thread, same as before) instead of
-    # the two being serialized one after another. Playwright's sync API is
-    # thread-affine -- every call touching player_browser/ctx_p/gp_p/fr_p must
-    # go through player_exec, never called inline from this thread.
+    # either reuses a caller-supplied `browser` on the calling thread, or --
+    # the normal path -- launches its own below, also on the calling thread)
+    # instead of the two being serialized one after another. Playwright's sync
+    # API is thread-affine -- every call touching player_browser/ctx_p/gp_p/fr_p
+    # must go through player_exec, never called inline from this thread.
     player_exec = ThreadPoolExecutor(max_workers=1)
     player_pw = player_browser = None
+    banker_pw = None
+    owns_banker_browser = browser is None
     try:
+        if owns_banker_browser:
+            try:
+                banker_pw, browser = _launch_pw_browser()
+            except Exception as e:
+                summary["stop_reason"] = "setup_failed"
+                summary["messages"].append(f"Failed to launch Banker browser: {e}")
+                return summary
         # Both accounts share one exit IP: parse + (for SOCKS5-auth) bridge the
         # proxy once, then hand the same proxy_conf to both contexts. stop_bridge
         # runs in the finally so the local pproxy subprocess never leaks.
@@ -1756,6 +1952,14 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                     closer.close()
             except Exception:
                 pass
+        if owns_banker_browser:
+            try:
+                if browser is not None:
+                    browser.close()
+                if banker_pw is not None:
+                    banker_pw.stop()
+            except Exception:
+                pass
         for closer in (gp_p, ctx_p):
             try:
                 if closer is not None:
@@ -1836,6 +2040,58 @@ def load_accounts(args):
     return [acct]
 
 
+def run_browser_account(browser, acct, args):
+    """Run one signup via the Playwright/browser path (the original flow).
+    Returns a result dict in signup_once()'s shape -- proxy-parse/bridge
+    failures are folded in here too (rather than raising), so main()'s loop
+    can treat this and http_signup_once() identically: call it, get a res."""
+    bridge_proc = None
+    try:
+        proxy_conf = parse_proxy(acct.get("proxy"))
+        proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+    except (ValueError, RuntimeError) as e:
+        return {"account": acct.get("username", "?"), "ok": False,
+                "messages": [str(e)], "shot": None}
+
+    context = browser.new_context(proxy=proxy_conf) if proxy_conf else None
+    page = context.new_page() if context else browser.new_page()
+    res = None
+    try:
+        res = signup_once(page, acct, submit=not args.no_submit,
+                          interactive=not args.account_file,
+                          site_url=acct.get("url"), proxy=acct.get("proxy"))
+    except PWTimeout as e:
+        res = {"account": acct.get("username", "?"), "ok": False,
+               "messages": [f"Timeout: {str(e)[:120]}"], "shot": None}
+    except PWError as e:
+        # e.g. a broken/unreachable proxy raises this, not PWTimeout.
+        res = {"account": acct.get("username", "?"), "ok": False,
+               "messages": [f"Browser error (check --proxy?): {str(e)[:200]}"], "shot": None}
+    finally:
+        # signup_once() may have swapped in a fresh page/context to route
+        # around an AWS WAF CAPTCHA (submit_register() closes the original
+        # context itself when that happens) -- close whichever page/context
+        # is actually still live, not blindly re-close the one opened above.
+        final_page = res.get("page") if isinstance(res, dict) else None
+        if final_page and final_page is not page:
+            try:
+                final_page.context.close()
+            except Exception:
+                pass
+        else:
+            try:
+                page.close()
+            except Exception:
+                pass
+            if context:
+                try:
+                    context.close()
+                except Exception:
+                    pass
+        stop_bridge(bridge_proc)
+    return res
+
+
 def main():
     ap = argparse.ArgumentParser(description="QA signup driver for cricmatch247.com")
     ap.add_argument("--username", help="override the random username")
@@ -1847,6 +2103,12 @@ def main():
     ap.add_argument("--url", help=f"override the site URL (default: {SITE_URL})")
     ap.add_argument("--headed", action="store_true", help="show the browser window")
     ap.add_argument("--no-submit", action="store_true", help="fill but don't click REGISTER")
+    ap.add_argument("--fast", action="store_true",
+                    help="skip the browser and hit the register API directly with plain "
+                         "HTTP requests, for sites that support it (currently cricmatch247 "
+                         "only, ~10-20x faster) -- more fragile to backend changes; sites "
+                         "that need a real browser (e.g. spin24star's WAF challenge) fall "
+                         "back to the normal Playwright flow automatically")
     ap.add_argument("--list", action="store_true",
                     help="print stored accounts from accounts.db and exit")
     ap.add_argument("--limit", type=int, default=20, help="rows to show with --list")
@@ -1859,6 +2121,11 @@ def main():
                                          "(default path: accounts_export.csv; ALL accounts "
                                          "unless --status/--filter-url filters it)")
     args = ap.parse_args()
+
+    if args.fast and args.no_submit:
+        print("--fast has no browser/form to fill without submitting -- drop "
+              "--no-submit or --fast.")
+        sys.exit(1)
 
     conn = db.get_connection()
 
@@ -1873,56 +2140,35 @@ def main():
 
     accounts = load_accounts(args)
     results = []
-    with sync_playwright() as p:
+
+    # Only pay for a browser at all if at least one account actually needs
+    # one -- an all --fast, all-cricmatch batch never touches Playwright.
+    need_browser = any(
+        not (args.fast and profile_for(a.get("url") or SITE_URL).supports_http_fast)
+        for a in accounts
+    )
+    pw_ctx = sync_playwright() if need_browser else None
+    browser = None
+    if pw_ctx:
+        p = pw_ctx.__enter__()
         browser = p.chromium.launch(headless=not args.headed)
+
+    try:
         for acct in accounts:
             row_id = db.insert_account(conn, acct)
-            bridge_proc = None
-            try:
-                proxy_conf = parse_proxy(acct.get("proxy"))
-                proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
-            except (ValueError, RuntimeError) as e:
-                print(f"[FAIL] {acct.get('username', '?')}: {e}")
-                db.update_status(conn, row_id, "failed", notes=str(e))
-                stop_bridge(bridge_proc)
-                continue
-            context = browser.new_context(proxy=proxy_conf) if proxy_conf else None
-            page = context.new_page() if context else browser.new_page()
-            res = None
-            try:
-                res = signup_once(page, acct, submit=not args.no_submit,
-                                  interactive=not args.account_file,
-                                  site_url=acct.get("url"), proxy=acct.get("proxy"))
-            except PWTimeout as e:
-                res = {"account": acct.get("username", "?"), "ok": False,
-                       "messages": [f"Timeout: {str(e)[:120]}"], "shot": None}
-            except PWError as e:
-                # e.g. a broken/unreachable proxy raises this, not PWTimeout.
-                res = {"account": acct.get("username", "?"), "ok": False,
-                       "messages": [f"Browser error (check --proxy?): {str(e)[:200]}"], "shot": None}
-            finally:
-                # signup_once() may have swapped in a fresh page/context to
-                # route around an AWS WAF CAPTCHA (submit_register() closes
-                # the original context itself when that happens) -- close
-                # whichever page/context is actually still live, not
-                # blindly re-close the one opened above.
-                final_page = res.get("page") if isinstance(res, dict) else None
-                if final_page and final_page is not page:
-                    try:
-                        final_page.context.close()
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        page.close()
-                    except Exception:
-                        pass
-                    if context:
-                        try:
-                            context.close()
-                        except Exception:
-                            pass
-                stop_bridge(bridge_proc)
+            prof = profile_for(acct.get("url") or SITE_URL)
+            use_fast = args.fast and prof.supports_http_fast
+            if args.fast and not prof.supports_http_fast:
+                print(f"[fast] {prof.key} doesn't support HTTP-fast mode (needs a "
+                      "real browser) -- using Playwright for this one instead.")
+
+            if use_fast:
+                res = http_signup_once(acct, submit=not args.no_submit,
+                                       interactive=not args.account_file,
+                                       site_url=acct.get("url"), proxy=acct.get("proxy"))
+            else:
+                res = run_browser_account(browser, acct, args)
+
             results.append(res)
             print(f"[{'OK ' if res['ok'] else 'FAIL' if res['ok'] is False else '?  '}] "
                   f"{res['account']}: {' | '.join(res['messages'])}")
@@ -1932,7 +2178,11 @@ def main():
             status = "success" if res["ok"] else ("failed" if res["ok"] is False else "unknown")
             db.update_status(conn, row_id, status,
                               notes="; ".join(res["messages"])[:500], screenshot=res["shot"])
-        browser.close()
+    finally:
+        if browser:
+            browser.close()
+        if pw_ctx:
+            pw_ctx.__exit__(None, None, None)
 
     ok = sum(1 for r in results if r["ok"])
     print(f"\n{ok}/{len(results)} attempt(s) looked successful.")

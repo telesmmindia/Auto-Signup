@@ -44,6 +44,11 @@ Master-only commands:
     /setpassword <pw> -> fixed password for every future signup;
                          /setpassword --random reverts to a random one
     /password         -> show the current password mode
+    /fast on|off      -> toggle HTTP-fast signup mode (no browser at all,
+                         cricmatch247 only, ~10-20x faster; falls back to the
+                         browser automatically for sites that don't support
+                         it -- see CLAUDE.md)
+    /fast             -> show the current fast-mode state
     /setproxy <proxy> -> set the GLOBAL proxy for every admin's signups
                          (host:port, host:port:username:password, or a URL)
     /proxy            -> show the global proxy
@@ -112,6 +117,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
+import requests
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError
 from telegram import BotCommand, BotCommandScopeChat, BotCommandScopeDefault, Update
@@ -123,9 +129,11 @@ from sites import profile_for
 from main import (
     SHOTS_DIR, SITE_URL,
     capsolver_key, check_phone_taken, click_first_visible, extract_referral_code,
-    fill_register_form, gen_account, is_waf_captcha, maybe_bridge_proxy,
-    open_signup_modal, parse_proxy, read_result, run_paired_hedge, stop_bridge,
-    submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
+    fill_register_form, gen_account, http_fetch_csrf, http_is_error,
+    http_is_phone_taken, http_register_call, http_session_for, is_waf_captcha,
+    maybe_bridge_proxy, open_signup_modal, parse_proxy, read_result, run_paired_hedge,
+    stop_bridge, submit_register, test_baccarat, wait_for_otp_outcome,
+    wait_for_register_outcome,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -184,11 +192,23 @@ looping_chats = set()
 # unreasonable number of Chromium contexts at once.
 MAX_PARALLEL_NEWACC = 10
 
-# Paired-hedge run state. Only one /run at a time -- it monopolizes slot 0's
-# worker thread (and browser) for minutes while driving TWO contexts. _run_stop
-# is set by /stoprun and checked between rounds inside the blocking loop.
-_run_active = False
-_run_stop = threading.Event()
+# Paired-hedge run state. Each /run now drives two fully independent,
+# temporary browsers of its own (see run_paired_hedge in main.py) rather than
+# sharing slot 0 -- so several /run calls for DIFFERENT pairs can execute
+# truly in parallel, each on its own worker thread in _run_executor, without
+# fighting over a browser or a thread. _active_runs maps pair_id (str) ->
+# that run's threading.Event, set by /stoprun to ask it to stop after the
+# current round. A pair already present in _active_runs refuses a second
+# concurrent /run for the SAME pair -- betting the same two accounts from two
+# contexts at once would corrupt both runs' hedge and isn't a "more
+# parallelism" case, it's a conflict.
+_active_runs = {}  # pair_id (str) -> threading.Event
+# Hard ceiling on how many /run calls can be in flight at once. Real limits in
+# practice come from proxy/IP diversity and box resources (2 browsers per
+# run), so this just guards against an accidental pile-up; raise via env if
+# you have the proxies/hardware for more.
+MAX_CONCURRENT_RUNS = max(1, int(os.environ.get("MAX_CONCURRENT_RUNS", "3")))
+_run_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS)
 
 # Telegram user IDs (str) the master admin has authorized, persisted across
 # restarts. Gitignored -- this is access-control state, not project content.
@@ -300,6 +320,7 @@ MASTER_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("stats", "Counts of signups by status and btag"),
     BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
     BotCommand("password", "Show the current password mode"),
+    BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
     BotCommand("setproxy", "Set the global proxy for all signups"),
     BotCommand("proxy", "Show the global proxy"),
     BotCommand("clearproxy", "Clear the global proxy"),
@@ -435,6 +456,17 @@ class Session:
         self.site_url = None  # site URL for this signup (falls back to BOT_SITE_URL)
         self.slot = 0  # index into _pw_executors/_browsers, fixed for this session's life
         self.sub_id = 1  # this chat's lane number, for routing replies when >1 lane is active
+        # HTTP-fast mode (global_settings["fast"], see /fast) -- set once in
+        # begin_signup() based on whether this signup's site supports it.
+        # When True, handle_message() routes through _blocking_http_register()/
+        # _blocking_http_verify_otp() instead of the Playwright path, and
+        # context/page/slot above are never touched. http_session/http_csrf
+        # carry state between the register call and the OTP-verify call (the
+        # requests.Session's cookies + the CSRF token), same idea as
+        # context/page for the browser path.
+        self.use_fast = False
+        self.http_session = None
+        self.http_csrf = None
 
 
 def _valid_phone(text):
@@ -475,6 +507,8 @@ def _blocking_close_context(session):
         pass
     session.context = None
     session.page = None
+    session.http_session = None
+    session.http_csrf = None
     stop_bridge(session.bridge_proc)
     session.bridge_proc = None
 
@@ -606,6 +640,67 @@ def _blocking_verify_otp(session, otp):
     return {"ok": True, "message": "OTP verified — account registered.", "shot": str(otp_result)}
 
 
+# --- HTTP-fast mode (no browser) -- see /fast and main.py's http_signup_once ---
+#
+# Unlike _blocking_fill_and_register()/_blocking_verify_otp() above, these two
+# don't touch Playwright at all, so they have no thread-affinity requirement --
+# handle_message() dispatches them to asyncio's default executor (None), not a
+# _pw_executors[slot], so HTTP-fast signups don't queue behind (or block)
+# browser-based ones sharing the same slot.
+
+def _blocking_http_register(session, phone):
+    """HTTP-fast counterpart to _blocking_fill_and_register(): GET the site for
+    a CSRF token, then POST /register with otp="" to trigger the SMS. Returns
+    the same result shape handle_message() already expects
+    (ok/phone_taken/message/shot/digits), so its await_phone branch can treat
+    this and the browser path identically. Stashes the requests.Session + CSRF
+    token on `session` for the OTP-verify call that follows."""
+    url = session.site_url or BOT_SITE_URL
+    prof = profile_for(url)
+    acct = session.acct
+
+    try:
+        http_sess = http_session_for(session.proxy)
+    except ValueError as e:
+        return {"ok": False, "message": f"Bad proxy: {e}"}
+
+    try:
+        csrf = http_fetch_csrf(http_sess, url)
+    except (requests.RequestException, RuntimeError) as e:
+        return {"ok": False, "message": f"Couldn't load the site (check the proxy?): {str(e)[:200]}"}
+
+    try:
+        resp_json = http_register_call(http_sess, csrf, acct, url, otp="")
+    except requests.RequestException as e:
+        return {"ok": False, "message": f"Register request failed: {str(e)[:200]}"}
+
+    if http_is_error(resp_json):
+        if http_is_phone_taken(resp_json):
+            return {"ok": False, "phone_taken": True, "message": resp_json.get("message")}
+        return {"ok": False, "message": "Register rejected: " + (resp_json.get("message") or str(resp_json))}
+
+    session.http_session = http_sess
+    session.http_csrf = csrf
+    return {"ok": True, "digits": prof.http_otp_digits, "shot": None}
+
+
+def _blocking_http_verify_otp(session, otp):
+    """HTTP-fast counterpart to _blocking_verify_otp(): re-POST /register on
+    the SAME requests.Session, now with the real code."""
+    url = session.site_url or BOT_SITE_URL
+    try:
+        verify_json = http_register_call(session.http_session, session.http_csrf,
+                                         session.acct, url, otp=otp)
+    except requests.RequestException as e:
+        return {"ok": False, "message": f"OTP verify request failed: {str(e)[:200]}", "shot": None}
+
+    if http_is_error(verify_json):
+        return {"ok": False, "message": f"OTP rejected: {verify_json.get('message') or verify_json}",
+                "shot": None}
+    return {"ok": True, "message": verify_json.get("message") or "OTP verified — account registered.",
+            "shot": None}
+
+
 async def begin_signup(update, chat_id, sub_id):
     """Generate a new account and start a fresh session in lane sub_id.
     Shared by /newacc (each initial lane) and the continuous-mode
@@ -626,11 +721,28 @@ async def begin_signup(update, chat_id, sub_id):
     # Pins this session to one (executor, Chromium) slot for its whole life --
     # round-robin across BOT_CONCURRENCY slots so concurrent lanes (whether
     # from different chats or several lanes in one /newacc <n>) run on
-    # different browsers/threads instead of queuing behind each other.
+    # different browsers/threads instead of queuing behind each other. Unused
+    # (but still assigned, for simplicity) when use_fast is True below -- an
+    # HTTP-fast session never touches _pw_executors[session.slot].
     session.slot = _next_slot()
+
+    # /fast (global_settings["fast"]) requests HTTP-fast mode, but it only
+    # actually applies if THIS signup's site supports it (supports_http_fast,
+    # see sites/base.py) -- otherwise fall back to the browser, same as the
+    # CLI's --fast. Decided once here (not per-message) since the site URL is
+    # fixed for a session's whole life.
+    fast_wanted = bool(global_settings.get("fast"))
+    prof = profile_for(session.site_url or BOT_SITE_URL)
+    session.use_fast = fast_wanted and prof.supports_http_fast
+    fallback_note = ""
+    if fast_wanted and not prof.supports_http_fast:
+        fallback_note = f" (⚡ fast mode is ON, but {prof.key} needs a real browser — using it for this one)"
+
     sessions.setdefault(chat_id, {})[sub_id] = session
 
-    await update.message.reply_text(f"📱 [#{sub_id}] Send the phone number to use for this signup.")
+    tag = "⚡ " if session.use_fast else ""
+    await update.message.reply_text(
+        f"{tag}📱 [#{sub_id}] Send the phone number to use for this signup.{fallback_note}")
 
 
 @require_role(is_admin)
@@ -751,6 +863,36 @@ async def show_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔑 Password mode: FIXED — {pw}")
     else:
         await update.message.reply_text("🔑 Password mode: RANDOM (default, per-signup)")
+
+
+@require_role(is_master)
+async def fast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fast on|off -- toggle HTTP-fast signup mode globally (applies to every
+    admin's /newacc). When ON, each signup skips the browser entirely for
+    sites whose profile sets supports_http_fast=True (currently cricmatch247
+    only, see sites/cricmatch.py and CLAUDE.md's "HTTP-fast signup" section) --
+    a real browser is still used automatically for any site that doesn't
+    support it (spin24star: its register POST is WAF-gated behind a JS
+    challenge, see main.py). No args shows the current state."""
+    if not context.args:
+        state = "ON" if global_settings.get("fast") else "OFF"
+        await update.message.reply_text(
+            f"⚡ Fast mode: {state}\n"
+            "Usage: /fast on | /fast off\n\n"
+            "When ON, /newacc skips the browser and hits the register API "
+            "directly (cricmatch247 only, ~10-20x faster) -- more fragile to "
+            "backend changes than driving the real form. Sites that need a "
+            "real browser (e.g. spin24star's WAF challenge) fall back "
+            "automatically either way."
+        )
+        return
+    arg = context.args[0].lower()
+    if arg not in ("on", "off"):
+        await update.message.reply_text("Usage: /fast on | /fast off")
+        return
+    global_settings["fast"] = (arg == "on")
+    save_settings()
+    await update.message.reply_text(f"⚡ Fast mode: {'ON' if arg == 'on' else 'OFF'}")
 
 
 @require_role(is_master)
@@ -998,26 +1140,29 @@ async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- Paired-account hedge betting (create pairs, run opposite-side bets) ---
 
-def _blocking_run_pair(loop, bot, chat_id, banker_creds, player_creds, amount, rounds):
-    """Runs on _pw_executors[0]. Drives the Banker context on slot 0's browser
-    (this thread) via main.run_paired_hedge, which internally spins up a
-    second, temporary browser + worker thread for the Player side so both
-    accounts log in and join the table concurrently instead of one after the
-    other -- see run_paired_hedge's docstring in main.py. Streams per-round
-    progress back to the chat with run_coroutine_threadsafe (the asyncio loop
-    lives on the bot's own thread, not this worker thread)."""
-    browser = _blocking_ensure_browser(0)
+def _blocking_run_pair(loop, bot, chat_id, pid, banker_creds, player_creds, amount, rounds, stop_event):
+    """Runs on _run_executor -- one worker thread per concurrent /run, fully
+    independent of _pw_executors/slot 0 and of every other concurrent run.
+    Drives main.run_paired_hedge with browser=None, so it launches its OWN
+    temporary Banker browser on this thread in addition to the temporary
+    Player browser + worker thread it already spins up internally -- two
+    fully separate runs therefore share no browser, thread, or Playwright
+    object at all. Streams per-round progress back to the chat with
+    run_coroutine_threadsafe (the asyncio loop lives on the bot's own thread,
+    not this worker thread), prefixed with the pair id so concurrent runs'
+    messages don't get confused for each other in the same chat."""
 
     def progress(text):
         try:
-            asyncio.run_coroutine_threadsafe(bot.send_message(chat_id, text), loop)
+            asyncio.run_coroutine_threadsafe(
+                bot.send_message(chat_id, f"[Pair #{pid}] {text}"), loop)
         except Exception:
             pass
 
     try:
         return run_paired_hedge(
-            browser, banker_creds, player_creds, amount, rounds,
-            site_url=BOT_SITE_URL, progress=progress, should_stop=_run_stop.is_set,
+            banker_creds, player_creds, amount, rounds,
+            site_url=BOT_SITE_URL, progress=progress, should_stop=stop_event.is_set,
             proxy=global_settings.get("proxy"))
     except PWError as e:
         return {"ok": False, "rounds_done": 0, "requested_rounds": rounds,
@@ -1065,9 +1210,10 @@ async def pairs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = ["👥 <b>Stored pairs</b>", "━━━━━━━━━━━━━━"]
     for pid, rec in sorted(pairs["pairs"].items(), key=lambda kv: int(kv[0])):
         created = (rec.get("created_at") or "").replace("T", " ")[:16]
+        running = "  🏃 running" if pid in _active_runs else ""
         lines.append(
             f"<b>#{pid}</b>   🔴 {html.escape(rec['banker']['username'])}"
-            f"   🔵 {html.escape(rec['player']['username'])}\n"
+            f"   🔵 {html.escape(rec['player']['username'])}{running}\n"
             f"   🕒 {created}")
     lines.append("\n▶️ Run one with /run &lt;id&gt; &lt;amount&gt; &lt;rounds&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -1083,6 +1229,9 @@ async def delpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if pid not in pairs["pairs"]:
         await update.message.reply_text(f"No pair #{pid}. See /pairs.")
         return
+    if pid in _active_runs:
+        await update.message.reply_text(f"Pair #{pid} is running. /stoprun {pid} first.")
+        return
     pairs["pairs"].pop(pid)
     save_pairs()
     await update.message.reply_text(f"🗑 Pair #{pid} deleted.")
@@ -1092,8 +1241,13 @@ async def delpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/run <pair_id> <amount> <rounds> -- run the paired hedge: acc1 bets
     Banker and acc2 bets Player, <amount> each, on the SAME hand, repeating
-    until <rounds> or one account runs low on balance. Real money."""
-    global _run_active
+    until <rounds> or one account runs low on balance. Real money.
+
+    Several /run calls for DIFFERENT pairs can be active at once (up to
+    MAX_CONCURRENT_RUNS) -- each drives two fully independent temporary
+    browsers, see run_paired_hedge in main.py. A pair already running (or one
+    that shares an account with a currently-running pair) is refused a second
+    concurrent /run."""
     args = context.args
     if len(args) != 3:
         await update.message.reply_text(
@@ -1103,7 +1257,8 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "same hand, until <rounds> is reached or one account runs low. Real "
             "money. v1 uses the table's default chip (~Rs.100); if <amount> "
             "doesn't match, it stops after one hedged round and reports the real "
-            "size.")
+            "size. Multiple pairs can run at once (up to "
+            f"{MAX_CONCURRENT_RUNS}); see /runs for what's active.")
         return
     pid, amount_s, rounds_s = args
     if pid not in pairs["pairs"]:
@@ -1117,13 +1272,24 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if amount <= 0 or rounds <= 0:
         await update.message.reply_text("amount and rounds must be positive.")
         return
-    if _run_active:
-        await update.message.reply_text("A run is already in progress. /stoprun first.")
+    if pid in _active_runs:
+        await update.message.reply_text(f"Pair #{pid} is already running. /stoprun {pid} first.")
+        return
+    if len(_active_runs) >= MAX_CONCURRENT_RUNS:
+        await update.message.reply_text(
+            f"{MAX_CONCURRENT_RUNS} runs are already active (the max). "
+            "/stoprun one first, or raise MAX_CONCURRENT_RUNS.")
+        return
+    rec = pairs["pairs"][pid]
+    banker_user, player_user = rec["banker"]["username"], rec["player"]["username"]
+    busy = {u for r in _active_runs.values() for u in (r["banker"], r["player"])}
+    if banker_user in busy or player_user in busy:
+        await update.message.reply_text(
+            f"One of pair #{pid}'s accounts is already in use by another active run.")
         return
 
-    rec = pairs["pairs"][pid]
-    _run_active = True
-    _run_stop.clear()
+    stop_event = threading.Event()
+    _active_runs[pid] = {"stop_event": stop_event, "banker": banker_user, "player": player_user}
     raw_proxy = global_settings.get("proxy")
     proxy_line = (f"🌐 Proxy   {html.escape(mask_proxy_display(raw_proxy))}"
                   if raw_proxy else "🌐 Proxy   none (direct connection)")
@@ -1136,15 +1302,16 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔁 Rounds  up to <b>{rounds}</b>\n"
         f"{proxy_line}\n"
         f"━━━━━━━━━━━━━━\n"
-        f"⚠️ Real money · send /stoprun to halt",
+        f"⚠️ Real money · send /stoprun {pid} to halt",
         parse_mode="HTML")
     loop = asyncio.get_running_loop()
     try:
         summary = await loop.run_in_executor(
-            _pw_executors[0], _blocking_run_pair, loop, context.bot,
-            update.effective_chat.id, rec["banker"], rec["player"], amount, rounds)
+            _run_executor, _blocking_run_pair, loop, context.bot,
+            update.effective_chat.id, pid, rec["banker"], rec["player"], amount, rounds,
+            stop_event)
     finally:
-        _run_active = False
+        _active_runs.pop(pid, None)
 
     # Persist the run so it can be reviewed later via /runs, then save.
     run_id = pair_runs["next_id"]
@@ -1198,12 +1365,27 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_role(is_master)
 async def stoprun(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/stoprun -- ask the active run to stop after the current round."""
-    if not _run_active:
+    """/stoprun [pair_id] -- ask one active run (or, with no argument, EVERY
+    active run) to stop after its current round. Several runs can be active
+    at once now, so a bare /stoprun stops all of them rather than one implicit
+    run."""
+    if not _active_runs:
         await update.message.reply_text("No run is in progress.")
         return
-    _run_stop.set()
-    await update.message.reply_text("🛑 Stopping after the current round…")
+    args = context.args
+    if args:
+        pid = args[0]
+        if pid not in _active_runs:
+            await update.message.reply_text(
+                f"Pair #{pid} isn't running. Active: {', '.join(sorted(_active_runs, key=int))}")
+            return
+        _active_runs[pid]["stop_event"].set()
+        await update.message.reply_text(f"🛑 Stopping pair #{pid} after its current round…")
+        return
+    for rec in _active_runs.values():
+        rec["stop_event"].set()
+    await update.message.reply_text(
+        f"🛑 Stopping {len(_active_runs)} active run(s) after their current round…")
 
 
 def _net(start, final):
@@ -1252,18 +1434,26 @@ async def runs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/runs [pair_id] -- list past hedge runs, most recent first (all pairs,
     or just one pair_id). Use /runlog <run_id> for a run's per-round detail."""
     runs = pair_runs["runs"]
+    filter_pid = None
+    active = _active_runs
     if context.args:
-        pid = context.args[0]
-        runs = [r for r in runs if r.get("pair_id") == pid]
-        header = f"Hedge runs · Pair #{pid}"
-        empty = f"No runs recorded for pair #{pid} yet."
+        filter_pid = context.args[0]
+        runs = [r for r in runs if r.get("pair_id") == filter_pid]
+        active = {p: r for p, r in _active_runs.items() if p == filter_pid}
+        header = f"Hedge runs · Pair #{filter_pid}"
+        empty = f"No runs recorded for pair #{filter_pid} yet."
     else:
         header = "Recent hedge runs"
         empty = "No runs recorded yet. Start one with /run."
-    if not runs:
+    if not runs and not active:
         await update.message.reply_text(empty)
         return
     lines = [f"📊 <b>{header}</b>", "━━━━━━━━━━━━━━"]
+    if active:
+        lines.append("🏃 <b>Active now</b>")
+        for pid, rec in active.items():
+            lines.append(f"   #{pid}  🔴 {html.escape(rec['banker'])}  🔵 {html.escape(rec['player'])}")
+        lines.append("━━━━━━━━━━━━━━")
     for r in list(reversed(runs))[:15]:
         sb, fb = r.get("start_balance", {}), r.get("final_balance", {})
         icon = "✅" if r["stop_reason"] == "completed" else "⚠️"
@@ -1496,9 +1686,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
                     f"(phone {text}, url {session.site_url or BOT_SITE_URL}, "
-                    f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'})")
-        result = await loop.run_in_executor(
-            _pw_executors[session.slot], _blocking_fill_and_register, session, text)
+                    f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'}, "
+                    f"fast={session.use_fast})")
+        if session.use_fast:
+            # No Playwright involved -- run on asyncio's default executor
+            # instead of a _pw_executors[slot], so this doesn't queue behind
+            # (or block) browser-based signups sharing that slot.
+            result = await loop.run_in_executor(None, _blocking_http_register, session, text)
+        else:
+            result = await loop.run_in_executor(
+                _pw_executors[session.slot], _blocking_fill_and_register, session, text)
 
         if result.get("phone_taken"):
             logger.warning(f"#{session.row_id} {session.acct['username']}: phone taken -- {result['message']}")
@@ -1538,8 +1735,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ [#{sub_id}] Send just the numeric OTP code.")
             return
 
-        result = await loop.run_in_executor(
-            _pw_executors[session.slot], _blocking_verify_otp, session, text)
+        if session.use_fast:
+            result = await loop.run_in_executor(None, _blocking_http_verify_otp, session, text)
+        else:
+            result = await loop.run_in_executor(
+                _pw_executors[session.slot], _blocking_verify_otp, session, text)
 
         status = "success" if result["ok"] else "failed"
         if result["ok"]:
@@ -1598,6 +1798,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "\n"
             "⚙️ Settings (global)\n"
             "/setpassword <pw> | --random   ·   /password\n"
+            "/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)\n"
             "/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]\n"
             "/seturl <url> · /url · /clearurl · /btag [code]\n"
             "\n"
@@ -1702,6 +1903,7 @@ def main():
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("setpassword", setpassword))
     app.add_handler(CommandHandler("password", show_password))
+    app.add_handler(CommandHandler("fast", fast_cmd))
     app.add_handler(CommandHandler("list", list_accounts))
     app.add_handler(CommandHandler("photo", photo_cmd))
     app.add_handler(CommandHandler("export", export_cmd))
@@ -1745,6 +1947,9 @@ def main():
         for slot in range(BOT_CONCURRENCY):
             _pw_executors[slot].submit(_blocking_shutdown_browser, slot).result()
             _pw_executors[slot].shutdown(wait=False)
+        # No persistent browser to close here -- each /run launches and closes
+        # its own temporary Banker/Player browsers inside run_paired_hedge.
+        _run_executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":

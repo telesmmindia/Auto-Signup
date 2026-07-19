@@ -45,3 +45,20 @@ class SiteProfile:
     # this site. False -> casino/hedge commands refuse cleanly instead of
     # mis-clicking uninspected markup.
     supports_casino: bool = False
+
+    # Whether this site's register endpoint has been confirmed (live, via a
+    # captured network trace + a raw curl replay -- see CLAUDE.md) to be a
+    # plain JSON POST with no browser-only requirement (no JS challenge, no
+    # WAF captcha), so --fast can skip Chromium entirely and hit it with
+    # `requests`. False (e.g. spin24star, whose register POST is gated by an
+    # AWS WAF CAPTCHA that only a real browser can solve) -> --fast falls
+    # back to the normal Playwright flow for that site.
+    supports_http_fast: bool = False
+
+    # Path (relative to the site's origin) the register form's JS actually
+    # POSTs to, used only when supports_http_fast is True.
+    http_register_path: str = "/register"
+
+    # Number of OTP digits the SMS code has, used only when supports_http_fast
+    # is True (there's no DOM to count digit boxes in without a browser).
+    http_otp_digits: int = 6
