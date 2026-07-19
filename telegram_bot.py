@@ -1151,10 +1151,13 @@ def _blocking_run_pair(loop, bot, chat_id, pid, banker_creds, player_creds, amou
     temporary Banker browser on this thread in addition to the temporary
     Player browser + worker thread it already spins up internally -- two
     fully separate runs therefore share no browser, thread, or Playwright
-    object at all. Streams per-round progress back to the chat with
+    object at all. Streams per-round RESULTS back to the chat with
     run_coroutine_threadsafe (the asyncio loop lives on the bot's own thread,
     not this worker thread), prefixed with the pair id so concurrent runs'
-    messages don't get confused for each other in the same chat."""
+    messages don't get confused for each other in the same chat. Setup-phase
+    chatter (logging in, opening the casino, joining the table, retries) goes
+    to the console log ONLY via setup_progress -- the chat just gets the
+    "Run started" card, each hedged round, and the final summary."""
 
     def progress(text):
         logger.info(f"[Pair #{pid}] {text}")
@@ -1164,10 +1167,14 @@ def _blocking_run_pair(loop, bot, chat_id, pid, banker_creds, player_creds, amou
         except Exception:
             pass
 
+    def setup_progress(text):
+        logger.info(f"[Pair #{pid}] {text}")
+
     try:
         return run_paired_hedge(
             banker_creds, player_creds, amount, rounds,
-            site_url=BOT_SITE_URL, progress=progress, should_stop=stop_event.is_set,
+            site_url=BOT_SITE_URL, progress=progress, setup_progress=setup_progress,
+            should_stop=stop_event.is_set,
             proxy=global_settings.get("proxy"))
     except PWError as e:
         return {"ok": False, "rounds_done": 0, "requested_rounds": rounds,

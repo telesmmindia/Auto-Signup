@@ -1777,14 +1777,21 @@ def _now_iso():
 
 def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                      site_url=None, category="Baccarat", tile_text="Baccarat A",
-                     progress=None, should_stop=None, proxy=None, browser=None):
+                     progress=None, should_stop=None, proxy=None, browser=None,
+                     setup_progress=None):
     """Run up to `rounds` hedged rounds: `banker_creds` bets Banker and
     `player_creds` bets Player, `amount` each, on the SAME table/hand, until
     `rounds` is reached OR either balance drops below `amount` OR a round goes
     unhedged (partial) OR should_stop() returns True.
 
     `*_creds` are dicts {"username","password"}. `progress(str)` (optional) is
-    called with a human-readable line each round. `should_stop()` (optional)
+    called with a human-readable line each round. `setup_progress(str)`
+    (optional) receives the per-phase setup lines instead (login, lobby, table
+    join, retries -- everything from _open_table_for/_open_table_with_retry);
+    when omitted it falls back to `progress`, so existing callers behave
+    exactly as before. The bot passes a console-only logger here so setup
+    chatter stays out of the chat while round results still land there.
+    `should_stop()` (optional)
     returns True to stop after the current round. `proxy` (optional raw string)
     routes BOTH accounts' contexts through the same exit IP -- required when the
     box running the bot has a datacenter IP that the site's WAF 403-blocks
@@ -1818,6 +1825,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
     caller can persist the full progression, not just the final numbers.
     Real money -- see module notes above."""
     progress = progress or (lambda _msg: None)
+    setup_progress = setup_progress if setup_progress is not None else progress
     should_stop = should_stop or (lambda: False)
     summary = {"ok": False, "rounds_done": 0, "requested_rounds": rounds,
                "stop_reason": None, "messages": [], "shots": [], "rounds": [],
@@ -1859,12 +1867,12 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             player_pw, player_browser = player_exec.submit(_launch_pw_browser).result()
             player_fut = player_exec.submit(
                 _open_table_with_retry, player_browser, player_creds, site_url,
-                category, tile_text, "Player", progress,
+                category, tile_text, "Player", setup_progress,
                 proxy_conf=proxy_conf, should_stop=should_stop)
             try:
                 banker_open = _open_table_with_retry(
                     browser, banker_creds, site_url, category, tile_text,
-                    "Banker", progress, proxy_conf=proxy_conf, should_stop=should_stop)
+                    "Banker", setup_progress, proxy_conf=proxy_conf, should_stop=should_stop)
             except (_HedgeStopped, RuntimeError):
                 # Banker failed/stopped -- still must collect (and clean up)
                 # whatever the Player side produced, so nothing leaks.

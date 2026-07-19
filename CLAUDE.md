@@ -1073,10 +1073,15 @@ site_url, progress, should_stop, browser=None)` in `main.py` reuses `login()` /
   run in parallel, so `/run` still isn't instant. `_open_table_for()` takes
   `progress(str)` and reports one line per phase (🔑 login, 🎰 casino lobby,
   🃏 joining the table, 📡 waiting for it to load, ✅ ready) for each account,
-  called from whichever thread owns that account, both funneling into the
-  same chat via `progress`'s `run_coroutine_threadsafe` bridge (thread-safe to
-  call from two threads concurrently) — don't drop these calls if you touch
-  this function. `open_casino_lobby()`'s poll loop checks the lobby's own
+  called from whichever thread owns that account — don't drop these calls if
+  you touch this function. Since 2026-07-19 these setup-phase lines are
+  routed through `run_paired_hedge`'s separate `setup_progress` callback
+  (falls back to `progress` when not given, so CLI/ad-hoc callers are
+  unchanged): the bot passes a console-only logger there (per the owner's
+  explicit request — setup chatter was spamming the chat), so Telegram now
+  gets only the "Run started" card, each `✅ Round N/M hedged` line, and the
+  final summary card; the 🔑/🎰/🃏/📡/⏳ lines appear in the bot's console
+  log only. `open_casino_lobby()`'s poll loop checks the lobby's own
   visibility BEFORE paying `dismiss_popups()`'s wait (only falling back to it
   if not yet visible), shaving up to ~1.3s per loop iteration on the common
   (already-open) path — a real, safe trim; the other fixed sleeps in this
