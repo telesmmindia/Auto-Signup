@@ -1812,6 +1812,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user is None:
         return
     user_id = update.effective_user.id
+    # Set this user's "/" menu on first contact too, not just in post_init():
+    # a freshly-created bot instance gets "Chat not found" at startup for
+    # every master/admin who hasn't opened a chat with it yet, and without
+    # this the menu would stay empty until the next process restart.
+    menu = MASTER_COMMANDS if is_master(user_id) else ADMIN_COMMANDS if is_admin(user_id) else None
+    if menu is not None:
+        try:
+            await context.bot.set_my_commands(menu, scope=BotCommandScopeChat(chat_id=user_id))
+        except Exception as e:
+            logger.warning(f"Could not set command menu for {user_id} on /start: {e}")
     signup_admin_help = (
         f"/newacc [count] — start continuous test signups (asks phone → OTP, then "
         f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
