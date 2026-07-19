@@ -2,8 +2,9 @@
 Telegram bot wrapper for the QA signup driver.
 
 Two roles:
-    master admin -> exactly one, set via MASTER_ADMIN_ID in .env. Can do
-                    everything: create/remove admins, set the GLOBAL proxy
+    master admin -> one or more, set via MASTER_ADMIN_ID in .env (comma- or
+                    space-separated for several). Can do everything:
+                    create/remove admins, set the GLOBAL proxy
                     and site URL (applies to every admin's signups), and
                     view/export all stored account data.
     admin        -> authorized by the master admin (/addadmin). Can only
@@ -144,10 +145,13 @@ if "--env" in sys.argv:
 # override=False, i.e. first load wins).
 load_dotenv(_env_file, override=True)
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-# The one, fixed top-level role. Set via .env, not changeable from the bot
-# itself -- a compromised admin session should never be able to promote
-# itself to master.
-MASTER_ADMIN_ID = os.environ.get("MASTER_ADMIN_ID")
+# The fixed top-level role(s). Set via .env, not changeable from the bot
+# itself -- a compromised admin session should never be able to promote itself
+# to master. MASTER_ADMIN_ID accepts one id or several, comma- or
+# space-separated (multiple master admins); a single id behaves as before.
+MASTER_ADMIN_IDS = set(
+    os.environ.get("MASTER_ADMIN_ID", "").replace(",", " ").split()
+)
 # This instance's home site -- falls back to main.SITE_URL if unset, so a
 # single-bot setup with a plain ".env" behaves exactly as before. Every
 # fallback that used to read the bare SITE_URL import now reads this instead,
@@ -247,7 +251,7 @@ def save_pair_runs():
 
 
 def is_master(user_id):
-    return MASTER_ADMIN_ID is not None and str(user_id) == str(MASTER_ADMIN_ID)
+    return str(user_id) in MASTER_ADMIN_IDS
 
 
 def is_admin(user_id):
@@ -327,12 +331,12 @@ async def post_init(application):
         await bot.set_my_commands([], scope=BotCommandScopeDefault())
     except Exception as e:
         logger.warning(f"Could not clear default command menu: {e}")
-    if MASTER_ADMIN_ID:
+    for uid in MASTER_ADMIN_IDS:
         try:
             await bot.set_my_commands(MASTER_COMMANDS,
-                                      scope=BotCommandScopeChat(chat_id=int(MASTER_ADMIN_ID)))
+                                      scope=BotCommandScopeChat(chat_id=int(uid)))
         except Exception as e:
-            logger.warning(f"Could not set master command menu: {e}")
+            logger.warning(f"Could not set master command menu for {uid}: {e}")
     for uid in admin_ids:
         try:
             await bot.set_my_commands(ADMIN_COMMANDS, scope=BotCommandScopeChat(chat_id=int(uid)))
@@ -1676,7 +1680,7 @@ async def on_error(update, context):
 def main():
     if not BOT_TOKEN:
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env (see .env.example) before running this bot.")
-    if not MASTER_ADMIN_ID:
+    if not MASTER_ADMIN_IDS:
         raise SystemExit("Set MASTER_ADMIN_ID in .env (see .env.example) before running this bot.")
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", start))

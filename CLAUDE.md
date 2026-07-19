@@ -172,7 +172,9 @@ running QA signups from Telegram instead of the CLI.
 ```
 cp .env.example .env
 # edit .env: TELEGRAM_BOT_TOKEN from @BotFather, and MASTER_ADMIN_ID
-# (your own Telegram user ID -- message @userinfobot to get it)
+# (your own Telegram user ID -- message @userinfobot to get it; add more than
+# one master by separating ids with a comma or space, e.g.
+# MASTER_ADMIN_ID=111111111,222222222)
 .venv/bin/python telegram_bot.py
 ```
 
@@ -237,12 +239,15 @@ Two roles, checked via `is_master(user_id)` / `is_admin(user_id)` (master
 counts as admin too) and enforced with a `@require_role(check)` decorator on
 every handler except `/start`:
 
-- **master admin** — exactly one, fixed via `MASTER_ADMIN_ID` in `.env` and
-  never changeable from inside the bot (so a compromised admin session can't
-  self-promote). Can do everything: `/addadmin <id>` / `/removeadmin <id>` /
-  `/admins`, `/setproxy` / `/proxy` / `/clearproxy` / `/testproxy`, `/seturl`
-  / `/url` / `/clearurl`, and all data commands (`/list`, `/photo`,
-  `/export`, `/stats`).
+- **master admin** — one or more, fixed via `MASTER_ADMIN_ID` in `.env` (a
+  single id, or several comma-/space-separated ids, e.g.
+  `MASTER_ADMIN_ID=111111111,222222222`) and never changeable from inside the
+  bot (so a compromised admin session can't self-promote). Every master is
+  fully equal — there's no "primary" master and no way for one master to
+  demote another; that only happens by editing `.env` and restarting. Can do
+  everything: `/addadmin <id>` / `/removeadmin <id>` / `/admins`, `/setproxy` /
+  `/proxy` / `/clearproxy` / `/testproxy`, `/seturl` / `/url` / `/clearurl`,
+  and all data commands (`/list`, `/photo`, `/export`, `/stats`).
 - **admin** — authorized by the master admin, persisted in gitignored
   `admins.json` (`admin_ids`, a set of Telegram user-id strings, via
   `save_admin_ids()`). Can only run `/newacc`, `/done`, and `/cancel`.
