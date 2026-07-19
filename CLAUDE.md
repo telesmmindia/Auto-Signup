@@ -877,36 +877,58 @@ site_url, progress, should_stop)` in `main.py` reuses `login()` /
   `table_id` and aborts before any bet if they differ — otherwise the two bets
   wouldn't be on the same hand and it isn't a hedge.
 - **Both bets go down back-to-back in one open window**, same fix as
-  `place_baccarat_bet` (a >1s gap loses the window). Both contexts are driven
-  from the **one slot-0 worker thread** (Playwright is thread-affine), so the
-  two clicks are sequential but sub-second apart.
+  `place_baccarat_bet` (a >1s gap loses the window). Since the setup
+  parallelization below (2026-07-19), the Banker context lives on the
+  caller's thread and the Player context lives on its own thread
+  (`player_exec`) — the Player click is submitted to `player_exec` first
+  (non-blocking), then the Banker click runs inline on the calling thread,
+  then the caller joins on the Player future. This fires both clicks
+  genuinely concurrently on two OS threads rather than sequentially on one,
+  and is at least as tight a window as the old same-thread back-to-back
+  calls. Every other round-loop read that touches the Player side
+  (`_betting_open`, `_read_total_bet`, `read_game_balance`, `_table_id`) is
+  dispatched the same way: submit the Player-side call to `player_exec`
+  first, do the Banker-side call inline, then `.result()` the Player future
+  — so paired reads run concurrently too, not just the bet clicks.
 - **Partial round → stop immediately** (deliberate choice): if only one side's
   bet lands (unhedged real exposure), the run halts, names the exposed account,
   and screenshots both tabs (`shots/hedge-partial-*.png`).
-- **Setup (login → table-live) is inherently slow and sequential, by design
-  necessity, not a bug.** Both accounts are opened via `_open_table_for()` on
-  the **one slot-0 worker thread** one after another (Playwright's sync API is
-  thread-affine to the browser it launched, so true parallel setup would need
-  a second browser process + a second thread, and then the round-loop's
-  clicks — which must land in the SAME sub-second window — would need
-  cross-thread coordination too; not attempted, see below). Each account's
-  setup is a real login + a real live-video game load, routed through a
-  residential proxy when one is set — easily 1-2+ minutes per account, so 2-4
-  minutes total is normal, not a sign anything is stuck. `_open_table_for()`
-  takes `progress(str)` and reports one line per phase (🔑 login, 🎰 casino
-  lobby, 🃏 joining the table, 📡 waiting for it to load, ✅ ready) for each
-  account, so `/run` no longer goes silent for minutes — don't drop these
-  calls if you touch this function. `open_casino_lobby()`'s poll loop checks
-  the lobby's own visibility BEFORE paying `dismiss_popups()`'s wait (only
-  falling back to it if not yet visible), shaving up to ~1.3s per loop
-  iteration on the common (already-open) path — a real, safe trim; the other
-  fixed sleeps in this setup chain are left alone since several were
-  confirmed-live load-bearing (see `signup_once`'s post-`goto` sleep note) and
-  weren't re-verified safe to touch here.
-  True parallel setup (two browsers/threads, ~halving the 2-4 min) is possible
-  but requires dispatching every round-loop Playwright call (bet-spot clicks,
-  balance reads, `_betting_open` checks) through two separate thread pools
-  instead of one — a real refactor of the tested round loop, not attempted.
+- **Setup (login → table-live) runs the two accounts in parallel on two
+  threads/browsers (added 2026-07-19; previously sequential on one thread —
+  see git history if you need the old single-thread version).**
+  `run_paired_hedge` launches a **second, temporary** Playwright browser +
+  single-worker `ThreadPoolExecutor` (`player_exec`, via `_launch_pw_browser`)
+  just for the Player side; the Banker side keeps using the caller's existing
+  `browser`/thread (e.g. the bot's slot 0) unchanged. `_open_table_with_retry`
+  for the Player side is `player_exec.submit(...)`'d *before* the Banker call
+  runs inline, so both accounts' login → casino lobby → join table → wait for
+  live all happen concurrently — roughly halving the old 2-4 minute setup to
+  close to the slower of the two accounts alone, not the sum. If either side
+  fails or `/stoprun` fires mid-setup, whichever side already succeeded is
+  closed on its own owning thread before the error propagates (see the
+  nested try/except in `run_paired_hedge` — get this right if you touch it,
+  it's easy to leak a context or double-close across threads). Each account's
+  setup is still a real login + a real live-video game load, routed through a
+  residential proxy when one is set — easily 1-2+ minutes per account even
+  run in parallel, so `/run` still isn't instant. `_open_table_for()` takes
+  `progress(str)` and reports one line per phase (🔑 login, 🎰 casino lobby,
+  🃏 joining the table, 📡 waiting for it to load, ✅ ready) for each account,
+  called from whichever thread owns that account, both funneling into the
+  same chat via `progress`'s `run_coroutine_threadsafe` bridge (thread-safe to
+  call from two threads concurrently) — don't drop these calls if you touch
+  this function. `open_casino_lobby()`'s poll loop checks the lobby's own
+  visibility BEFORE paying `dismiss_popups()`'s wait (only falling back to it
+  if not yet visible), shaving up to ~1.3s per loop iteration on the common
+  (already-open) path — a real, safe trim; the other fixed sleeps in this
+  setup chain are left alone since several were confirmed-live load-bearing
+  (see `signup_once`'s post-`goto` sleep note) and weren't re-verified safe to
+  touch here. The temporary Player browser + `player_exec` are torn down in
+  `run_paired_hedge`'s `finally`, on every exit path (success, any stop
+  reason, or an exception) — never skip that cleanup if you touch the
+  function, or a Chromium + Playwright driver process leaks per run.
+  **Not yet verified live** — needs a real second account to confirm the
+  concurrent setup and the parallel round-loop reads/clicks behave the same
+  as the old sequential version did; test with `/run <id> 100 1` first.
 - **v1 does NOT select a chip denomination.** It bets the table's default chip
   (the minimum, ~₹100 on Baccarat A) and verifies the actual size via each
   side's TOTAL BET. If `amount` doesn't match what the table placed, it stops

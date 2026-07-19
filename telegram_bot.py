@@ -999,10 +999,13 @@ async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- Paired-account hedge betting (create pairs, run opposite-side bets) ---
 
 def _blocking_run_pair(loop, bot, chat_id, banker_creds, player_creds, amount, rounds):
-    """Runs on _pw_executors[0]. Drives TWO contexts on slot 0's browser via
-    main.run_paired_hedge, streaming per-round progress back to the chat with
-    run_coroutine_threadsafe (the asyncio loop lives on the bot's own thread,
-    not this worker thread)."""
+    """Runs on _pw_executors[0]. Drives the Banker context on slot 0's browser
+    (this thread) via main.run_paired_hedge, which internally spins up a
+    second, temporary browser + worker thread for the Player side so both
+    accounts log in and join the table concurrently instead of one after the
+    other -- see run_paired_hedge's docstring in main.py. Streams per-round
+    progress back to the chat with run_coroutine_threadsafe (the asyncio loop
+    lives on the bot's own thread, not this worker thread)."""
     browser = _blocking_ensure_browser(0)
 
     def progress(text):

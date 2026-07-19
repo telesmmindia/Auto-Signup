@@ -46,6 +46,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 
@@ -1475,6 +1476,22 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
     raise last
 
 
+def _launch_pw_browser():
+    """Start a standalone Playwright connection + headless Chromium. Must be
+    called from (and every object it returns used from) the thread that will
+    own it -- run this via executor.submit, never inline. Used to give the
+    Player side of a paired hedge its own browser/thread so its login +
+    table-join can run concurrently with the Banker side instead of
+    serialized on one thread (see run_paired_hedge)."""
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.launch(headless=True)
+    except Exception:
+        pw.stop()
+        raise
+    return pw, browser
+
+
 def _table_id(game_page):
     """Extract Evolution's table_id from a game tab URL (the two accounts must
     share it for the hedge to be on the same hand)."""
@@ -1502,6 +1519,19 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
     box running the bot has a datacenter IP that the site's WAF 403-blocks
     (login just returns a "Forbidden" page otherwise).
 
+    `browser` is the Banker side's browser (reused from the caller, e.g. the
+    bot's slot 0) -- the Banker side runs entirely on the calling thread, same
+    as before. The Player side gets its OWN temporary browser + single-worker
+    thread (`player_exec`, launched via `_launch_pw_browser`), so its login +
+    table-join runs concurrently with the Banker side's setup instead of
+    serialized after it -- this roughly halves setup time. Every call touching
+    the Player side's context/page/frame is dispatched through `player_exec`;
+    round-loop reads (balance, betting-open, total-bet) and the two bet-spot
+    clicks are similarly fired on both threads back-to-back (Player submitted
+    first, Banker run inline, then join) rather than one waiting on the other.
+    `player_exec` and its temporary browser are torn down in the `finally`
+    alongside the Banker context, on every exit path.
+
     Returns a summary dict: {"ok", "rounds_done", "requested_rounds",
     "stop_reason", "messages", "final_balance": {"banker","player"},
     "start_balance": {"banker","player"}, "rounds": [...], "shots",
@@ -1518,6 +1548,14 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                "final_balance": {"banker": None, "player": None}}
 
     ctx_b = ctx_p = gp_b = gp_p = fr_b = fr_p = bridge_proc = None
+    # The Player side gets its own temporary browser + single-worker thread so
+    # its login + table-join runs concurrently with the Banker side (which
+    # reuses the caller's `browser`/current thread, same as before) instead of
+    # the two being serialized one after another. Playwright's sync API is
+    # thread-affine -- every call touching player_browser/ctx_p/gp_p/fr_p must
+    # go through player_exec, never called inline from this thread.
+    player_exec = ThreadPoolExecutor(max_workers=1)
+    player_pw = player_browser = None
     try:
         # Both accounts share one exit IP: parse + (for SOCKS5-auth) bridge the
         # proxy once, then hand the same proxy_conf to both contexts. stop_bridge
@@ -1530,12 +1568,31 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
             summary["messages"].append(f"Proxy bridge failed to start: {e}")
             return summary
         try:
-            ctx_b, _, gp_b, fr_b = _open_table_with_retry(
-                browser, banker_creds, site_url, category, tile_text,
-                "Banker", progress, proxy_conf=proxy_conf, should_stop=should_stop)
-            ctx_p, _, gp_p, fr_p = _open_table_with_retry(
-                browser, player_creds, site_url, category, tile_text,
-                "Player", progress, proxy_conf=proxy_conf, should_stop=should_stop)
+            player_pw, player_browser = player_exec.submit(_launch_pw_browser).result()
+            player_fut = player_exec.submit(
+                _open_table_with_retry, player_browser, player_creds, site_url,
+                category, tile_text, "Player", progress,
+                proxy_conf=proxy_conf, should_stop=should_stop)
+            try:
+                banker_open = _open_table_with_retry(
+                    browser, banker_creds, site_url, category, tile_text,
+                    "Banker", progress, proxy_conf=proxy_conf, should_stop=should_stop)
+            except (_HedgeStopped, RuntimeError):
+                # Banker failed/stopped -- still must collect (and clean up)
+                # whatever the Player side produced, so nothing leaks.
+                try:
+                    p_ctx, _, _, _ = player_fut.result()
+                    player_exec.submit(p_ctx.close).result()
+                except Exception:
+                    pass
+                raise
+            try:
+                player_open = player_fut.result()
+            except (_HedgeStopped, RuntimeError):
+                banker_open[0].close()
+                raise
+            ctx_b, _, gp_b, fr_b = banker_open
+            ctx_p, _, gp_p, fr_p = player_open
         except _HedgeStopped:
             summary["stop_reason"] = "stopped_by_user"
             return summary
@@ -1544,7 +1601,8 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
             summary["messages"].append(str(e))
             return summary
 
-        tid_b, tid_p = _table_id(gp_b), _table_id(gp_p)
+        tid_b = _table_id(gp_b)
+        tid_p = player_exec.submit(_table_id, gp_p).result()
         if tid_b and tid_p and tid_b != tid_p:
             summary["stop_reason"] = "different_tables"
             summary["messages"].append(
@@ -1552,8 +1610,9 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                 "the hedge would not be on the same hand. Aborting before any bet.")
             return summary
 
+        p_fut = player_exec.submit(read_game_balance, fr_p)
         summary["start_balance"]["banker"] = read_game_balance(fr_b)
-        summary["start_balance"]["player"] = read_game_balance(fr_p)
+        summary["start_balance"]["player"] = p_fut.result()
         summary["final_balance"]["banker"] = summary["start_balance"]["banker"]
         summary["final_balance"]["player"] = summary["start_balance"]["player"]
 
@@ -1562,8 +1621,9 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                 summary["stop_reason"] = "stopped_by_user"
                 break
 
+            p_fut = player_exec.submit(read_game_balance, fr_p)
             bal_b = read_game_balance(fr_b)
-            bal_p = read_game_balance(fr_p)
+            bal_p = p_fut.result()
             summary["final_balance"]["banker"] = bal_b
             summary["final_balance"]["player"] = bal_p
             if bal_b is not None and bal_b < amount:
@@ -1595,27 +1655,38 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
             placed = False
             drain_deadline = time.time() + 30   # (a) let a mid-way window pass
             while time.time() < drain_deadline:
-                if should_stop() or not (_betting_open(fr_b) and _betting_open(fr_p)):
+                p_fut = player_exec.submit(_betting_open, fr_p)
+                b_open = _betting_open(fr_b)
+                if should_stop() or not (b_open and p_fut.result()):
                     break
-                gp_b.wait_for_timeout(500)
+                time.sleep(0.5)
             place_deadline = time.time() + 150  # (b) catch a fresh both-open window
             while time.time() < place_deadline:
                 if should_stop():
                     summary["stop_reason"] = "stopped_by_user"
                     break
-                if not (_betting_open(fr_b) and _betting_open(fr_p)):
-                    gp_b.wait_for_timeout(500)
+                p_fut = player_exec.submit(_betting_open, fr_p)
+                b_open = _betting_open(fr_b)
+                if not (b_open and p_fut.result()):
+                    time.sleep(0.5)
                     continue
-                if (_read_total_bet(fr_b) or 0) != 0 or (_read_total_bet(fr_p) or 0) != 0:
+                p_fut = player_exec.submit(_read_total_bet, fr_p)
+                b_tb0 = _read_total_bet(fr_b)
+                if (b_tb0 or 0) != 0 or (p_fut.result() or 0) != 0:
                     # something already staged/settling -- wait for a clean 0/0.
-                    gp_b.wait_for_timeout(500)
+                    time.sleep(0.5)
                     continue
 
+                # Fire the Player click on its own thread first (non-blocking),
+                # then the Banker click inline -- both bets land within the same
+                # sub-second window instead of one waiting on the other.
+                p_fut = player_exec.submit(_click_bet_spot, fr_p, "Player")
                 _click_bet_spot(fr_b, "Banker")
-                _click_bet_spot(fr_p, "Player")
-                gp_b.wait_for_timeout(1500)
+                p_fut.result()
+                time.sleep(1.5)
+                p_fut = player_exec.submit(_read_total_bet, fr_p)
                 tb_b = _read_total_bet(fr_b)
-                tb_p = _read_total_bet(fr_p)
+                tb_p = p_fut.result()
 
                 if tb_b == amount and tb_p == amount:
                     placed = True
@@ -1629,7 +1700,7 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                         f"The table placed ₹{tb_b} per side (its selected chip), not the "
                         f"requested ₹{amount}. That one round is hedged; stopping. Re-run "
                         f"with amount={tb_b} (chip selection isn't supported yet).")
-                    _screenshot_pair(gp_b, gp_p, summary, "mismatch")
+                    _screenshot_pair(gp_b, gp_p, summary, "mismatch", player_exec)
                     return summary
                 if bool(tb_b) != bool(tb_p):
                     # Exactly one side landed -> UNHEDGED real exposure. Stop now.
@@ -1639,10 +1710,10 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
                     summary["messages"].append(
                         f"Round {rnd}: only the {side} bet landed (account {exposed} is "
                         f"exposed for ₹{amount} this hand). Stopping immediately.")
-                    _screenshot_pair(gp_b, gp_p, summary, "partial")
+                    _screenshot_pair(gp_b, gp_p, summary, "partial", player_exec)
                     return summary
                 # neither landed (window closed) -> retry the window.
-                gp_b.wait_for_timeout(2000)
+                time.sleep(2)
 
             if not placed:
                 if summary["stop_reason"] == "stopped_by_user":
@@ -1657,11 +1728,14 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
             # Wait for the hand to resolve (both TOTAL BET back to 0) so the next
             # round starts on a fresh window; then read settled balances.
             for _ in range(40):
-                if (_read_total_bet(fr_b) or 0) == 0 and (_read_total_bet(fr_p) or 0) == 0:
+                p_fut = player_exec.submit(_read_total_bet, fr_p)
+                b_tb = _read_total_bet(fr_b)
+                if (b_tb or 0) == 0 and (p_fut.result() or 0) == 0:
                     break
-                gp_b.wait_for_timeout(1000)
+                time.sleep(1)
+            p_fut = player_exec.submit(read_game_balance, fr_p)
             bal_b = read_game_balance(fr_b)
-            bal_p = read_game_balance(fr_p)
+            bal_p = p_fut.result()
             summary["final_balance"]["banker"] = bal_b
             summary["final_balance"]["player"] = bal_p
             summary["rounds"].append(
@@ -1676,23 +1750,42 @@ def run_paired_hedge(browser, banker_creds, player_creds, amount, rounds,
         return summary
     finally:
         summary["ended_at"] = _now_iso()
-        for closer in (gp_b, gp_p, ctx_b, ctx_p):
+        for closer in (gp_b, ctx_b):
             try:
                 if closer is not None:
                     closer.close()
             except Exception:
                 pass
+        for closer in (gp_p, ctx_p):
+            try:
+                if closer is not None:
+                    player_exec.submit(closer.close).result()
+            except Exception:
+                pass
+        try:
+            if player_browser is not None:
+                player_exec.submit(player_browser.close).result()
+            if player_pw is not None:
+                player_exec.submit(player_pw.stop).result()
+        except Exception:
+            pass
+        player_exec.shutdown(wait=True)
         stop_bridge(bridge_proc)
 
 
-def _screenshot_pair(gp_b, gp_p, summary, tag):
-    """Screenshot both game tabs into shots/ and record the paths on `summary`."""
+def _screenshot_pair(gp_b, gp_p, summary, tag, player_exec):
+    """Screenshot both game tabs into shots/ and record the paths on `summary`.
+    gp_p belongs to the Player side's own thread (see run_paired_hedge), so its
+    screenshot must be dispatched through player_exec, not called inline."""
     SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    for label, gp in (("banker", gp_b), ("player", gp_p)):
+    for label, gp, exe in (("banker", gp_b, None), ("player", gp_p, player_exec)):
         try:
             path = SHOTS_DIR / f"hedge-{tag}-{label}-{stamp}.png"
-            gp.screenshot(path=str(path))
+            if exe is not None:
+                exe.submit(gp.screenshot, path=str(path)).result()
+            else:
+                gp.screenshot(path=str(path))
             summary["shots"].append(str(path))
         except Exception:
             pass
