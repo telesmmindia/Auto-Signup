@@ -1102,6 +1102,7 @@ def login(page, username, password, site_url=None):
     while time.time() < deadline:
         try:
             if page.locator(prof.sel["logged_in_indicator"]).first.is_visible():
+                _dismiss_stuck_login_modal(page)
                 return "ok", []
         except Exception:
             pass
@@ -1110,6 +1111,25 @@ def login(page, username, password, site_url=None):
             return "error", msgs
         page.wait_for_timeout(250)
     return "timeout", ["Login did not complete within the timeout."]
+
+
+def _dismiss_stuck_login_modal(page):
+    """Confirmed live 2026-07-19: the LOGIN popup (#nwGuestSec) can still be
+    sitting open on screen even after `logged_in_indicator` is already
+    visible underneath it -- Playwright's is_visible() only checks the
+    element's own box/CSS, not whether something is drawn on top of it, and
+    waiting (tested live up to 20s) never makes the popup auto-close on its
+    own. Left alone this silently blocks every subsequent click (casino nav,
+    etc.) since the popup still covers the whole page even though login()
+    itself reports "ok". Close button confirmed live: `a.close_desktop`
+    inside #nwGuestSec (onclick="loginFunc()")."""
+    try:
+        loc = page.locator("#nwGuestSec a.close_desktop")
+        if loc.count() and loc.first.is_visible():
+            loc.first.click(timeout=2000, force=True)
+            page.wait_for_timeout(300)
+    except Exception:
+        pass
 
 
 def open_casino_lobby(page, timeout_ms=15000):
@@ -1192,6 +1212,25 @@ def _dismiss_casino_promo_modal(page):
     page.wait_for_timeout(500)
 
 
+def _dismiss_choose_chips_modal(page):
+    """Close the "CHOOSE CHIPS: Bonus or Real" gate that appears right after
+    clicking a game tile, before the game's own tab opens -- confirmed live
+    2026-07-19 on an account with an active bonus balance + wagering
+    requirement. Left alone this silently eats the tile click (the click
+    lands on the modal instead of ever opening a new tab), which is
+    indistinguishable from "could not open the table" without a screenshot.
+    Always picks REAL CHIPS -- this driver tests real-money betting, not the
+    bonus balance -- via a plain text locator (no stable class name was
+    needed to identify it live)."""
+    try:
+        loc = page.locator("text=REAL CHIPS")
+        if loc.count() and loc.first.is_visible():
+            loc.first.click(timeout=2000, force=True)
+            page.wait_for_timeout(1000)
+    except Exception:
+        pass
+
+
 def search_and_open_game(page, category, tile_text):
     """Filter the Live Casino lobby to `category` (e.g. "Baccarat") and open
     the game tile matching `tile_text` (e.g. "Baccarat A"). There is no
@@ -1208,6 +1247,8 @@ def search_and_open_game(page, category, tile_text):
         page.wait_for_timeout(2500)
         _dismiss_casino_promo_modal(page)
         page.locator(f"text={tile_text}").first.click(timeout=5000, force=True)
+        page.wait_for_timeout(1000)
+        _dismiss_choose_chips_modal(page)
     except Exception:
         return None
 
