@@ -1645,7 +1645,32 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
             break
         page.wait_for_timeout(2000)
     if not game_page:
+        # Distinguish "the site dropped the login session" from generic tile
+        # flakiness. Confirmed live 2026-07-19: some accounts (password
+        # accepted, login() returns ok) get silently kicked back to a
+        # logged-out view within seconds -- the live-casino page then renders
+        # the guest lobby, which simply doesn't list the live tables, so the
+        # tile click can never succeed. Account-level on the site's side
+        # (reproduced identically with and without a proxy, from two IPs,
+        # while another account worked end-to-end through the same code and
+        # proxy at the same moment) -- retrying won't help, and the operator
+        # needs to know it's the account, not the connection.
+        session_dropped = False
+        try:
+            session_dropped = page.evaluate(
+                """() => Array.from(document.querySelectorAll('a,button')).some(e => {
+                    const r = e.getBoundingClientRect();
+                    return r.height > 0 && (e.innerText || '').trim() === 'LOGIN';
+                })""")
+        except Exception:
+            pass
         context.close()
+        if session_dropped:
+            raise RuntimeError(
+                f"the site dropped {username}'s login session right after login "
+                f"(casino page renders logged-out, so live tables are hidden) -- "
+                f"this is an account-level restriction/throttle on the site's "
+                f"side, not a connection problem; retrying won't fix it")
         raise RuntimeError(f"could not open the {tile_text!r} table for {username}")
     frame = find_game_frame(game_page, "evo-games.com")
     if frame is None:
@@ -1686,6 +1711,13 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
                                    progress=progress, label=f"{label}: {creds['username']}")
         except RuntimeError as e:
             last = e
+            # An account-level session drop (see _open_table_for) is not the
+            # transient flakiness this retry loop exists for -- every retry
+            # does a full fresh login that the site will drop again, which
+            # both wastes ~a minute per attempt and feeds whatever rate/abuse
+            # heuristic flagged the account in the first place. Fail fast.
+            if "dropped" in str(e) and "session" in str(e):
+                raise
             if i < attempts:
                 progress(f"⏳ Opening {label} table for {creds['username']} — "
                          f"attempt {i}/{attempts} didn't connect, trying a fresh session…")
