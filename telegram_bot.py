@@ -138,6 +138,10 @@ from main import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+# httpx logs every Telegram API round-trip (getUpdates/sendMessage) at INFO,
+# which buries the bot's own activity lines; keep only its warnings/errors.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # --env <path> selects which env file to load, so the same script can run as
 # two (or more) independent bot processes -- one per site -- each with its own
@@ -1153,6 +1157,7 @@ def _blocking_run_pair(loop, bot, chat_id, pid, banker_creds, player_creds, amou
     messages don't get confused for each other in the same chat."""
 
     def progress(text):
+        logger.info(f"[Pair #{pid}] {text}")
         try:
             asyncio.run_coroutine_threadsafe(
                 bot.send_message(chat_id, f"[Pair #{pid}] {text}"), loop)
