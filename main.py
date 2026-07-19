@@ -1720,7 +1720,8 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
                 raise
             if i < attempts:
                 progress(f"⏳ Opening {label} table for {creds['username']} — "
-                         f"attempt {i}/{attempts} didn't connect, trying a fresh session…")
+                         f"attempt {i}/{attempts} failed: {str(e)[:250]}\n"
+                         f"Trying a fresh session…")
                 for _ in range(10):  # pause, but stay responsive to /stoprun
                     if should_stop():
                         raise _HedgeStopped()
