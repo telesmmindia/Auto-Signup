@@ -1685,7 +1685,15 @@ def main():
         raise SystemExit("Set TELEGRAM_BOT_TOKEN in .env (see .env.example) before running this bot.")
     if not MASTER_ADMIN_IDS:
         raise SystemExit("Set MASTER_ADMIN_ID in .env (see .env.example) before running this bot.")
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    # concurrent_updates: PTB defaults to processing one update at a time, which
+    # meant a quick command like /stoprun sat queued -- unanswered -- for the
+    # entire duration of an in-flight /run (a single handler invocation that
+    # awaits the whole multi-round run). Reproduced live: two /stoprun sends
+    # during round 2/4 of a real run both landed only after round 4 finished.
+    # The actual Playwright work stays serialized per-slot via _pw_executors
+    # regardless, so allowing concurrent update dispatch just lets control
+    # commands (/stoprun, /done, /cancel) interrupt promptly.
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("newacc", newacc))
