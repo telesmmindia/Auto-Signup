@@ -170,6 +170,18 @@ MASTER_ADMIN_IDS = set(
 # so /clearurl and the default context.goto() target THIS bot's own site, not
 # necessarily main.py's cricmatch247 default.
 BOT_SITE_URL = os.environ.get("BOT_SITE_URL") or SITE_URL
+# Which command set this instance exposes, so signup and casino/gameplay can
+# run as SEPARATE bots (each with its own token) instead of one bot doing
+# both. "signup" = signup flow + account data + settings; "gameplay" = the
+# casino commands (/testbaccarat, /pair, /run, ...); "all" (the default)
+# keeps the old everything-in-one-bot behavior. Unregistered commands simply
+# don't exist on that instance -- Telegram replies nothing for them -- and
+# the "/" menus only show what the instance actually has.
+BOT_MODE = (os.environ.get("BOT_MODE") or "all").strip().lower()
+if BOT_MODE not in ("all", "signup", "gameplay"):
+    raise SystemExit(f"BOT_MODE must be 'signup', 'gameplay', or 'all' (got {BOT_MODE!r})")
+SIGNUP_ENABLED = BOT_MODE in ("all", "signup")
+GAMEPLAY_ENABLED = BOT_MODE in ("all", "gameplay")
 # How many signups this bot instance can run at once. Each slot is its own
 # Chromium process + dedicated worker thread (see the worker-pool comment
 # below) -- raising this increases real request concurrency against the
@@ -311,36 +323,52 @@ def require_role(check):
 # else gets the empty BotCommandScopeDefault set in post_init(), so a random
 # user sees no suggested commands at all (they can still type one manually
 # and get the require_role() rejection above).
-ADMIN_COMMANDS = [
-    BotCommand("newacc", "Start continuous test signups"),
-    BotCommand("done", "Stop continuous signups after the current one"),
-    BotCommand("cancel", "Abandon an in-progress signup"),
-    BotCommand("start", "Show available commands"),
-]
-MASTER_COMMANDS = ADMIN_COMMANDS + [
-    BotCommand("list", "Recent stored accounts"),
-    BotCommand("photo", "Resend a stored account's screenshot"),
-    BotCommand("export", "Export accounts as a CSV file"),
-    BotCommand("stats", "Counts of signups by status and btag"),
-    BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
-    BotCommand("password", "Show the current password mode"),
-    BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
-    BotCommand("setproxy", "Set the global proxy for all signups"),
+ADMIN_COMMANDS = []
+if SIGNUP_ENABLED:
+    ADMIN_COMMANDS += [
+        BotCommand("newacc", "Start continuous test signups"),
+        BotCommand("done", "Stop continuous signups after the current one"),
+        BotCommand("cancel", "Abandon an in-progress signup"),
+    ]
+ADMIN_COMMANDS.append(BotCommand("start", "Show available commands"))
+MASTER_COMMANDS = list(ADMIN_COMMANDS)
+if SIGNUP_ENABLED:
+    MASTER_COMMANDS += [
+        BotCommand("list", "Recent stored accounts"),
+        BotCommand("photo", "Resend a stored account's screenshot"),
+        BotCommand("export", "Export accounts as a CSV file"),
+        BotCommand("stats", "Counts of signups by status and btag"),
+        BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
+        BotCommand("password", "Show the current password mode"),
+        BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
+    ]
+if GAMEPLAY_ENABLED:
+    MASTER_COMMANDS += [
+        BotCommand("testbaccarat", "Login + place a real Baccarat bet (smoke test)"),
+        BotCommand("pair", "Create an account pair for hedge betting"),
+        BotCommand("pairs", "List stored account pairs"),
+        BotCommand("delpair", "Delete a stored pair"),
+        BotCommand("run", "Run a paired hedge: acc1 Banker vs acc2 Player"),
+        BotCommand("stoprun", "Stop the active hedge run"),
+        BotCommand("runs", "List past hedge runs (optionally by pair id)"),
+        BotCommand("runlog", "Per-round detail of one past run"),
+    ]
+# Proxy commands apply to both modes (hedge runs route through the global
+# proxy too); URL/btag only affect signups (gameplay always uses BOT_SITE_URL).
+MASTER_COMMANDS += [
+    BotCommand("setproxy", "Set the global proxy"),
     BotCommand("proxy", "Show the global proxy"),
     BotCommand("clearproxy", "Clear the global proxy"),
     BotCommand("testproxy", "Check a proxy actually works"),
-    BotCommand("testbaccarat", "Login + place a real Baccarat bet (smoke test)"),
-    BotCommand("pair", "Create an account pair for hedge betting"),
-    BotCommand("pairs", "List stored account pairs"),
-    BotCommand("delpair", "Delete a stored pair"),
-    BotCommand("run", "Run a paired hedge: acc1 Banker vs acc2 Player"),
-    BotCommand("stoprun", "Stop the active hedge run"),
-    BotCommand("runs", "List past hedge runs (optionally by pair id)"),
-    BotCommand("runlog", "Per-round detail of one past run"),
-    BotCommand("seturl", "Set the global site URL for all signups"),
-    BotCommand("url", "Show the global site URL"),
-    BotCommand("clearurl", "Reset to the default site URL"),
-    BotCommand("btag", "Set/show just the btag on the global site URL"),
+]
+if SIGNUP_ENABLED:
+    MASTER_COMMANDS += [
+        BotCommand("seturl", "Set the global site URL for all signups"),
+        BotCommand("url", "Show the global site URL"),
+        BotCommand("clearurl", "Reset to the default site URL"),
+        BotCommand("btag", "Set/show just the btag on the global site URL"),
+    ]
+MASTER_COMMANDS += [
     BotCommand("addadmin", "Authorize a new admin"),
     BotCommand("removeadmin", "Revoke an admin"),
     BotCommand("admins", "List current admins"),
@@ -1784,49 +1812,60 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user is None:
         return
     user_id = update.effective_user.id
+    signup_admin_help = (
+        f"/newacc [count] — start continuous test signups (asks phone → OTP, then "
+        f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
+        "reply \"<lane> <phone/OTP>\" when more than one is active\n"
+        "/done [lane] — stop after the current signup finishes\n"
+        "/cancel [lane] — abandon in-progress signup(s)"
+    )
     if is_master(user_id):
+        sections = []
+        if SIGNUP_ENABLED:
+            sections.append("📝 Signups\n" + signup_admin_help)
+            sections.append(
+                "📊 Data\n"
+                "/list [N] — recent stored accounts\n"
+                "/stats [btag] — counts by status (and btag)\n"
+                "/photo <id> — resend an account's screenshot\n"
+                "/export [N] [status] [url] — CSV (successful by default; 'all' for every status)"
+            )
+        if GAMEPLAY_ENABLED:
+            sections.append(
+                "🎰 Casino / hedge betting\n"
+                "/pair <u1> <p1> <u2> <p2> — create a pair (acc1 Banker, acc2 Player)\n"
+                "/pairs — list pairs   ·   /delpair <id> — remove one\n"
+                "/run <pair> <amount> <rounds> — run the hedge   ·   /stoprun — halt it\n"
+                "/runs [pair] — run history   ·   /runlog <run_id> — round-by-round\n"
+                "/testbaccarat <user> <pass> [amount] — single-account bet test"
+            )
+        settings_lines = ["⚙️ Settings (global)"]
+        if SIGNUP_ENABLED:
+            settings_lines.append("/setpassword <pw> | --random   ·   /password")
+            settings_lines.append("/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)")
+        settings_lines.append("/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]")
+        if SIGNUP_ENABLED:
+            settings_lines.append("/seturl <url> · /url · /clearurl · /btag [code]")
+        sections.append("\n".join(settings_lines))
+        sections.append("👥 Admins\n/addadmin <id> · /removeadmin <id> · /admins")
         await update.message.reply_text(
             "🤖 Master admin — commands\n"
             "━━━━━━━━━━━━━━\n"
-            "📝 Signups\n"
-            f"/newacc [count] — start continuous test signups (asks phone → OTP, then "
-            f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
-            "reply \"<lane> <phone/OTP>\" when more than one is active\n"
-            "/done [lane] — stop after the current signup finishes\n"
-            "/cancel [lane] — abandon in-progress signup(s)\n"
-            "\n"
-            "📊 Data\n"
-            "/list [N] — recent stored accounts\n"
-            "/stats [btag] — counts by status (and btag)\n"
-            "/photo <id> — resend an account's screenshot\n"
-            "/export [N] [status] [url] — CSV (successful by default; 'all' for every status)\n"
-            "\n"
-            "🎰 Casino / hedge betting\n"
-            "/pair <u1> <p1> <u2> <p2> — create a pair (acc1 Banker, acc2 Player)\n"
-            "/pairs — list pairs   ·   /delpair <id> — remove one\n"
-            "/run <pair> <amount> <rounds> — run the hedge   ·   /stoprun — halt it\n"
-            "/runs [pair] — run history   ·   /runlog <run_id> — round-by-round\n"
-            "/testbaccarat <user> <pass> [amount] — single-account bet test\n"
-            "\n"
-            "⚙️ Settings (global)\n"
-            "/setpassword <pw> | --random   ·   /password\n"
-            "/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)\n"
-            "/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]\n"
-            "/seturl <url> · /url · /clearurl · /btag [code]\n"
-            "\n"
-            "👥 Admins\n"
-            "/addadmin <id> · /removeadmin <id> · /admins"
+            + "\n\n".join(sections)
         )
     elif is_admin(user_id):
-        await update.message.reply_text(
-            "🤖 Admin — commands\n"
-            "━━━━━━━━━━━━━━\n"
-            f"/newacc [count] — start continuous test signups (asks phone → OTP, then "
-            f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
-            "reply \"<lane> <phone/OTP>\" when more than one is active\n"
-            "/done [lane] — stop after the current signup finishes\n"
-            "/cancel [lane] — abandon in-progress signup(s)"
-        )
+        if SIGNUP_ENABLED:
+            await update.message.reply_text(
+                "🤖 Admin — commands\n"
+                "━━━━━━━━━━━━━━\n"
+                + signup_admin_help
+            )
+        else:
+            await update.message.reply_text(
+                "🤖 This bot instance only runs casino/gameplay commands, "
+                "which are master-only — there is nothing for admins here. "
+                "Use the signup bot for /newacc."
+            )
     else:
         await update.message.reply_text(
             "🔒 You are not authorized to use this bot.\n"
@@ -1909,43 +1948,50 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).concurrent_updates(True).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
-    app.add_handler(CommandHandler("newacc", newacc))
-    app.add_handler(CommandHandler("cancel", cancel))
-    app.add_handler(CommandHandler("done", done_cmd))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("setpassword", setpassword))
-    app.add_handler(CommandHandler("password", show_password))
-    app.add_handler(CommandHandler("fast", fast_cmd))
-    app.add_handler(CommandHandler("list", list_accounts))
-    app.add_handler(CommandHandler("photo", photo_cmd))
-    app.add_handler(CommandHandler("export", export_cmd))
+    if SIGNUP_ENABLED:
+        app.add_handler(CommandHandler("newacc", newacc))
+        app.add_handler(CommandHandler("cancel", cancel))
+        app.add_handler(CommandHandler("done", done_cmd))
+        app.add_handler(CommandHandler("stats", stats))
+        app.add_handler(CommandHandler("setpassword", setpassword))
+        app.add_handler(CommandHandler("password", show_password))
+        app.add_handler(CommandHandler("fast", fast_cmd))
+        app.add_handler(CommandHandler("list", list_accounts))
+        app.add_handler(CommandHandler("photo", photo_cmd))
+        app.add_handler(CommandHandler("export", export_cmd))
+        app.add_handler(CommandHandler("seturl", seturl))
+        app.add_handler(CommandHandler("url", show_url))
+        app.add_handler(CommandHandler("clearurl", clearurl))
+        app.add_handler(CommandHandler("btag", btag_cmd))
+        # Phone/OTP replies only exist for signup sessions -- a gameplay-only
+        # instance has no sessions, so plain text is just ignored there.
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    if GAMEPLAY_ENABLED:
+        app.add_handler(CommandHandler("testbaccarat", testbaccarat))
+        app.add_handler(CommandHandler("pair", cpair))
+        app.add_handler(CommandHandler("pairs", pairs_cmd))
+        app.add_handler(CommandHandler("delpair", delpair))
+        app.add_handler(CommandHandler("run", run_cmd))
+        app.add_handler(CommandHandler("stoprun", stoprun))
+        app.add_handler(CommandHandler("runs", runs_cmd))
+        app.add_handler(CommandHandler("runlog", runlog_cmd))
     app.add_handler(CommandHandler("setproxy", setproxy))
     app.add_handler(CommandHandler("proxy", show_proxy))
     app.add_handler(CommandHandler("clearproxy", clearproxy))
     app.add_handler(CommandHandler("testproxy", testproxy))
-    app.add_handler(CommandHandler("testbaccarat", testbaccarat))
-    app.add_handler(CommandHandler("pair", cpair))
-    app.add_handler(CommandHandler("pairs", pairs_cmd))
-    app.add_handler(CommandHandler("delpair", delpair))
-    app.add_handler(CommandHandler("run", run_cmd))
-    app.add_handler(CommandHandler("stoprun", stoprun))
-    app.add_handler(CommandHandler("runs", runs_cmd))
-    app.add_handler(CommandHandler("runlog", runlog_cmd))
-    app.add_handler(CommandHandler("seturl", seturl))
-    app.add_handler(CommandHandler("url", show_url))
-    app.add_handler(CommandHandler("clearurl", clearurl))
-    app.add_handler(CommandHandler("btag", btag_cmd))
     app.add_handler(CommandHandler("addadmin", addadmin))
     app.add_handler(CommandHandler("removeadmin", removeadmin))
     app.add_handler(CommandHandler("admins", list_admins))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(on_error)
 
+    # Both modes still need the shared slot browsers: signups obviously, and
+    # gameplay's /testbaccarat + /testproxy run on slot 0 (each /run launches
+    # its own temporary browsers regardless).
     logger.info(f"Warming up {BOT_CONCURRENCY} browser slot(s)...")
     for slot in range(BOT_CONCURRENCY):
         _pw_executors[slot].submit(_blocking_ensure_browser, slot).result()
 
-    logger.info(f"Bot starting... env={_env_file} site={BOT_SITE_URL} "
+    logger.info(f"Bot starting... env={_env_file} mode={BOT_MODE} site={BOT_SITE_URL} "
                 f"concurrency={BOT_CONCURRENCY} "
                 f"admins_file={ADMINS_FILE} settings_file={SETTINGS_FILE} "
                 f"pairs_file={PAIRS_FILE} pair_runs_file={PAIR_RUNS_FILE}")

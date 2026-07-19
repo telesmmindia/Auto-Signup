@@ -259,7 +259,7 @@ cp .env.example .env
 `telegram_bot.py` loads `.env` via `python-dotenv` at import time; `.env` is
 gitignored so the token (and `MASTER_ADMIN_ID`) never land in a commit.
 
-### Running one bot per site
+### Running one bot per site / per role (`--env` + `BOT_MODE`)
 
 `telegram_bot.py` supports an optional `--env <path>` CLI flag so the same
 script can run as two (or more) independent bot processes, one per site,
@@ -268,14 +268,51 @@ bot identity/token in Telegram and, more importantly, its own worker
 thread/browser — signups for different sites no longer serialize on the
 single shared `_pw_executor`.
 
+The current production layout is **three** bots (since 2026-07-20):
+cricmatch signup (`.env.cricmatch`, `BOT_MODE=signup`), spin24star signup
+(`.env.spin24star`, `BOT_MODE=signup`), and cricmatch gameplay
+(`.env.gameplay`, `BOT_MODE=gameplay` — the casino/hedge commands only).
+
 ```
-cp .env.example .env.cricmatch      # or .env.cricmatch.example -> .env.cricmatch
-cp .env.example .env.spin24star
-# edit each: a DIFFERENT TELEGRAM_BOT_TOKEN (from a second @BotFather bot),
-# BOT_SITE_URL for that site, and distinct ADMINS_FILE / SETTINGS_FILE paths
+cp .env.cricmatch.example .env.cricmatch
+cp .env.spin24star.example .env.spin24star
+cp .env.gameplay.example .env.gameplay
+# edit each: a DIFFERENT TELEGRAM_BOT_TOKEN (one @BotFather bot per process),
+# BOT_SITE_URL, BOT_MODE, and distinct ADMINS_FILE / SETTINGS_FILE paths
 .venv/bin/python telegram_bot.py --env .env.cricmatch
 .venv/bin/python telegram_bot.py --env .env.spin24star   # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.gameplay     # separate terminal/tmux pane
 ```
+
+`BOT_MODE` (`signup` | `gameplay` | `all`, default `all` so a plain `.env`
+single-bot setup is unchanged) controls which command set an instance
+exposes, enforced at handler-registration time in `main()` — an
+out-of-mode command simply doesn't exist on that bot (Telegram ignores it;
+there's no "wrong bot" reply), and the per-role "/" menus
+(`ADMIN_COMMANDS`/`MASTER_COMMANDS`) plus `/start`'s help text are built
+from the same `SIGNUP_ENABLED`/`GAMEPLAY_ENABLED` flags so they never
+advertise a command the instance doesn't have. The split:
+- **signup**: `/newacc` `/done` `/cancel`, data (`/list` `/photo` `/export`
+  `/stats`), `/setpassword` `/password` `/fast`, URL/btag commands.
+- **gameplay**: `/testbaccarat`, `/pair` `/pairs` `/delpair`, `/run`
+  `/stoprun` `/runs` `/runlog`. All master-only, so an admin on a
+  gameplay-mode bot has nothing to run — `/start` tells them so. URL
+  commands are excluded on purpose: gameplay always targets `BOT_SITE_URL`
+  directly, `/seturl` never affected it.
+- **both modes**: `/start` `/help`, proxy commands (`/setproxy` `/proxy`
+  `/clearproxy` `/testproxy` — hedge runs route through the global proxy
+  too), and admin management. The `handle_message` phone/OTP text handler is
+  only registered in signup modes. Browser-slot warmup stays in both
+  (gameplay's `/testbaccarat`/`/testproxy` use slot 0).
+
+The real `.env.gameplay` points `PAIRS_FILE`/`PAIR_RUNS_FILE` at the
+pre-split `pairs.cricmatch.json`/`pair_runs.cricmatch.json` on purpose —
+gameplay moved off the cricmatch signup bot and took its pair/run history
+with it (the signup bot no longer registers those commands, so nothing else
+reads the files). Its `bot_settings.gameplay.json` was seeded as a copy of
+`bot_settings.cricmatch.json` so the working proxy carried over. Each mode
+being a separate process also means the gameplay bot's `/setproxy` is
+independent of the signup bots' — set it on each bot it should apply to.
 
 `--env` is parsed from `sys.argv` at module level, before
 `load_dotenv(_env_file, override=True)` runs. The `override=True` is load-
