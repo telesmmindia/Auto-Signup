@@ -144,14 +144,15 @@ STOCKMARKET = GameProfile(
     # risk. So if cash-out ever regresses, turning this False is a safe,
     # already-proven fallback rather than a degradation.
     #
-    # Runs 3 and 4 failed to cash out because the click went into a button
-    # that was still greyed: PORTFOLIO already reads the stake once the chip
-    # is staged, and stays that way through the gap between the betting window
-    # closing and the position actually riding. The root [data-role="cash-out"]
-    # reports disabled=false / opacity=1 / pointerEvents=auto in EVERY phase,
-    # so none of the obvious properties distinguish the states -- the panel
-    # greys itself by dropping the inner CASH OUT label to opacity 0.5, which
-    # is what _cashout_enabled() now reads.
+    # Runs 3 and 4 failed to cash out because the engine required
+    # _cashout_enabled() (the CASH OUT label's opacity) before it would even
+    # attempt a click. That theory -- greyed = genuinely disabled -- was
+    # disproved live 2026-07-20 by probe_live_cashout.py: a real click fired
+    # while _cashout_enabled read False landed immediately (portfolio
+    # 4.06 -> 0, balance moved by exactly that amount). The label's opacity
+    # simply doesn't track real enablement; main.py's _cashout_ready() no
+    # longer gates on it, only on window-closed + portfolio>0, and success is
+    # verified by checking the portfolio reading actually dropped.
     needs_cashout=True,
     # Cycle measured live 2026-07-20 on a real table: the "PLACE YOUR BETS"
     # banner counts 10 -> 2 over roughly TEN seconds, then the phase becomes

@@ -1769,26 +1769,26 @@ def _cashout_enabled(frame, game=None):
 def _cashout_ready(frame, game=None):
     """True when there's a live, cashable position.
 
-    Both conditions matter. Caught live 2026-07-20 on the first real run:
-    PORTFOLIO already reads the stake (e.g. "₹10.00") while the chip is merely
-    STAGED during the betting window -- and CASH OUT is disabled in that
-    phase, since the position hasn't started riding the chart yet. Treating
-    portfolio > 0 alone as "ready" therefore fired the cash-out clicks into a
-    dead button, twice, and the round was then reported as a failed cash-out.
-    The position only becomes cashable once the betting window has CLOSED --
-    and even that is not sufficient on its own: there is a further gap between
-    the window closing and the position actually riding the chart, during
-    which PORTFOLIO already reads the stake but the button is still greyed.
-    Clicking in that gap is what made runs 3 and 4 fail. So the button's own
-    enabled state (_cashout_enabled) is the deciding signal; the other two
-    checks stay as cheap guards."""
+    Used to require _cashout_enabled() (the CASH OUT label's opacity) as the
+    deciding signal on top of window-closed + portfolio>0, because runs 3 and
+    4 failed to cash out and that looked like the explanation. It wasn't:
+    confirmed live 2026-07-20 (probe_live_cashout.py, real ₹10 bet) that
+    _cashout_enabled reads False continuously through a position that is
+    provably live and moving (portfolio 10 -> 9.86 -> 4.06), and a real
+    _click_cashout() fired during that same "disabled" state landed
+    immediately -- portfolio dropped 4.06 -> 0 and the account balance moved
+    by exactly that amount (₹1489 -> ₹1483, matching ₹10 staked - ₹4.06 back).
+    So the label-opacity signal is simply wrong, not just early-in-a-gap as
+    previously theorized, and runs 3/4 most likely never attempted a real
+    click at all rather than clicking too soon. Trust only window-closed +
+    portfolio>0; verify success the same way the probe did, by checking the
+    portfolio reading actually dropped after a click, not by asking the
+    button whether it thinks it's enabled."""
     game = game or STOCKMARKET
     if _betting_open(frame, game):
         return False
     val = read_portfolio(frame, game)
-    if not (val is not None and val > 0):
-        return False
-    return _cashout_enabled(frame, game)
+    return val is not None and val > 0
 
 
 def _click_cashout(frame, game=None, timeout=5000):
@@ -2421,11 +2421,15 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     # Both placed the table's default chip, which isn't `amount`.
                     # This round IS hedged (safe), but the size is wrong -- abort
                     # cleanly rather than repeat, and tell the caller the real size.
+                    # This branch should be rare now that select_chip() runs before
+                    # the round loop (games with selectable_chips=True) -- it's the
+                    # fallback for a game with no chip rail at all (baccarat) or an
+                    # unexpected mid-run reset, not the normal path.
                     summary["stop_reason"] = "amount_mismatch"
                     summary["messages"].append(
                         f"The table placed ₹{tb_b} per side (its selected chip), not the "
                         f"requested ₹{amount}. That one round is hedged; stopping. Re-run "
-                        f"with amount={tb_b} (chip selection isn't supported yet).")
+                        f"with amount={tb_b}.")
                     _screenshot_pair(gp_b, gp_p, summary, "mismatch", player_exec)
                     return summary
                 if bool(tb_b) != bool(tb_p):
