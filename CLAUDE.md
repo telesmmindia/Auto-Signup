@@ -284,9 +284,9 @@ cp .env.gameplay.example .env.gameplay
 .venv/bin/python telegram_bot.py --env .env.gameplay     # separate terminal/tmux pane
 ```
 
-`BOT_MODE` (`signup` | `gameplay` | `all`, default `all` so a plain `.env`
-single-bot setup is unchanged) controls which command set an instance
-exposes, enforced at handler-registration time in `main()` — an
+`BOT_MODE` (`signup` | `gameplay` | `stockmarket` | `all`, default `all` so a
+plain `.env` single-bot setup is unchanged) controls which command set an
+instance exposes, enforced at handler-registration time in `main()` — an
 out-of-mode command simply doesn't exist on that bot (Telegram ignores it;
 there's no "wrong bot" reply), and the per-role "/" menus
 (`ADMIN_COMMANDS`/`MASTER_COMMANDS`) plus `/start`'s help text are built
@@ -1178,6 +1178,139 @@ site_url, progress, should_stop, browser=None)` in `main.py` reuses `login()` /
 (no money). The full paired placement needs a **second** real account (only
 `asha788` was on hand) and spends real money hedged; test with `/run <id> 100 1`
 first, then scale.
+
+## Stock Market Live hedge (`BOT_MODE=stockmarket`)
+
+A second hedgeable game alongside Baccarat: Evolution's **Stock Market Live**,
+where the two accounts bet **UP vs DOWN** on the same round and both positions
+are **cashed out together** each round. Runs as its own bot instance
+(`.env.stockmarket.example` -> `.env.stockmarket`, `BOT_MODE=stockmarket`),
+reusing the same `/pair` `/pairs` `/delpair` `/run` `/stoprun` `/runs`
+`/runlog` commands -- the game is fixed per instance exactly like
+`BOT_SITE_URL` fixes the site, so `/run` needs no extra argument and there is
+still only one `run_cmd`. `/testbaccarat` is deliberately excluded (it is
+Baccarat-specific and stays on the gameplay bot).
+
+Why it's attractive: the hedge bleeds only the game's **1% cash-out fee**,
+versus Baccarat's ~5% banker commission, and the **table minimum is ₹10** vs
+Baccarat A's ₹100 -- so live testing costs a tenth as much.
+
+### `GameProfile` (`sites/games.py`)
+
+Everything game-specific moved out of the engine into a `GameProfile`, the
+game-level counterpart to `SiteProfile`. `BACCARAT` reproduces the previous
+hardcoded behavior exactly (same roles, `window_mode="timer"`, same
+30/150/40 timings) and is the default for every existing caller, so the
+gameplay bot and its stored run history are unaffected. **Don't guess values
+for a new game** -- run the read-only probes (below), read the dump, then fill
+in a profile.
+
+### How Stock Market differs (all confirmed live 2026-07-20)
+
+- **Bet spots are `SM_Up` / `SM_Down`** -- a completely different convention
+  from Baccarat's `bet-spot-Banker`. `_click_bet_spot()` therefore takes a
+  **complete `data-role`**, not a suffix interpolated into `bet-spot-{}`.
+- **There is no `circle-timer`, and role presence cannot detect the betting
+  window at all** -- the visible role SET is byte-identical in every phase
+  (verified by diffing across a full round: nothing changed). The phase lives
+  in the **text** of `[data-role="instruction-message"]` ("PLACE YOUR BETS n"
+  / "NEXT GAME SOON"), which is what `window_mode="instruction"` reads.
+  Measured live: the window is open ~10s on a ~21s cycle -- tighter than
+  Baccarat's ~15s, hence `place_secs=220` so one missed window doesn't end
+  the run.
+- **The game is not in cricmatch's catalogue.** 206 tiles across the lobby's
+  Game Shows / Arcade Games / All (with "View All" expanded and lazy-load
+  scrolled) contain no match, and the site's own search returns only football
+  teams for "Stock". It is reachable **only** through Evolution's in-game
+  lobby: open any Evolution game (the profile uses the already-verified
+  Baccarat A as the door in), click `[data-role="lobby-button"]` bottom-right,
+  search there, open the tile. That's `_open_via_provider_lobby()`.
+- **The provider lobby is a SEPARATE iframe** (its URL carries `?iFrAmE=x`)
+  and only that frame has the Search box; the game frame -- which is what
+  `find_game_frame()` returns, since it has the most DOM nodes -- contains no
+  search input at all, only `quick-chat-input`. This cost several failed
+  attempts: typing into "the frame" silently did nothing every time.
+  `_find_provider_lobby_frame()` identifies it by its own category tabs ("For
+  You" / "Top Games" / "Game Shows"), which is stabler than matching the URL.
+  The lobby overlay is also fragile -- **any stray click dismisses it** and
+  drops back into the game -- so only click the three things needed.
+- **`read_game_balance()` and `_read_total_bet()` work unchanged** on this
+  game (verified: balance read ₹1,542, total bet 0).
+- The LOBBY button only exists once the entry game's UI has rendered;
+  `find_game_frame()` returns as soon as the frame has enough DOM nodes, which
+  can still be the loading screen. Clicking too early silently does nothing
+  and the lobby frame then never appears -- so `_open_via_provider_lobby()`
+  **polls** for the button. This failed on the first real end-to-end run.
+
+### Cash-out is the new money risk
+
+Baccarat bets are discrete: once placed, the hand resolves itself and there is
+nothing to time. Stock Market runs a live chart and each side's PORTFOLIO
+moves continuously until CASH OUT is pressed, so the two positions are a true
+hedge only while they still sum to (stake_a + stake_b). **Every second between
+the two cash-outs is real money** -- measured live, the chart can travel ~90%
+inside ~20s.
+
+So the engine cashes out as **early** as possible (the instant a position
+exists, when both portfolios are still ~= their stakes) and fires both clicks
+**concurrently** on their own threads, the same `player_exec.submit(...)` then
+inline-call pattern the bet clicks use. Then:
+- a side that didn't close is **retried once**; if it still hasn't, the run
+  halts with `cashout_partial` and names the exposed account (that account is
+  still riding the chart unhedged -- close it by hand).
+- a **divergence guard** (`cashout_tolerance`, default 5%) stops the run with
+  `cashout_divergence` if the realized total drifts from the stake, meaning
+  the two cash-outs did not land together. It **detects** this after the fact;
+  it cannot prevent it. That is why live testing starts at ₹10.
+
+**`read_portfolio()` is the "is there a position" signal, NOT the button
+state** -- confirmed live, the CASH OUT button reports `disabled=false` and
+`opacity=1` even with nothing staked (it is styled purely by CSS class), so it
+cannot distinguish the phases. Its text is `"PORTFOLIO\n1% FEE\n₹0.00"`,
+hence parsing the **last** number rather than the first.
+
+New stop reasons: `no_cashout_window`, `cashout_partial`, `cashout_divergence`
+(all in `_REASON_LABEL`).
+
+### Two pre-existing bugs this surfaced
+
+1. **`_table_id()`'s regex was lowercase-only** (`[a-z0-9]+`), so it returned
+   `None` for Stock Market's `StockMarket00001`. Because the same-table check
+   only compares when *both* ids are truthy, that silently **disabled the one
+   guard ensuring both accounts bet the same table**. The class now includes
+   uppercase, and the check aborts with `different_tables` rather than
+   proceeding when it cannot read both ids -- refusing to bet beats assuming
+   a skipped check passed.
+2. `_open_via_provider_lobby()` clicked LOBBY before the game had rendered it
+   (see above).
+
+### Discovery + verification scripts
+
+All read-only, none place a bet. Follow the `inspect_casino.py` precedent:
+run them, read the dump, *then* write selectors.
+- `probe_evo_lobby.py <user> <pass>` -- maps the route to the game and dumps
+  every `data-role` in it.
+- `probe_stock_round.py <user> <pass>` -- watches a full round, sampling the
+  instruction text, portfolio, cash-out state, total bet, balance and chips.
+- `verify_stockmarket.py <user> <pass>` -- drives the **real**
+  `_open_table_for(game=STOCKMARKET)` end to end, checks every readout and
+  role resolves, and counts betting windows. Run this before any `/run`.
+  Verified: table opens in ~70s, 10 windows in 200s, table id
+  `StockMarket00001`.
+
+**Not yet verified live: placing an actual bet, and a real cash-out.** Start
+with `/run <pair> 10 1` (one round, ₹10/side) and check `/runlog` shows the
+two balances netting to roughly zero minus the ~1% fee before scaling.
+
+### Known gap: chip selection
+
+The chip rail here is real DOM (`chip` x6, `chip-value` x6, `selected-chip`,
+`double-button`, `undo-button`) unlike Baccarat's hidden SVG templates, and
+the selected chip reads back (observed: `10`). So lifting the
+`amount_mismatch` limitation looks feasible on this game -- but `chip-value`
+elements render their number as SVG with empty `innerText`, so the values
+aren't readable that way yet. Deliberately deferred rather than guessed at
+with real money.
 
 ## Site-specific notes
 
