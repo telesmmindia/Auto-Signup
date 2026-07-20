@@ -1711,6 +1711,26 @@ def describe_chip_rail(frame):
     return f"chips {chips}, currently selected ₹{r.get('selected')}"
 
 
+# Full markup of the cash-out panel, used only for diagnosis: the enabled
+# styling can only be observed with a real position open, so a normal hedged
+# round captures it once and stores it on the run record.
+_DUMP_CASHOUT_JS = """(role) => {
+    const root = document.querySelector(`[data-role="${role}"]`);
+    if (!root) return {error: "not found"};
+    const nodes = [];
+    const walk = (e, d) => {
+        const cs = getComputedStyle(e);
+        nodes.push({d, tag: e.tagName, cls: (e.className || '').toString().slice(0, 40),
+                    txt: (e.innerText || '').trim().slice(0, 20),
+                    op: cs.opacity, color: cs.color, bg: cs.backgroundColor,
+                    cursor: cs.cursor, filter: cs.filter, pointer: cs.pointerEvents});
+        for (const c of e.children) walk(c, d + 1);
+    };
+    walk(root, 0);
+    return {nodes, html: root.outerHTML.slice(0, 1200)};
+}"""
+
+
 _CASHOUT_ENABLED_JS = """(role) => {
     const root = document.querySelector(`[data-role="${role}"]`);
     if (!root) return null;
@@ -2453,6 +2473,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 co_deadline = time.time() + game.settle_secs
                 ready = False
                 co_trace = []          # phase/portfolio/opacity, for diagnosis
+                co_live_dump = None    # button markup while a position rides
                 while time.time() < co_deadline:
                     if should_stop():
                         break
@@ -2469,10 +2490,25 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     if not co_trace or co_trace[-1][:3] != snap:
                         co_trace.append(snap + (round(time.time() - co_deadline
                                                       + game.settle_secs, 1),))
+                    # The position is LIVE here (its value is moving) yet the
+                    # button still reads disabled -- so the opacity heuristic
+                    # is wrong. Grab the panel's real markup exactly once in
+                    # that state; it is the only way to see the enabled
+                    # styling, since reaching it requires money on the table.
+                    if (co_live_dump is None and snap[1] and snap[1] > 0
+                            and not snap[2] and len(co_trace) > 2
+                            and snap[1] != co_trace[0][1]):
+                        try:
+                            co_live_dump = fr_b.evaluate(_DUMP_CASHOUT_JS,
+                                                         game.cashout_role)
+                        except Exception as e:
+                            co_live_dump = {"error": str(e)[:120]}
                     if b_ready and p_ready:
                         ready = True
                         break
                     time.sleep(0.4)
+                summary.setdefault("cashout_live_dump", []).append(
+                    {"round": rnd, "dump": co_live_dump})
                 summary.setdefault("cashout_trace", []).append(
                     {"round": rnd,
                      "trace": [{"phase": t[0], "portfolio": t[1],
