@@ -1644,6 +1644,55 @@ def read_portfolio(frame, game=None):
         return None
 
 
+# Chip rail. Captured live 2026-07-20: every chip is
+# <div data-role="chip" data-value="10|50|100|200|500|2500"> with
+# cursor:pointer, and [data-role="selected-chip"] holds the active value. The
+# numbers are SVG <text>, so innerText is empty on all of them -- read
+# data-value / textContent, never innerText.
+_READ_CHIPS_JS = """() => {
+    const chips = Array.from(document.querySelectorAll('[data-role="chip"]'))
+        .map(e => parseInt(e.getAttribute('data-value'), 10))
+        .filter(v => !isNaN(v));
+    const sel = document.querySelector('[data-role="selected-chip"]');
+    const selVal = sel ? parseInt((sel.textContent || '').replace(/[^0-9]/g, ''), 10) : null;
+    return {chips, selected: isNaN(selVal) ? null : selVal};
+}"""
+
+
+def read_chips(frame):
+    """Return {"chips": [10, 50, ...], "selected": 10} for the table's chip
+    rail, or {"chips": [], "selected": None} if it isn't present."""
+    try:
+        return frame.evaluate(_READ_CHIPS_JS)
+    except Exception:
+        return {"chips": [], "selected": None}
+
+
+def select_chip(frame, amount, timeout=4000):
+    """Pick the chip worth exactly `amount`. Returns True once the rail
+    reports it selected.
+
+    Without this the engine bets whatever the table has pre-selected -- the
+    minimum, ₹10 -- so a requested ₹100 silently placed ₹10 and tripped the
+    amount_mismatch stop. Verifies via [data-role="selected-chip"] rather than
+    trusting the click, same principle as checking TOTAL BET after a bet."""
+    try:
+        if read_chips(frame).get("selected") == amount:
+            return True
+        loc = frame.locator(f'[data-role="chip"][data-value="{amount}"]')
+        if not loc.count():
+            return False
+        loc.first.click(timeout=timeout, force=True)
+        deadline = time.time() + 3
+        while time.time() < deadline:
+            if read_chips(frame).get("selected") == amount:
+                return True
+            time.sleep(0.2)
+        return False
+    except Exception:
+        return False
+
+
 _CASHOUT_ENABLED_JS = """(role) => {
     const root = document.querySelector(`[data-role="${role}"]`);
     if (!root) return null;
@@ -2218,6 +2267,32 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 f"(got {tid_b!r} / {tid_p!r}), so there's no way to confirm both "
                 "accounts are on the same table. Aborting before any bet.")
             return summary
+
+        # Pick the chip matching `amount` BEFORE any betting. Without this the
+        # table bets its pre-selected chip (the ₹10 minimum) whatever was
+        # requested, which is what tripped amount_mismatch on the first run.
+        if game.selectable_chips:
+            p_fut = player_exec.submit(read_chips, fr_p)
+            rail_b = read_chips(fr_b)
+            rail_p = p_fut.result()
+            avail = sorted(set(rail_b.get("chips") or []) & set(rail_p.get("chips") or []))
+            if avail and amount not in avail:
+                summary["stop_reason"] = "amount_mismatch"
+                summary["messages"].append(
+                    f"₹{amount} isn't one of this table's chips. Available: "
+                    + ", ".join(f"₹{c}" for c in avail)
+                    + ". Re-run with one of those. (Aborted before any bet.)")
+                return summary
+            p_fut = player_exec.submit(select_chip, fr_p, amount)
+            ok_b = select_chip(fr_b, amount)
+            ok_p = p_fut.result()
+            if not (ok_b and ok_p):
+                side = game.side_a_label if not ok_b else game.side_b_label
+                summary["stop_reason"] = "chip_select_failed"
+                summary["messages"].append(
+                    f"Could not select the ₹{amount} chip on the {side} side, so a "
+                    f"bet would have been the wrong size. Aborted before any bet.")
+                return summary
 
         p_fut = player_exec.submit(read_game_balance, fr_p)
         summary["start_balance"]["banker"] = read_game_balance(fr_b)

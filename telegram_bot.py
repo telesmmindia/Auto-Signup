@@ -1469,6 +1469,7 @@ _REASON_LABEL = {
     "no_cashout_window": "No cash-out window appeared",
     "cashout_partial": "Safety stop (one side still riding)",
     "cashout_failed": "Neither side cashed out (still hedged)",
+    "chip_select_failed": "Could not select the chip size",
     "cashout_divergence": "Cash-outs didn't land together",
 }
 

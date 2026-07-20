@@ -69,6 +69,15 @@ class GameProfile:
     # Substrings (upper-cased comparison) marking the open-for-bets phase.
     instruction_open: tuple = ()
 
+    # Whether the table exposes a clickable chip rail
+    # ([data-role="chip"][data-value=...]). When True the engine selects the
+    # chip matching the requested amount before betting; when False it bets
+    # whatever the table has pre-selected and relies on the amount_mismatch
+    # check to catch a wrong size. Baccarat's rail was never identified (its
+    # data-role="chip" nodes were hidden 0-value templates), so it stays False
+    # there and that game's behavior is unchanged.
+    selectable_chips: bool = False
+
     # --- cash-out (stock market only) -----------------------------------
     needs_cashout: bool = False
     cashout_role: str = "cash-out"
@@ -122,6 +131,9 @@ STOCKMARKET = GameProfile(
     side_b_icon="🔴",
     table_ready_role="SM_Up",
     window_mode="instruction",
+    # Rail captured live 2026-07-20: ₹10/50/100/200/500/2500, each a
+    # <div data-role="chip" data-value="N"> with cursor:pointer.
+    selectable_chips=True,
     instruction_open=("PLACE YOUR BETS",),
     # ON, but note this game hedges fine WITHOUT it -- established live
     # 2026-07-20 over four real ₹10/side rounds, where the combined balance
