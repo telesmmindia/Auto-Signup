@@ -98,10 +98,41 @@ with sync_playwright() as p:
         data = fr.evaluate(_DUMP_CHIPS_JS)
         for role, items in data.items():
             print(f"\n=== [data-role=\"{role}\"] -- {len(items)} element(s) ===")
-            for it in items:
+            for it in items[:3]:
                 print("   ", json.dumps(it, ensure_ascii=False))
         gp.screenshot(path="shots/probe-chips.png")
-        print("\nscreenshot -> shots/probe-chips.png")
+
+        # The real question after run #8: does clicking a chip actually WORK,
+        # and does it depend on the phase? Try selecting 100 repeatedly across
+        # a couple of full cycles and report per-phase.
+        import time as _t
+        print("\n=== can we select the 100 chip, and when? ===")
+        end = _t.time() + 120
+        last = None
+        while _t.time() < end:
+            phase = (m._read_instruction(fr) or "?").split("\n")[0]
+            rail = m.read_chips(fr)
+            if rail.get("selected") != 100:
+                try:
+                    loc = fr.locator('[data-role="chip"][data-value="100"]')
+                    n = loc.count()
+                    loc.first.click(timeout=3000, force=True)
+                    _t.sleep(1.2)
+                except Exception as e:
+                    n = -1
+                after = m.read_chips(fr).get("selected")
+                print(f"  [{_t.strftime('%H:%M:%S')}] phase={phase!r:22} "
+                      f"matches={n} selected {rail.get('selected')} -> {after}"
+                      f"   {'WORKED' if after == 100 else 'ignored'}")
+                if after == 100:
+                    print("  ...now selecting 10 again to retest")
+                    try:
+                        fr.locator('[data-role="chip"][data-value="10"]').first.click(
+                            timeout=3000, force=True)
+                    except Exception:
+                        pass
+                    _t.sleep(1.2)
+            _t.sleep(2)
     finally:
         try:
             context.close()

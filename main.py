@@ -1668,29 +1668,47 @@ def read_chips(frame):
         return {"chips": [], "selected": None}
 
 
-def select_chip(frame, amount, timeout=4000):
+def select_chip(frame, amount, timeout=4000, wait_secs=75, game=None):
     """Pick the chip worth exactly `amount`. Returns True once the rail
     reports it selected.
 
     Without this the engine bets whatever the table has pre-selected -- the
     minimum, ₹10 -- so a requested ₹100 silently placed ₹10 and tripped the
     amount_mismatch stop. Verifies via [data-role="selected-chip"] rather than
-    trusting the click, same principle as checking TOTAL BET after a bet."""
-    try:
-        if read_chips(frame).get("selected") == amount:
-            return True
-        loc = frame.locator(f'[data-role="chip"][data-value="{amount}"]')
-        if not loc.count():
-            return False
-        loc.first.click(timeout=timeout, force=True)
-        deadline = time.time() + 3
-        while time.time() < deadline:
+    trusting the click, same principle as checking TOTAL BET after a bet.
+
+    Retries across `wait_secs` rather than trying once: the rail is not always
+    interactive between rounds (a single attempt at setup failed live on
+    2026-07-20, run #8), so this spans at least one full betting window --
+    ~21s on Stock Market Live -- giving the click a live rail to land on."""
+    deadline = time.time() + wait_secs
+    while True:
+        try:
             if read_chips(frame).get("selected") == amount:
                 return True
-            time.sleep(0.2)
-        return False
-    except Exception:
-        return False
+            loc = frame.locator(f'[data-role="chip"][data-value="{amount}"]')
+            if loc.count():
+                loc.first.click(timeout=timeout, force=True)
+                check = time.time() + 3
+                while time.time() < check:
+                    if read_chips(frame).get("selected") == amount:
+                        return True
+                    time.sleep(0.2)
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        time.sleep(1)
+
+
+def describe_chip_rail(frame):
+    """One-line summary of the rail, for failure messages -- 'rail not found'
+    reads very differently from 'rail present, click ignored'."""
+    r = read_chips(frame)
+    chips = r.get("chips") or []
+    if not chips:
+        return "no chip rail visible"
+    return f"chips {chips}, currently selected ₹{r.get('selected')}"
 
 
 _CASHOUT_ENABLED_JS = """(role) => {
@@ -2288,10 +2306,14 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             ok_p = p_fut.result()
             if not (ok_b and ok_p):
                 side = game.side_a_label if not ok_b else game.side_b_label
+                bad_fr, bad_exec = ((fr_b, None) if not ok_b else (fr_p, player_exec))
+                rail = (bad_exec.submit(describe_chip_rail, bad_fr).result()
+                        if bad_exec else describe_chip_rail(bad_fr))
                 summary["stop_reason"] = "chip_select_failed"
                 summary["messages"].append(
-                    f"Could not select the ₹{amount} chip on the {side} side, so a "
-                    f"bet would have been the wrong size. Aborted before any bet.")
+                    f"Could not select the ₹{amount} chip on the {side} side "
+                    f"({rail}), so a bet would have been the wrong size. "
+                    f"Aborted before any bet.")
                 return summary
 
         p_fut = player_exec.submit(read_game_balance, fr_p)
