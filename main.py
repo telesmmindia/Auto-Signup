@@ -1644,6 +1644,41 @@ def read_portfolio(frame, game=None):
         return None
 
 
+_CASHOUT_ENABLED_JS = """(role) => {
+    const root = document.querySelector(`[data-role="${role}"]`);
+    if (!root) return null;
+    // The panel greys itself out by dropping the CASH OUT *label* to
+    // opacity 0.5 -- the root reports disabled=false / opacity=1 /
+    // pointerEvents=auto in every phase, so the root tells us nothing.
+    // Find the innermost node whose text is exactly "CASH OUT".
+    let best = null;
+    for (const e of root.querySelectorAll('*')) {
+        const t = (e.innerText || '').trim().toUpperCase();
+        if (t !== 'CASH OUT') continue;
+        if (best === null || e.contains(best) === false) best = e;
+    }
+    if (!best) return null;
+    return parseFloat(getComputedStyle(best).opacity);
+}"""
+
+
+def _cashout_enabled(frame, game=None):
+    """True when the CASH OUT button is actually live (not greyed).
+
+    Established live 2026-07-20 by dumping the panel's subtree: the root
+    [data-role="cash-out"] reports disabled=false, opacity=1 and
+    pointerEvents=auto in EVERY phase, so none of the obvious properties
+    distinguish enabled from disabled. The greying is done by dropping the
+    inner CASH OUT label to **opacity 0.5**. That label's opacity is
+    therefore the only reliable signal, and this reads it."""
+    game = game or STOCKMARKET
+    try:
+        op = frame.evaluate(_CASHOUT_ENABLED_JS, game.cashout_role)
+    except Exception:
+        return False
+    return op is not None and op > 0.9
+
+
 def _cashout_ready(frame, game=None):
     """True when there's a live, cashable position.
 
@@ -1653,12 +1688,20 @@ def _cashout_ready(frame, game=None):
     phase, since the position hasn't started riding the chart yet. Treating
     portfolio > 0 alone as "ready" therefore fired the cash-out clicks into a
     dead button, twice, and the round was then reported as a failed cash-out.
-    The position only becomes cashable once the betting window has CLOSED."""
+    The position only becomes cashable once the betting window has CLOSED --
+    and even that is not sufficient on its own: there is a further gap between
+    the window closing and the position actually riding the chart, during
+    which PORTFOLIO already reads the stake but the button is still greyed.
+    Clicking in that gap is what made runs 3 and 4 fail. So the button's own
+    enabled state (_cashout_enabled) is the deciding signal; the other two
+    checks stay as cheap guards."""
     game = game or STOCKMARKET
     if _betting_open(frame, game):
         return False
     val = read_portfolio(frame, game)
-    return val is not None and val > 0
+    if not (val is not None and val > 0):
+        return False
+    return _cashout_enabled(frame, game)
 
 
 def _click_cashout(frame, game=None, timeout=5000):
@@ -2312,15 +2355,31 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 # nothing staked, so it can't distinguish the phases.
                 co_deadline = time.time() + game.settle_secs
                 ready = False
+                co_trace = []          # phase/portfolio/opacity, for diagnosis
                 while time.time() < co_deadline:
                     if should_stop():
                         break
                     p_fut = player_exec.submit(_cashout_ready, fr_p, game)
                     b_ready = _cashout_ready(fr_b, game)
-                    if b_ready and p_fut.result():
+                    p_ready = p_fut.result()
+                    # Record how the three signals move, so a failure says WHY
+                    # rather than just "it didn't work" (the button's enabled
+                    # state is invisible in a screenshot once the run has torn
+                    # the context down).
+                    snap = (_read_instruction(fr_b, game.instruction_role),
+                            read_portfolio(fr_b, game),
+                            _cashout_enabled(fr_b, game))
+                    if not co_trace or co_trace[-1][:3] != snap:
+                        co_trace.append(snap + (round(time.time() - co_deadline
+                                                      + game.settle_secs, 1),))
+                    if b_ready and p_ready:
                         ready = True
                         break
                     time.sleep(0.4)
+                summary.setdefault("cashout_trace", []).append(
+                    {"round": rnd,
+                     "trace": [{"phase": t[0], "portfolio": t[1],
+                                "enabled": t[2], "t": t[3]} for t in co_trace[:40]]})
 
                 if not ready:
                     summary["stop_reason"] = "no_cashout_window"

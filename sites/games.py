@@ -123,27 +123,24 @@ STOCKMARKET = GameProfile(
     table_ready_role="SM_Up",
     window_mode="instruction",
     instruction_open=("PLACE YOUR BETS",),
-    # DELIBERATELY OFF, and this is the important finding from the first live
-    # runs (2026-07-20, pair 1, ₹10/side, four real rounds).
+    # ON, but note this game hedges fine WITHOUT it -- established live
+    # 2026-07-20 over four real ₹10/side rounds, where the combined balance
+    # across both accounts went 3749 -> 3748 -> 3748 -> 3749. Money moved
+    # between the accounts each round (±₹4-9) and the pair netted ~zero,
+    # because both sides hold equal, opposite positions on one round. Settling
+    # is also cheaper (the 1% fee is charged on cash-out) and has no timing
+    # risk. So if cash-out ever regresses, turning this False is a safe,
+    # already-proven fallback rather than a degradation.
     #
-    # Letting the positions simply SETTLE is a complete hedge on its own. The
-    # combined balance across both accounts went 3749 -> 3748 -> 3748 -> 3749
-    # over those rounds: money moved between the two accounts every round
-    # (±₹4-9), but the pair netted ~zero. Both sides hold equal, opposite
-    # positions on one round, so whatever the chart does, one gains what the
-    # other loses -- exactly like baccarat, where nothing is cashed out either.
-    #
-    # Not cashing out is also strictly CHEAPER: the 1% fee is charged on
-    # cash-out, so riding to settlement pays no fee at all, and it removes the
-    # timing risk entirely (no window in which the two sides can diverge).
-    #
-    # The cash-out implementation below is retained and is structurally
-    # correct, but its click does not yet register against the live button --
-    # runs 3 and 4 both ended `cashout_failed` with both positions still open
-    # (harmlessly, since both failing leaves the pair hedged). Diagnosing that
-    # needs a real position to inspect the enabled button against; until then
-    # flipping this to True re-enables a path known not to work.
-    needs_cashout=False,
+    # Runs 3 and 4 failed to cash out because the click went into a button
+    # that was still greyed: PORTFOLIO already reads the stake once the chip
+    # is staged, and stays that way through the gap between the betting window
+    # closing and the position actually riding. The root [data-role="cash-out"]
+    # reports disabled=false / opacity=1 / pointerEvents=auto in EVERY phase,
+    # so none of the obvious properties distinguish the states -- the panel
+    # greys itself by dropping the inner CASH OUT label to opacity 0.5, which
+    # is what _cashout_enabled() now reads.
+    needs_cashout=True,
     # Cycle measured live 2026-07-20 on a real table: the "PLACE YOUR BETS"
     # banner counts 10 -> 2 over roughly TEN seconds, then the phase becomes
     # "NEXT GAME SOON", and the next betting window opens ~85s after the
