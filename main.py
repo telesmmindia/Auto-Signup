@@ -1645,7 +1645,18 @@ def read_portfolio(frame, game=None):
 
 
 def _cashout_ready(frame, game=None):
-    """True when there's a live position worth cashing out."""
+    """True when there's a live, cashable position.
+
+    Both conditions matter. Caught live 2026-07-20 on the first real run:
+    PORTFOLIO already reads the stake (e.g. "₹10.00") while the chip is merely
+    STAGED during the betting window -- and CASH OUT is disabled in that
+    phase, since the position hasn't started riding the chart yet. Treating
+    portfolio > 0 alone as "ready" therefore fired the cash-out clicks into a
+    dead button, twice, and the round was then reported as a failed cash-out.
+    The position only becomes cashable once the betting window has CLOSED."""
+    game = game or STOCKMARKET
+    if _betting_open(frame, game):
+        return False
     val = read_portfolio(frame, game)
     return val is not None and val > 0
 
@@ -2344,6 +2355,22 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     still_b = _cashout_ready(fr_b, game)
                     still_p = p_fut.result()
 
+                if still_b and still_p:
+                    # NEITHER side cashed out. That is a failure worth stopping
+                    # for, but it is NOT an exposure: both accounts still hold
+                    # equal, opposite positions on the same round, so they
+                    # remain hedged and will settle against each other. Saying
+                    # "unhedged" here (as an earlier version did) is both wrong
+                    # and alarming, so the two cases are reported separately.
+                    summary["stop_reason"] = "cashout_failed"
+                    summary["messages"].append(
+                        f"Round {rnd}: neither side cashed out — ₹{port_b} "
+                        f"({game.side_a_label}) and ₹{port_p} ({game.side_b_label}) "
+                        f"are both still open. They stay hedged against each other "
+                        f"and will settle on their own, so nothing needs closing by "
+                        f"hand; stopping rather than betting another round.")
+                    _screenshot_pair(gp_b, gp_p, summary, "cashout-failed", player_exec)
+                    return summary
                 if still_b or still_p:
                     exposed = (banker_creds["username"] if still_b
                                else player_creds["username"])
@@ -2351,8 +2378,9 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     summary["stop_reason"] = "cashout_partial"
                     summary["messages"].append(
                         f"Round {rnd}: the {side} side ({exposed}) did not cash out "
-                        f"and is still riding the chart UNHEDGED. Stopping "
-                        f"immediately — close it by hand.")
+                        f"while the other side did, so it is now riding the chart "
+                        f"UNHEDGED for ₹{amount}. Stopping immediately — close it "
+                        f"by hand.")
                     _screenshot_pair(gp_b, gp_p, summary, "cashout-partial", player_exec)
                     return summary
 

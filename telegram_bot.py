@@ -1467,6 +1467,7 @@ _REASON_LABEL = {
     # Stock Market Live only -- see the cash-out block in run_paired_hedge.
     "no_cashout_window": "No cash-out window appeared",
     "cashout_partial": "Safety stop (one side still riding)",
+    "cashout_failed": "Neither side cashed out (still hedged)",
     "cashout_divergence": "Cash-outs didn't land together",
 }
 
