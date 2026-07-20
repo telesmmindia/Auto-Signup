@@ -1242,7 +1242,33 @@ in a profile.
   and the lobby frame then never appears -- so `_open_via_provider_lobby()`
   **polls** for the button. This failed on the first real end-to-end run.
 
-### Cash-out is the new money risk
+### Cash-out is OFF: settling is a complete hedge on its own
+
+**Established live 2026-07-20** over four real ₹10/side rounds (pair 1): the
+combined balance across both accounts went **3749 -> 3748 -> 3748 -> 3749**.
+Money moved between the two accounts every round (±₹4-9), but the pair netted
+~zero. Both sides hold equal, opposite positions on one round, so whatever the
+chart does one gains what the other loses -- exactly like baccarat, where
+nothing is cashed out either.
+
+So `STOCKMARKET.needs_cashout` is **False**. Not cashing out is also strictly
+*cheaper* (the 1% fee is charged on cash-out, so riding to settlement pays no
+fee) and removes the timing risk entirely. This also answers the question that
+was open before the first run: an un-cashed position settles normally, it is
+not forfeited.
+
+The cash-out implementation is retained and structurally correct, but **its
+click does not yet register against the live button** -- runs 3 and 4 both
+ended `cashout_failed` with both positions still open (harmlessly: both
+failing leaves the pair hedged). Diagnosing it needs a real live position to
+inspect the *enabled* button against, since it can only be reached by
+actually betting. Don't flip `needs_cashout` back to True until that's done.
+
+### Cash-out, if it is ever re-enabled
+
+The original risk analysis:
+
+
 
 Baccarat bets are discrete: once placed, the hand resolves itself and there is
 nothing to time. Stock Market runs a live chart and each side's PORTFOLIO
