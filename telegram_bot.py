@@ -135,6 +135,7 @@ from main import (
     stop_bridge, submit_register, test_baccarat, wait_for_otp_outcome,
     wait_for_register_outcome,
 )
+from sites.games import BACCARAT, STOCKMARKET
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
@@ -178,10 +179,19 @@ BOT_SITE_URL = os.environ.get("BOT_SITE_URL") or SITE_URL
 # don't exist on that instance -- Telegram replies nothing for them -- and
 # the "/" menus only show what the instance actually has.
 BOT_MODE = (os.environ.get("BOT_MODE") or "all").strip().lower()
-if BOT_MODE not in ("all", "signup", "gameplay"):
-    raise SystemExit(f"BOT_MODE must be 'signup', 'gameplay', or 'all' (got {BOT_MODE!r})")
+if BOT_MODE not in ("all", "signup", "gameplay", "stockmarket"):
+    raise SystemExit(
+        f"BOT_MODE must be 'signup', 'gameplay', 'stockmarket', or 'all' (got {BOT_MODE!r})")
 SIGNUP_ENABLED = BOT_MODE in ("all", "signup")
+# "gameplay" = the original Evolution Baccarat hedge; "stockmarket" = the same
+# pair/run commands driving Evolution Stock Market Live (UP vs DOWN) instead.
+# They are separate modes rather than a flag on /run because the game is fixed
+# per instance, exactly like BOT_SITE_URL fixes the site -- so /run needs no
+# extra argument and run_cmd stays a single implementation.
 GAMEPLAY_ENABLED = BOT_MODE in ("all", "gameplay")
+STOCKMARKET_ENABLED = BOT_MODE == "stockmarket"
+HEDGE_ENABLED = GAMEPLAY_ENABLED or STOCKMARKET_ENABLED
+RUN_GAME = STOCKMARKET if STOCKMARKET_ENABLED else BACCARAT
 # How many signups this bot instance can run at once. Each slot is its own
 # Chromium process + dedicated worker thread (see the worker-pool comment
 # below) -- raising this increases real request concurrency against the
@@ -343,12 +353,15 @@ if SIGNUP_ENABLED:
         BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
     ]
 if GAMEPLAY_ENABLED:
+    MASTER_COMMANDS.append(
+        BotCommand("testbaccarat", "Login + place a real Baccarat bet (smoke test)"))
+if HEDGE_ENABLED:
     MASTER_COMMANDS += [
-        BotCommand("testbaccarat", "Login + place a real Baccarat bet (smoke test)"),
         BotCommand("pair", "Create an account pair for hedge betting"),
         BotCommand("pairs", "List stored account pairs"),
         BotCommand("delpair", "Delete a stored pair"),
-        BotCommand("run", "Run a paired hedge: acc1 Banker vs acc2 Player"),
+        BotCommand("run", f"Run a paired hedge: acc1 {RUN_GAME.side_a_label} "
+                          f"vs acc2 {RUN_GAME.side_b_label}"),
         BotCommand("stoprun", "Stop the active hedge run"),
         BotCommand("runs", "List past hedge runs (optionally by pair id)"),
         BotCommand("runlog", "Per-round detail of one past run"),
@@ -1203,12 +1216,13 @@ def _blocking_run_pair(loop, bot, chat_id, pid, banker_creds, player_creds, amou
             banker_creds, player_creds, amount, rounds,
             site_url=BOT_SITE_URL, progress=progress, setup_progress=setup_progress,
             should_stop=stop_event.is_set,
-            proxy=global_settings.get("proxy"))
+            proxy=global_settings.get("proxy"), game=RUN_GAME)
     except PWError as e:
         return {"ok": False, "rounds_done": 0, "requested_rounds": rounds,
                 "stop_reason": "playwright_error",
                 "messages": [f"Playwright error: {str(e)[:300]}"],
-                "shots": [], "final_balance": {"banker": None, "player": None}}
+                "shots": [], "game": RUN_GAME.key,
+                "final_balance": {"banker": None, "player": None}}
 
 
 @require_role(is_master)
@@ -1234,8 +1248,8 @@ async def cpair(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ <b>Pair #{pid} created</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"🔴 Banker  <b>{html.escape(u1)}</b>\n"
-        f"🔵 Player  <b>{html.escape(u2)}</b>\n"
+        f"{RUN_GAME.side_a_icon} {RUN_GAME.side_a_label}  <b>{html.escape(u1)}</b>\n"
+        f"{RUN_GAME.side_b_icon} {RUN_GAME.side_b_label}  <b>{html.escape(u2)}</b>\n"
         f"━━━━━━━━━━━━━━\n"
         f"▶️ Run it: /run {pid} &lt;amount&gt; &lt;rounds&gt;",
         parse_mode="HTML")
@@ -1252,8 +1266,8 @@ async def pairs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         created = (rec.get("created_at") or "").replace("T", " ")[:16]
         running = "  🏃 running" if pid in _active_runs else ""
         lines.append(
-            f"<b>#{pid}</b>   🔴 {html.escape(rec['banker']['username'])}"
-            f"   🔵 {html.escape(rec['player']['username'])}{running}\n"
+            f"<b>#{pid}</b>   {RUN_GAME.side_a_icon} {html.escape(rec['banker']['username'])}"
+            f"   {RUN_GAME.side_b_icon} {html.escape(rec['player']['username'])}{running}\n"
             f"   🕒 {created}")
     lines.append("\n▶️ Run one with /run &lt;id&gt; &lt;amount&gt; &lt;rounds&gt;")
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
@@ -1336,8 +1350,8 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"🎰 <b>Run started · Pair #{pid}</b>\n"
         f"━━━━━━━━━━━━━━\n"
-        f"🔴 Banker  <b>{html.escape(rec['banker']['username'])}</b>\n"
-        f"🔵 Player  <b>{html.escape(rec['player']['username'])}</b>\n"
+        f"{RUN_GAME.side_a_icon} {RUN_GAME.side_a_label}  <b>{html.escape(rec['banker']['username'])}</b>\n"
+        f"{RUN_GAME.side_b_icon} {RUN_GAME.side_b_label}  <b>{html.escape(rec['player']['username'])}</b>\n"
         f"💵 Stake   <b>₹{amount:,}</b> / side\n"
         f"🔁 Rounds  up to <b>{rounds}</b>\n"
         f"{proxy_line}\n"
@@ -1365,6 +1379,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "requested_rounds": summary["requested_rounds"],
         "rounds_done": summary["rounds_done"],
         "stop_reason": summary["stop_reason"],
+        "mode": summary.get("game", RUN_GAME.key),
         "started_at": summary.get("started_at"),
         "ended_at": summary.get("ended_at"),
         "start_balance": summary.get("start_balance", {}),
@@ -1386,8 +1401,8 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 Rounds hedged  <b>{done}/{req}</b>",
         f"🛑 {_reason_label(summary['stop_reason'])}",
         f"━━━━━━━━━━━━━━",
-        f"🔴 {b_user}   {_bal(fb.get('banker'))}  ({_net_tag(sb.get('banker'), fb.get('banker'))})",
-        f"🔵 {p_user}   {_bal(fb.get('player'))}  ({_net_tag(sb.get('player'), fb.get('player'))})",
+        f"{RUN_GAME.side_a_icon} {b_user}   {_bal(fb.get('banker'))}  ({_net_tag(sb.get('banker'), fb.get('banker'))})",
+        f"{RUN_GAME.side_b_icon} {p_user}   {_bal(fb.get('player'))}  ({_net_tag(sb.get('player'), fb.get('player'))})",
     ]
     notes = [m for m in summary.get("messages", []) if m]
     if notes:
@@ -1446,9 +1461,13 @@ _REASON_LABEL = {
     "different_tables": "Accounts landed on different tables",
     "partial_unhedged": "Safety stop (one side only)",
     "amount_mismatch": "Chip size didn't match",
-    "banker_out_of_balance": "Banker ran low on balance",
-    "player_out_of_balance": "Player ran low on balance",
+    "banker_out_of_balance": f"{RUN_GAME.side_a_label} side ran low on balance",
+    "player_out_of_balance": f"{RUN_GAME.side_b_label} side ran low on balance",
     "playwright_error": "Browser error",
+    # Stock Market Live only -- see the cash-out block in run_paired_hedge.
+    "no_cashout_window": "No cash-out window appeared",
+    "cashout_partial": "Safety stop (one side still riding)",
+    "cashout_divergence": "Cash-outs didn't land together",
 }
 
 
@@ -1492,7 +1511,7 @@ async def runs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if active:
         lines.append("🏃 <b>Active now</b>")
         for pid, rec in active.items():
-            lines.append(f"   #{pid}  🔴 {html.escape(rec['banker'])}  🔵 {html.escape(rec['player'])}")
+            lines.append(f"   #{pid}  {RUN_GAME.side_a_icon} {html.escape(rec['banker'])}  {RUN_GAME.side_b_icon} {html.escape(rec['player'])}")
         lines.append("━━━━━━━━━━━━━━")
     for r in list(reversed(runs))[:15]:
         sb, fb = r.get("start_balance", {}), r.get("final_balance", {})
@@ -1501,8 +1520,8 @@ async def runs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(
             f"{icon} <b>Run #{r['run_id']}</b> · pair {r['pair_id']} · "
             f"{r['rounds_done']}/{r['requested_rounds']} @ ₹{r['amount']:,}\n"
-            f"   🔴 {html.escape(r['banker_username'])} {_net_tag(sb.get('banker'), fb.get('banker'))}"
-            f"   🔵 {html.escape(r['player_username'])} {_net_tag(sb.get('player'), fb.get('player'))}\n"
+            f"   {RUN_GAME.side_a_icon} {html.escape(r['banker_username'])} {_net_tag(sb.get('banker'), fb.get('banker'))}"
+            f"   {RUN_GAME.side_b_icon} {html.escape(r['player_username'])} {_net_tag(sb.get('player'), fb.get('player'))}\n"
             f"   {_reason_label(r['stop_reason'])} · {ended}")
     lines.append("\n📄 /runlog &lt;run_id&gt; for round-by-round detail")
     await update.message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
@@ -1526,18 +1545,19 @@ async def runlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ended = (rec.get("ended_at") or "").replace("T", " ")
     lines = [
         f"📄 <b>Run #{rid} · Pair #{rec['pair_id']}</b>",
-        f"🔴 {b_user} (Banker)  vs  🔵 {p_user} (Player)",
+        f"{RUN_GAME.side_a_icon} {b_user} ({RUN_GAME.side_a_label})  vs  "
+        f"{RUN_GAME.side_b_icon} {p_user} ({RUN_GAME.side_b_label})",
         f"💵 ₹{rec['amount']:,}/side · 🎯 {rec['rounds_done']}/{rec['requested_rounds']} rounds",
         f"🛑 {_reason_label(rec['stop_reason'])}",
         f"🕒 {started} → {ended}",
         "━━━━━━━━━━━━━━",
-        f"Start   🔴 {_bal(sb.get('banker'))}   🔵 {_bal(sb.get('player'))}",
+        f"Start   {RUN_GAME.side_a_icon} {_bal(sb.get('banker'))}   {RUN_GAME.side_b_icon} {_bal(sb.get('player'))}",
     ]
     for rr in rec.get("rounds", []):
-        lines.append(f"R{rr['round']}      🔴 {_bal(rr.get('banker'))}   🔵 {_bal(rr.get('player'))}")
+        lines.append(f"R{rr['round']}      {RUN_GAME.side_a_icon} {_bal(rr.get('banker'))}   {RUN_GAME.side_b_icon} {_bal(rr.get('player'))}")
     lines.append(
-        f"Final   🔴 {_bal(fb.get('banker'))} ({_net_tag(sb.get('banker'), fb.get('banker'))})"
-        f"   🔵 {_bal(fb.get('player'))} ({_net_tag(sb.get('player'), fb.get('player'))})")
+        f"Final   {RUN_GAME.side_a_icon} {_bal(fb.get('banker'))} ({_net_tag(sb.get('banker'), fb.get('banker'))})"
+        f"   {RUN_GAME.side_b_icon} {_bal(fb.get('player'))} ({_net_tag(sb.get('player'), fb.get('player'))})")
     notes = [m for m in rec.get("messages", []) if m]
     if notes:
         lines.append("━━━━━━━━━━━━━━")
@@ -1840,15 +1860,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "/photo <id> — resend an account's screenshot\n"
                 "/export [N] [status] [url] — CSV (successful by default; 'all' for every status)"
             )
-        if GAMEPLAY_ENABLED:
-            sections.append(
-                "🎰 Casino / hedge betting\n"
-                "/pair <u1> <p1> <u2> <p2> — create a pair (acc1 Banker, acc2 Player)\n"
-                "/pairs — list pairs   ·   /delpair <id> — remove one\n"
-                "/run <pair> <amount> <rounds> — run the hedge   ·   /stoprun — halt it\n"
-                "/runs [pair] — run history   ·   /runlog <run_id> — round-by-round\n"
-                "/testbaccarat <user> <pass> [amount] — single-account bet test"
-            )
+        if HEDGE_ENABLED:
+            hedge = [
+                f"🎰 {'Stock Market' if STOCKMARKET_ENABLED else 'Casino'} / hedge betting",
+                f"/pair <u1> <p1> <u2> <p2> — create a pair "
+                f"(acc1 {RUN_GAME.side_a_label}, acc2 {RUN_GAME.side_b_label})",
+                "/pairs — list pairs   ·   /delpair <id> — remove one",
+                "/run <pair> <amount> <rounds> — run the hedge   ·   /stoprun — halt it",
+                "/runs [pair] — run history   ·   /runlog <run_id> — round-by-round",
+            ]
+            if GAMEPLAY_ENABLED:
+                hedge.append("/testbaccarat <user> <pass> [amount] — single-account bet test")
+            if STOCKMARKET_ENABLED:
+                hedge.append("Table minimum is ₹10 — start with /run <pair> 10 1.")
+            sections.append("\n".join(hedge))
         settings_lines = ["⚙️ Settings (global)"]
         if SIGNUP_ENABLED:
             settings_lines.append("/setpassword <pw> | --random   ·   /password")
@@ -1978,6 +2003,7 @@ def main():
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     if GAMEPLAY_ENABLED:
         app.add_handler(CommandHandler("testbaccarat", testbaccarat))
+    if HEDGE_ENABLED:
         app.add_handler(CommandHandler("pair", cpair))
         app.add_handler(CommandHandler("pairs", pairs_cmd))
         app.add_handler(CommandHandler("delpair", delpair))

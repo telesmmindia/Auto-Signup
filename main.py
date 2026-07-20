@@ -60,6 +60,7 @@ from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError 
 
 import db
 from sites import profile_for
+from sites.games import BACCARAT, STOCKMARKET, GameProfile, game_for
 
 # Load .env so the CLI (not just the bot) picks up CAPSOLVER_API_KEY etc.
 load_dotenv()
@@ -1302,20 +1303,25 @@ def find_game_frame(game_page, host_hint, min_nodes=50, timeout_ms=15000):
     return None
 
 
-# The Evolution/Ezugi baccarat UI tags every bet spot with a semantic,
-# stable data-role: "bet-spot-Player", "bet-spot-Banker", "bet-spot-Tie",
-# "bet-spot-SuperSix", "bet-spot-PlayerPair", "bet-spot-BankerPair",
-# "bet-spot-PlayerBonus", "bet-spot-BankerBonus", "bet-spot-PerfectPair",
-# "bet-spot-EitherPair" (enumerated live, read-only, 2026-07-17). Targeting
-# by that exact suffix is unambiguous, so this deliberately does NOT fall
-# back to any text-matching heuristic -- for a real-money click, a clean
+# The Evolution/Ezugi UI tags every bet spot with a semantic, stable
+# data-role. Baccarat uses "bet-spot-Player", "bet-spot-Banker",
+# "bet-spot-Tie", "bet-spot-SuperSix", "bet-spot-PlayerPair",
+# "bet-spot-BankerPair", "bet-spot-PlayerBonus", "bet-spot-BankerBonus",
+# "bet-spot-PerfectPair", "bet-spot-EitherPair" (enumerated live, read-only,
+# 2026-07-17); Stock Market Live uses a DIFFERENT convention entirely --
+# "SM_Up" / "SM_Down", with no "bet-spot-" prefix at all (enumerated live
+# 2026-07-20, see probe_evo_lobby.py). So this takes the COMPLETE data-role
+# value, not a suffix to interpolate into a "bet-spot-{}" template.
+#
+# Targeting by exact data-role is unambiguous, so this deliberately does NOT
+# fall back to any text-matching heuristic -- for a real-money click, a clean
 # "spot not found" failure is safer than a heuristic that could mis-click a
-# different bet. `roleSuffix` is the exact suffix, e.g. "Player" / "SuperSix".
-_TAG_BET_SPOT_JS = """(roleSuffix) => {
+# different bet.
+_TAG_BET_SPOT_JS = """(role) => {
     document.querySelectorAll('[data-pw-spot]').forEach(e => e.removeAttribute('data-pw-spot'));
-    const el = document.querySelector(`[data-role="bet-spot-${roleSuffix}"]`);
+    const el = document.querySelector(`[data-role="${role}"]`);
     if (!el) return false;
-    el.setAttribute('data-pw-spot', roleSuffix);
+    el.setAttribute('data-pw-spot', role);
     return true;
 }"""
 
@@ -1347,57 +1353,96 @@ _BETTING_OPEN_JS = """() => {
 }"""
 
 
-def _betting_open(frame):
-    """True when the live table is in the OPEN 'place your bets' phase. The
-    Evolution frame renders the 'PLACE YOUR BETS' banner text on canvas (it
-    never appears in the DOM), but a [data-role="circle-timer"] countdown
-    element is present ONLY while betting is open -- verified live
-    (2026-07-17): the role appears for the ~15s betting window and is absent
-    between rounds. TOTAL BET reads 0 in BOTH the open-and-empty and the closed
-    states, so this is the only reliable 'is the window actually open' signal
-    for gating a bet -- and the fix for the hedge placing one side into an open
-    window while the other account's window was still closed (partial/unhedged)."""
+_READ_INSTRUCTION_JS = """(role) => {
+    const e = document.querySelector(`[data-role="${role}"]`);
+    if (!e) return null;
+    if (e.getBoundingClientRect().height <= 0) return null;
+    return (e.innerText || '').replace(/[\\u2066\\u2069\\u200b]/g, '').trim().toUpperCase();
+}"""
+
+
+def _read_instruction(frame, role="instruction-message"):
+    """Read the game's phase banner text (e.g. "PLACE YOUR BETS", "MAKE YOUR
+    DECISION"). Returns an upper-cased string, or None if absent/hidden."""
+    try:
+        return frame.evaluate(_READ_INSTRUCTION_JS, role)
+    except Exception:
+        return None
+
+
+def _betting_open(frame, game=None):
+    """True when the live table is in the OPEN 'place your bets' phase.
+
+    Two detection modes, because the two supported games signal this
+    completely differently:
+
+    * "timer" (baccarat): the Evolution frame renders the 'PLACE YOUR BETS'
+      banner on canvas (it never appears in the DOM), but a
+      [data-role="circle-timer"] element is present ONLY while betting is open
+      -- verified live (2026-07-17): it appears for the ~15s window and is
+      absent between rounds.
+    * "instruction" (Stock Market Live): there is NO circle-timer at all, and
+      the visible role SET is byte-identical in every phase (confirmed live
+      2026-07-20 by diffing roles across a full round -- nothing changed), so
+      role presence cannot work here. The phase lives in the TEXT of
+      [data-role="instruction-message"] instead.
+
+    TOTAL BET reads 0 in BOTH the open-and-empty and the closed states, so
+    this is the only reliable 'is the window actually open' signal for gating
+    a bet -- and the fix for the hedge placing one side into an open window
+    while the other account's window was still closed (partial/unhedged)."""
+    game = game or BACCARAT
+    if game.window_mode == "instruction":
+        text = _read_instruction(frame, game.instruction_role)
+        if not text:
+            return False
+        return any(marker in text for marker in game.instruction_open)
     try:
         return bool(frame.evaluate(_BETTING_OPEN_JS))
     except Exception:
         return False
 
 
-def _click_bet_spot(frame, role_suffix, timeout=5000):
-    """Tag and click the bet spot whose data-role is "bet-spot-<role_suffix>"
-    (e.g. "Player", "Banker", "SuperSix"). Returns True if the element was
-    found and clicked -- NOT proof the bet registered, the caller must verify
-    via _read_total_bet. The bet-spot container has pointer-events:none with
-    an inner SVG <path> (pointer-events:all) filling it as the real hot-zone
-    (confirmed live via elementFromPoint), so a force-click at the
-    container's centre lands on that path. Force is used because a decorative
-    glow layer can also sit over the spot."""
+def _click_bet_spot(frame, role, timeout=5000):
+    """Tag and click the bet spot with the exact data-role `role` (e.g.
+    "bet-spot-Banker" on baccarat, "SM_Up" on Stock Market Live). Returns True
+    if the element was found and clicked -- NOT proof the bet registered, the
+    caller must verify via _read_total_bet. The bet-spot container has
+    pointer-events:none with an inner SVG <path> (pointer-events:all) filling
+    it as the real hot-zone (confirmed live via elementFromPoint), so a
+    force-click at the container's centre lands on that path. Force is used
+    because a decorative glow layer can also sit over the spot."""
     try:
-        if not frame.evaluate(_TAG_BET_SPOT_JS, role_suffix):
+        if not frame.evaluate(_TAG_BET_SPOT_JS, role):
             return False
-        frame.locator(f'[data-pw-spot="{role_suffix}"]').click(timeout=timeout, force=True)
+        frame.locator(f'[data-pw-spot="{role}"]').click(timeout=timeout, force=True)
         return True
     except Exception:
         return False
 
 
-def wait_for_live_table(frame, game_page, timeout_ms=30000):
+def wait_for_live_table(frame, game_page, timeout_ms=30000, game=None):
     """Wait until the live-dealer table is actually interactive, i.e. its
     loading/intro screen is gone and the bet spots exist. Confirmed live
     (2026-07-17): find_game_frame() returns as soon as the frame has enough
     DOM nodes, but that can be the SPRIBE-style loading screen
     (data-role="loading-screen"/"loading-screen-image"/"progress-star"),
     which fully overlays the bet spots -- clicking then just hits the loader.
-    Returns True once the table is live, False on timeout."""
+    Returns True once the table is live, False on timeout.
+
+    The "bet spots exist" probe is per-game (`table_ready_role`) -- baccarat's
+    is bet-spot-Banker, Stock Market Live's is SM_Up, so this must not be
+    hardcoded or a non-baccarat table never reports ready."""
+    game = game or BACCARAT
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         try:
-            st = frame.evaluate("""() => {
+            st = frame.evaluate("""(readyRole) => {
                 const l = document.querySelector('[data-role="loading-screen"]');
                 const loadingVisible = l && l.getBoundingClientRect().height > 0;
-                const spot = document.querySelector('[data-role="bet-spot-Banker"]');
+                const spot = document.querySelector(`[data-role="${readyRole}"]`);
                 return {loadingVisible: !!loadingVisible, hasSpot: !!spot};
-            }""")
+            }""", game.table_ready_role)
             if st["hasSpot"] and not st["loadingVisible"]:
                 return True
         except Exception:
@@ -1569,10 +1614,63 @@ _BALANCE_JS = """() => {
 }"""
 
 
+_PORTFOLIO_JS = """(role) => {
+    const e = document.querySelector(`[data-role="${role}"]`);
+    if (!e) return null;
+    const t = (e.innerText || '').replace(/[\\u2066\\u2069\\u200b]/g, '');
+    // The element also carries its "PORTFOLIO" title and "1% FEE" label, so
+    // take the LAST currency-looking number, which is the value itself.
+    const all = t.match(/([0-9][0-9,]*(?:\\.[0-9]+)?)/g);
+    if (!all || !all.length) return null;
+    return parseFloat(all[all.length - 1].replace(/,/g, ''));
+}"""
+
+
+def read_portfolio(frame, game=None):
+    """Read Stock Market Live's PORTFOLIO value (the live mark-to-market worth
+    of an open position) as a float, or None. Captured live 2026-07-20: the
+    element's text is "PORTFOLIO\\n1% FEE\\n₹0.00" with nothing staked, hence
+    taking the last number rather than the first.
+
+    This doubles as the "is there anything to cash out" signal, because the
+    CASH OUT button itself is NOT usable for that -- confirmed live, its
+    `disabled` property is false and its opacity is 1 even with no position
+    open (it's styled purely by CSS class), so a position must be detected by
+    portfolio > 0 instead."""
+    game = game or STOCKMARKET
+    try:
+        return frame.evaluate(_PORTFOLIO_JS, game.portfolio_role)
+    except Exception:
+        return None
+
+
+def _cashout_ready(frame, game=None):
+    """True when there's a live position worth cashing out."""
+    val = read_portfolio(frame, game)
+    return val is not None and val > 0
+
+
+def _click_cashout(frame, game=None, timeout=5000):
+    """Click CASH OUT. Same tag-then-force-click approach as _click_bet_spot
+    (a decorative overlay can sit above it). Returns True if the element was
+    found and clicked -- NOT proof the cash-out registered; the caller must
+    verify the portfolio dropped back to 0."""
+    game = game or STOCKMARKET
+    try:
+        if not frame.evaluate(_TAG_BET_SPOT_JS, game.cashout_role):
+            return False
+        frame.locator(f'[data-pw-spot="{game.cashout_role}"]').click(
+            timeout=timeout, force=True)
+        return True
+    except Exception:
+        return False
+
+
 def read_game_balance(frame):
     """Read the Evolution game frame's own BALANCE readout
     (data-role="balance-label-value", e.g. "₹1,891") as an int, or None.
-    Same-tab and real-time, so it reflects wins/losses as they settle."""
+    Same-tab and real-time, so it reflects wins/losses as they settle.
+    Verified live 2026-07-20 to work unchanged on Stock Market Live too."""
     try:
         return frame.evaluate(_BALANCE_JS)
     except Exception:
@@ -1596,8 +1694,121 @@ def _setup_fail(context, page, username, step, reason):
     raise RuntimeError(reason + shot)
 
 
+def _find_provider_lobby_frame(game_page, timeout_ms=15000):
+    """Return the Evolution in-game lobby's frame.
+
+    Load-bearing detail, established live 2026-07-20 after several failed
+    attempts: the lobby is a SEPARATE iframe from the game (its URL carries
+    "?iFrAmE=x"), and only that frame has the lobby's Search box. The game
+    frame -- which is what find_game_frame() returns, since it has the most
+    DOM nodes -- contains no search input at all, only quick-chat-input. Typing
+    into "the frame" therefore silently did nothing every time. Identify the
+    lobby by its own category tabs instead of by URL, which is stable."""
+    deadline = time.time() + timeout_ms / 1000
+    markers = ("For You", "Top Games", "Game Shows")
+    while time.time() < deadline:
+        for fr in game_page.frames:
+            try:
+                if fr.evaluate("""(markers) => {
+                    const vis = e => e.getBoundingClientRect().height > 0;
+                    const texts = Array.from(document.querySelectorAll('div,span,a,p'))
+                        .filter(vis).map(e => (e.innerText || '').trim());
+                    return markers.some(mk => texts.includes(mk));
+                }""", list(markers)):
+                    return fr
+            except Exception:
+                continue
+        game_page.wait_for_timeout(500)
+    return None
+
+
+def _open_via_provider_lobby(game_page, frame, game):
+    """Switch from whichever Evolution game is open to `game` via the
+    provider's own in-game lobby, and return the NEW game frame.
+
+    Needed because some games simply aren't in the operator's catalogue.
+    Confirmed live 2026-07-20 for Stock Market Live on cricmatch247: 206 tiles
+    across the lobby's Game Shows / Arcade Games / All categories (with "View
+    All" expanded and lazy-load scrolled) contain no match, and the site's own
+    search returns only football teams for "Stock". It is reachable *only*
+    from inside Evolution's lobby, whose LOBBY button sits bottom-right in any
+    running game.
+
+    The lobby overlay is fragile -- any stray click dismisses it and drops
+    back into the game -- so this clicks only the three things it needs."""
+    # The LOBBY button only exists once the entry game's own UI has rendered --
+    # find_game_frame() returns as soon as the frame has enough DOM nodes,
+    # which can still be the loading screen. Clicking too early silently does
+    # nothing and the lobby frame then never appears, so poll for the button
+    # rather than assuming it's there (this is exactly what failed live on the
+    # first end-to-end run).
+    deadline = time.time() + 45
+    btn = None
+    while time.time() < deadline:
+        try:
+            loc = frame.locator(f'[data-role="{game.lobby_button_role}"]').first
+            if loc.count() and loc.is_visible():
+                btn = loc
+                break
+        except Exception:
+            pass
+        game_page.wait_for_timeout(500)
+    if btn is None:
+        raise RuntimeError(
+            f"the entry game's {game.lobby_button_role!r} never appeared "
+            f"(it likely never finished loading)")
+    try:
+        btn.click(timeout=8000, force=True)
+    except Exception as e:
+        raise RuntimeError(f"could not open Evolution's lobby: {str(e)[:120]}")
+
+    # Retry the click a couple of times -- the lobby is an overlay and the
+    # first click can land while the game is still settling.
+    lobby = _find_provider_lobby_frame(game_page, timeout_ms=12000)
+    for _ in range(2):
+        if lobby is not None:
+            break
+        try:
+            frame.locator(f'[data-role="{game.lobby_button_role}"]').first.click(
+                timeout=5000, force=True)
+        except Exception:
+            pass
+        lobby = _find_provider_lobby_frame(game_page, timeout_ms=12000)
+    if lobby is None:
+        raise RuntimeError("Evolution's lobby frame never appeared")
+
+    try:
+        box = lobby.get_by_placeholder("Search").first
+        box.click(timeout=6000)
+        box.type(game.lobby_search, delay=140)
+    except Exception as e:
+        raise RuntimeError(f"could not search Evolution's lobby: {str(e)[:120]}")
+    game_page.wait_for_timeout(4500)
+
+    try:
+        lobby.locator(f"text={game.lobby_tile}").first.click(timeout=8000, force=True)
+    except Exception as e:
+        raise RuntimeError(
+            f"{game.lobby_tile!r} not found in Evolution's lobby: {str(e)[:120]}")
+    game_page.wait_for_timeout(14000)
+
+    # The game frame changes when the new table loads, so re-resolve it by the
+    # new game's own bet spot rather than reusing the old frame.
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        for fr in game_page.frames:
+            try:
+                if fr.evaluate("(r) => !!document.querySelector(`[data-role=\"${r}\"]`)",
+                               game.table_ready_role):
+                    return fr
+            except Exception:
+                continue
+        game_page.wait_for_timeout(500)
+    raise RuntimeError(f"{game.lobby_tile} opened but its frame never appeared")
+
+
 def _open_table_for(browser, username, password, site_url, category, tile_text,
-                    proxy_conf=None, progress=None, label=""):
+                    proxy_conf=None, progress=None, label="", game=None):
     """Log a fresh context into `username` and open the given live table.
     Returns (context, main_page, game_page, frame) or raises RuntimeError with
     a human-readable reason. Caller owns closing the context. `proxy_conf` is a
@@ -1608,6 +1819,7 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     two accounts, easily 1-2+ min each over a proxy), so without these the
     chat goes silent for minutes with no sign anything is happening."""
     progress = progress or (lambda _msg: None)
+    game = game or BACCARAT
     tag = f" ({label})" if label else ""
     progress(f"🔑 Logging in{tag}…")
     context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
@@ -1692,8 +1904,20 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     if frame is None:
         context.close()
         raise RuntimeError(f"game tab opened but its UI frame never loaded for {username}")
+
+    # Games the operator's own lobby doesn't carry (Stock Market Live) need a
+    # second hop through the PROVIDER's in-game lobby -- see
+    # _open_via_provider_lobby.
+    if game.via_provider_lobby:
+        progress(f"🔎 Switching to {game.lobby_tile} via Evolution's lobby{tag}…")
+        try:
+            frame = _open_via_provider_lobby(game_page, frame, game)
+        except RuntimeError as e:
+            context.close()
+            raise RuntimeError(f"{e} (for {username})")
+
     progress(f"📡 Waiting for the live table to load{tag}…")
-    if not wait_for_live_table(frame, game_page):
+    if not wait_for_live_table(frame, game_page, game=game):
         context.close()
         raise RuntimeError(f"table never became live (stuck loading) for {username}")
     progress(f"✅ Table ready{tag}")
@@ -1707,7 +1931,7 @@ class _HedgeStopped(Exception):
 
 def _open_table_with_retry(browser, creds, site_url, category, tile_text,
                            label, progress, attempts=4, proxy_conf=None,
-                           should_stop=None):
+                           should_stop=None, game=None):
     """_open_table_for with fresh-context retries. Login + the Live Casino nav
     are intermittently flaky in stretches (site-side; observed live 2026-07-17:
     fine at 21:58 and 22:15, failing repeatedly at 21:52 and 22:06), so a failed
@@ -1724,7 +1948,8 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
         try:
             return _open_table_for(browser, creds["username"], creds["password"],
                                    site_url, category, tile_text, proxy_conf=proxy_conf,
-                                   progress=progress, label=f"{label}: {creds['username']}")
+                                   progress=progress, label=f"{label}: {creds['username']}",
+                                   game=game)
         except RuntimeError as e:
             last = e
             # An account-level session drop (see _open_table_for) is not the
@@ -1766,7 +1991,14 @@ def _table_id(game_page):
     share it for the hedge to be on the same hand)."""
     # New-tab launches carry table_id=; the same-tab launch used by
     # bonus-balance accounts (REAL CHIPS gate) carries vt_id= instead.
-    m = re.search(r"(?:table_id|vt_id)=([a-z0-9]+)", game_page.url or "")
+    #
+    # The character class MUST include uppercase. Baccarat's ids are lowercase
+    # ("oytmvb9m1zysmc44"), but Stock Market Live's is "StockMarket00001" --
+    # with a lowercase-only class this returned None there, which silently
+    # DISABLED run_paired_hedge's same-table check (it only compares when both
+    # ids are truthy), so the two accounts could have been betting different
+    # tables with nothing to catch it. Caught live 2026-07-20.
+    m = re.search(r"(?:table_id|vt_id)=([A-Za-z0-9]+)", game_page.url or "")
     return m.group(1) if m else None
 
 
@@ -1776,13 +2008,25 @@ def _now_iso():
 
 
 def run_paired_hedge(banker_creds, player_creds, amount, rounds,
-                     site_url=None, category="Baccarat", tile_text="Baccarat A",
+                     site_url=None, category=None, tile_text=None,
                      progress=None, should_stop=None, proxy=None, browser=None,
-                     setup_progress=None):
-    """Run up to `rounds` hedged rounds: `banker_creds` bets Banker and
-    `player_creds` bets Player, `amount` each, on the SAME table/hand, until
-    `rounds` is reached OR either balance drops below `amount` OR a round goes
-    unhedged (partial) OR should_stop() returns True.
+                     setup_progress=None, game=None):
+    """Run up to `rounds` hedged rounds: the two accounts bet OPPOSITE sides of
+    the same hand, `amount` each, on the SAME table, until `rounds` is reached
+    OR either balance drops below `amount` OR a round goes unhedged (partial)
+    OR should_stop() returns True.
+
+    `game` is a GameProfile (sites/games.py) and decides which two sides those
+    are: baccarat (the default, unchanged) bets Banker vs Player; Stock Market
+    Live bets UP vs DOWN and additionally cashes out both positions each round
+    (see the cash-out block in the round loop). The `banker_*`/`player_*`
+    naming throughout this function and its summary dict is retained as a
+    generic side-A/side-B alias so existing /run history and the bot's
+    renderers keep working -- on a non-baccarat game "banker" simply means
+    side A, whose real label is game.side_a_label.
+
+    `category`/`tile_text` default to the game's own values; they remain
+    overridable for ad-hoc callers.
 
     `*_creds` are dicts {"username","password"}. `progress(str)` (optional) is
     called with a human-readable line each round. `setup_progress(str)`
@@ -1827,9 +2071,12 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
     progress = progress or (lambda _msg: None)
     setup_progress = setup_progress if setup_progress is not None else progress
     should_stop = should_stop or (lambda: False)
+    game = game or BACCARAT
+    category = category or game.category
+    tile_text = tile_text or game.tile_text
     summary = {"ok": False, "rounds_done": 0, "requested_rounds": rounds,
                "stop_reason": None, "messages": [], "shots": [], "rounds": [],
-               "started_at": _now_iso(), "ended_at": None,
+               "started_at": _now_iso(), "ended_at": None, "game": game.key,
                "start_balance": {"banker": None, "player": None},
                "final_balance": {"banker": None, "player": None}}
 
@@ -1867,12 +2114,13 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             player_pw, player_browser = player_exec.submit(_launch_pw_browser).result()
             player_fut = player_exec.submit(
                 _open_table_with_retry, player_browser, player_creds, site_url,
-                category, tile_text, "Player", setup_progress,
-                proxy_conf=proxy_conf, should_stop=should_stop)
+                category, tile_text, game.side_b_label, setup_progress,
+                proxy_conf=proxy_conf, should_stop=should_stop, game=game)
             try:
                 banker_open = _open_table_with_retry(
                     browser, banker_creds, site_url, category, tile_text,
-                    "Banker", setup_progress, proxy_conf=proxy_conf, should_stop=should_stop)
+                    game.side_a_label, setup_progress, proxy_conf=proxy_conf,
+                    should_stop=should_stop, game=game)
             except (_HedgeStopped, RuntimeError):
                 # Banker failed/stopped -- still must collect (and clean up)
                 # whatever the Player side produced, so nothing leaks.
@@ -1904,6 +2152,17 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             summary["messages"].append(
                 f"The two accounts landed on different tables ({tid_b} vs {tid_p}); "
                 "the hedge would not be on the same hand. Aborting before any bet.")
+            return summary
+        if not (tid_b and tid_p):
+            # This check is the only thing standing between "a hedge" and "two
+            # unrelated bets", so refuse to bet when it can't actually run
+            # rather than proceeding on the assumption that it passed.
+            summary["stop_reason"] = "different_tables"
+            summary["messages"].append(
+                f"Could not read a table id for "
+                f"{'both sides' if not (tid_b or tid_p) else ('the ' + game.side_a_label + ' side' if not tid_b else 'the ' + game.side_b_label + ' side')} "
+                f"(got {tid_b!r} / {tid_p!r}), so there's no way to confirm both "
+                "accounts are on the same table. Aborting before any bet.")
             return summary
 
         p_fut = player_exec.submit(read_game_balance, fr_p)
@@ -1949,20 +2208,20 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             # already near, then round 2 hit `no_open_window` simply because
             # the next window opened after the budget expired.
             placed = False
-            drain_deadline = time.time() + 30   # (a) let a mid-way window pass
+            drain_deadline = time.time() + game.drain_secs   # (a) let a mid-way window pass
             while time.time() < drain_deadline:
-                p_fut = player_exec.submit(_betting_open, fr_p)
-                b_open = _betting_open(fr_b)
+                p_fut = player_exec.submit(_betting_open, fr_p, game)
+                b_open = _betting_open(fr_b, game)
                 if should_stop() or not (b_open and p_fut.result()):
                     break
                 time.sleep(0.5)
-            place_deadline = time.time() + 150  # (b) catch a fresh both-open window
+            place_deadline = time.time() + game.place_secs  # (b) catch a fresh both-open window
             while time.time() < place_deadline:
                 if should_stop():
                     summary["stop_reason"] = "stopped_by_user"
                     break
-                p_fut = player_exec.submit(_betting_open, fr_p)
-                b_open = _betting_open(fr_b)
+                p_fut = player_exec.submit(_betting_open, fr_p, game)
+                b_open = _betting_open(fr_b, game)
                 if not (b_open and p_fut.result()):
                     time.sleep(0.5)
                     continue
@@ -1976,8 +2235,8 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 # Fire the Player click on its own thread first (non-blocking),
                 # then the Banker click inline -- both bets land within the same
                 # sub-second window instead of one waiting on the other.
-                p_fut = player_exec.submit(_click_bet_spot, fr_p, "Player")
-                _click_bet_spot(fr_b, "Banker")
+                p_fut = player_exec.submit(_click_bet_spot, fr_p, game.side_b_role)
+                _click_bet_spot(fr_b, game.side_a_role)
                 p_fut.result()
                 time.sleep(1.5)
                 p_fut = player_exec.submit(_read_total_bet, fr_p)
@@ -2001,7 +2260,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 if bool(tb_b) != bool(tb_p):
                     # Exactly one side landed -> UNHEDGED real exposure. Stop now.
                     exposed = banker_creds["username"] if tb_b else player_creds["username"]
-                    side = "Banker" if tb_b else "Player"
+                    side = game.side_a_label if tb_b else game.side_b_label
                     summary["stop_reason"] = "partial_unhedged"
                     summary["messages"].append(
                         f"Round {rnd}: only the {side} bet landed (account {exposed} is "
@@ -2021,9 +2280,103 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 break
 
             summary["rounds_done"] = rnd
+
+            # ---- cash-out (Stock Market Live only) -------------------------
+            # Baccarat bets are discrete: once placed, the hand resolves itself
+            # and there is nothing to time. Stock Market Live instead runs a
+            # live chart, and each side's PORTFOLIO moves continuously until
+            # CASH OUT is pressed -- so the two positions are only a true hedge
+            # while they are worth (stake_a + stake_b) together, and every
+            # second between the two cash-outs is real money. Measured live
+            # 2026-07-20, the chart can travel ~90% inside ~20s.
+            #
+            # So: cash out as EARLY as possible (the instant a position exists,
+            # when both portfolios are still ~= their stakes) and fire the two
+            # clicks concurrently on their own threads, exactly like the bet
+            # clicks above.
+            if game.needs_cashout:
+                # Wait for positions to actually open. read_portfolio is the
+                # signal, NOT the button's disabled state -- confirmed live the
+                # CASH OUT button reports disabled=false and opacity=1 even with
+                # nothing staked, so it can't distinguish the phases.
+                co_deadline = time.time() + game.settle_secs
+                ready = False
+                while time.time() < co_deadline:
+                    if should_stop():
+                        break
+                    p_fut = player_exec.submit(_cashout_ready, fr_p, game)
+                    b_ready = _cashout_ready(fr_b, game)
+                    if b_ready and p_fut.result():
+                        ready = True
+                        break
+                    time.sleep(0.4)
+
+                if not ready:
+                    summary["stop_reason"] = "no_cashout_window"
+                    summary["messages"].append(
+                        f"Round {rnd}: both bets landed but no cash-out window "
+                        f"appeared within {game.settle_secs}s. Positions may still "
+                        f"be open — check both accounts manually.")
+                    _screenshot_pair(gp_b, gp_p, summary, "nocashout", player_exec)
+                    return summary
+
+                p_fut = player_exec.submit(read_portfolio, fr_p, game)
+                port_b = read_portfolio(fr_b, game)
+                port_p = p_fut.result()
+
+                # Both clicks, concurrently, same pattern as the bets.
+                p_fut = player_exec.submit(_click_cashout, fr_p, game)
+                _click_cashout(fr_b, game)
+                p_fut.result()
+                time.sleep(2)
+
+                # Verify both closed; retry once for whichever side didn't.
+                p_fut = player_exec.submit(_cashout_ready, fr_p, game)
+                still_b = _cashout_ready(fr_b, game)
+                still_p = p_fut.result()
+                if still_b or still_p:
+                    if still_p:
+                        player_exec.submit(_click_cashout, fr_p, game).result()
+                    if still_b:
+                        _click_cashout(fr_b, game)
+                    time.sleep(2)
+                    p_fut = player_exec.submit(_cashout_ready, fr_p, game)
+                    still_b = _cashout_ready(fr_b, game)
+                    still_p = p_fut.result()
+
+                if still_b or still_p:
+                    exposed = (banker_creds["username"] if still_b
+                               else player_creds["username"])
+                    side = game.side_a_label if still_b else game.side_b_label
+                    summary["stop_reason"] = "cashout_partial"
+                    summary["messages"].append(
+                        f"Round {rnd}: the {side} side ({exposed}) did not cash out "
+                        f"and is still riding the chart UNHEDGED. Stopping "
+                        f"immediately — close it by hand.")
+                    _screenshot_pair(gp_b, gp_p, summary, "cashout-partial", player_exec)
+                    return summary
+
+                # Divergence guard: the two cash-outs fired concurrently, but if
+                # they didn't actually land together the pair no longer sums to
+                # what went in. This detects that after the fact -- it cannot
+                # prevent it, which is why live testing starts at the 10 rupee
+                # table minimum.
+                staked = amount * 2
+                realized = (port_b or 0) + (port_p or 0)
+                if staked and abs(realized - staked) / staked > game.cashout_tolerance:
+                    summary["stop_reason"] = "cashout_divergence"
+                    summary["messages"].append(
+                        f"Round {rnd}: cashed out ₹{port_b} + ₹{port_p} = ₹{realized:.2f} "
+                        f"against ₹{staked} staked — more than "
+                        f"{game.cashout_tolerance:.0%} apart, so the two cash-outs did "
+                        f"not land together and this round was not a clean hedge. "
+                        f"Stopping.")
+                    _screenshot_pair(gp_b, gp_p, summary, "divergence", player_exec)
+                    return summary
+
             # Wait for the hand to resolve (both TOTAL BET back to 0) so the next
             # round starts on a fresh window; then read settled balances.
-            for _ in range(40):
+            for _ in range(game.settle_secs):
                 p_fut = player_exec.submit(_read_total_bet, fr_p)
                 b_tb = _read_total_bet(fr_b)
                 if (b_tb or 0) == 0 and (p_fut.result() or 0) == 0:
@@ -2037,8 +2390,10 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             summary["rounds"].append(
                 {"round": rnd, "amount": amount, "banker": bal_b, "player": bal_p})
             progress(f"✅ Round {rnd}/{rounds} hedged · ₹{amount}/side\n"
-                     f"   🔴 {banker_creds['username']}: ₹{bal_b}\n"
-                     f"   🔵 {player_creds['username']}: ₹{bal_p}")
+                     f"   {game.side_a_icon} {banker_creds['username']} "
+                     f"({game.side_a_label}): ₹{bal_b}\n"
+                     f"   {game.side_b_icon} {player_creds['username']} "
+                     f"({game.side_b_label}): ₹{bal_p}")
 
         if summary["stop_reason"] is None:
             summary["stop_reason"] = "completed"
