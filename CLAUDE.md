@@ -1296,7 +1296,24 @@ click does not yet register against the live button** -- runs 3 and 4 both
 ended `cashout_failed` with both positions still open (harmlessly: both
 failing leaves the pair hedged). Diagnosing it needs a real live position to
 inspect the *enabled* button against, since it can only be reached by
-actually betting. Don't flip `needs_cashout` back to True until that's done.
+actually betting. Don't flip `needs_cashout` back to True without a fresh
+live-verified fix, not just a plausible theory (see next paragraph for why
+that warning exists).
+
+**It WAS flipped back to True once already, and re-broke.** The opacity-gate
+theory above (`_cashout_enabled()` gating the click on the CASH OUT label's
+CSS opacity, which doesn't track real enablement) was diagnosed and fixed
+live 2026-07-20 (`_cashout_ready()` no longer gates on it, verified by a real
+click landing while the old gate would have blocked it -- commit "Fix
+cash-out: stop gating on the broken label-opacity signal"), and
+`needs_cashout` was set back to `True` on the strength of that fix. It
+re-broke anyway: a real ₹100/side run 2026-07-21 (pair 4, run #9) hit the
+identical `cashout_failed` outcome, stopping after round 1/10. So the opacity
+gate was *a* cause, not *the* cause -- something else about the click still
+doesn't land reliably, and it isn't root-caused. `needs_cashout` is back to
+`False`. Given cash-out was never necessary for a clean hedge in the first
+place, there's no upside to chasing this further with real money instead of
+just not cashing out.
 
 ### Cash-out, if it is ever re-enabled
 
