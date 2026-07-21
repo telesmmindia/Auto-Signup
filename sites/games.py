@@ -135,34 +135,40 @@ STOCKMARKET = GameProfile(
     # <div data-role="chip" data-value="N"> with cursor:pointer.
     selectable_chips=True,
     instruction_open=("PLACE YOUR BETS",),
-    # OFF -- this game hedges fine WITHOUT it, established live 2026-07-20
-    # over four real ₹10/side rounds, where the combined balance across both
-    # accounts went 3749 -> 3748 -> 3748 -> 3749. Money moved between the
-    # accounts each round (±₹4-9) and the pair netted ~zero, because both
-    # sides hold equal, opposite positions on one round -- exactly like
-    # Baccarat, where nothing is cashed out either. Settling is also cheaper
-    # (the 1% fee is charged on cash-out) and has no timing risk.
+    # History: settling naturally (no cash-out) was proven to hedge cleanly
+    # live 2026-07-20 over four real ₹10/side rounds (combined balance
+    # 3749 -> 3748 -> 3748 -> 3749). Cash-out was then tried twice and failed
+    # both times (opacity-gate theory 2026-07-20, re-broke 2026-07-21 on a
+    # real ₹100/side run) before being turned off with an explicit warning
+    # not to re-enable without a fresh, live-verified fix -- see git history
+    # for that back-and-forth if you need it.
     #
-    # Runs 3 and 4 (2026-07-20) failed to cash out because the engine
-    # required _cashout_enabled() (the CASH OUT label's opacity) before it
-    # would even attempt a click. That theory -- greyed = genuinely disabled
-    # -- was disproved live by probe_live_cashout.py: a real click fired
-    # while _cashout_enabled read False landed immediately (portfolio
-    # 4.06 -> 0). main.py's _cashout_ready() was fixed to stop gating on
-    # opacity (commit "Fix cash-out: stop gating on the broken
-    # label-opacity signal"), and needs_cashout was flipped back to True on
-    # the strength of that fix.
-    #
-    # Re-broke live 2026-07-21 anyway: a real ₹100/side run (Pair #4, run
-    # #9) hit the identical "neither side cashed out" outcome the opacity
-    # fix was supposed to have solved, stopping the run after round 1/10.
-    # So the opacity gate was A cause, not THE cause -- something else about
-    # the click still doesn't land reliably, not yet root-caused. Back to
-    # False: given cash-out isn't needed for a clean hedge anyway (see
-    # above), there's no upside to chasing this further with real money
-    # instead of just not cashing out. Don't flip this back to True without
-    # a fresh live-verified fix, not just a plausible theory.
-    needs_cashout=False,
+    # RE-ENABLED 2026-07-21 on a genuine fix, requested by the site owner's
+    # client (cash-out is a requirement for this deployment). Root cause was
+    # finally isolated with click-level diagnostics (main.py's
+    # cashout_click_diag) added specifically to see WHY a click failed, not
+    # just THAT it failed. Two real, independent bugs, both fixed:
+    #   1. The round loop treated a position as cashable the instant betting
+    #      closed, while the portfolio still read exactly the staked amount
+    #      (not yet live/moving server-side). Clicking then found the button
+    #      and fired with no exception, but never registered. Fixed by
+    #      requiring each side's portfolio to visibly diverge from its
+    #      first-seen value before attempting a click at all.
+    #   2. Even with a confirmed-moving position, a single click (or two)
+    #      wasn't enough -- the one previously-working isolated test
+    #      (probe_live_cashout.py, 2026-07-20) needed clicks roughly every
+    #      1.5s over up to ~75s before one landed. The round loop only ever
+    #      tried twice. Fixed with a persistent retry (main.py's
+    #      CASHOUT_CLICK_WINDOW_SECS=30, ~1.5s cadence, each side stopping
+    #      independently once ITS OWN portfolio confirms closed).
+    # Verified end-to-end live 2026-07-21 (pair #1, ali789/asha788, ₹10/side,
+    # 1 round): both sides cashed out cleanly after 9 retry attempts (~24s),
+    # balances moved 1490->1484 / 2198->2204 (net ~zero across the pair, the
+    # 1% fee's ~₹6 already reflected). Only one round tested so far --
+    # exactly the situation that looked fixed twice before and re-broke, so
+    # treat this as promising, not bulletproof, until more rounds/pairs
+    # confirm it holds up.
+    needs_cashout=True,
     # Cycle measured live 2026-07-20 on a real table: the "PLACE YOUR BETS"
     # banner counts 10 -> 2 over roughly TEN seconds, then the phase becomes
     # "NEXT GAME SOON", and the next betting window opens ~85s after the

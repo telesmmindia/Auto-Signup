@@ -1389,6 +1389,7 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "messages": summary.get("messages", []),
         "cashout_trace": summary.get("cashout_trace", []),
         "cashout_live_dump": summary.get("cashout_live_dump", []),
+        "cashout_click_diag": summary.get("cashout_click_diag", []),
         "shots": summary.get("shots", []),
     })
     save_pair_runs()

@@ -1791,19 +1791,29 @@ def _cashout_ready(frame, game=None):
     return val is not None and val > 0
 
 
-def _click_cashout(frame, game=None, timeout=5000):
+def _click_cashout(frame, game=None, timeout=5000, debug=None):
     """Click CASH OUT. Same tag-then-force-click approach as _click_bet_spot
     (a decorative overlay can sit above it). Returns True if the element was
     found and clicked -- NOT proof the cash-out registered; the caller must
-    verify the portfolio dropped back to 0."""
+    verify the portfolio dropped back to 0.
+
+    `debug`, if given a dict, records why a False came back (tag-not-found
+    vs. an exception and its message) -- added because a real paired run
+    (Pair #4, run #9) reported "neither side cashed out" with zero detail on
+    which of those it was, making the failure undiagnosable after the fact."""
     game = game or STOCKMARKET
     try:
         if not frame.evaluate(_TAG_BET_SPOT_JS, game.cashout_role):
+            if debug is not None:
+                debug["reason"] = "tag_not_found"
             return False
         frame.locator(f'[data-pw-spot="{game.cashout_role}"]').click(
             timeout=timeout, force=True)
         return True
-    except Exception:
+    except Exception as e:
+        if debug is not None:
+            debug["reason"] = "exception"
+            debug["error"] = str(e)[:200]
         return False
 
 
@@ -2553,22 +2563,58 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 # signal, NOT the button's disabled state -- confirmed live the
                 # CASH OUT button reports disabled=false and opacity=1 even with
                 # nothing staked, so it can't distinguish the phases.
+                #
+                # A real paired live test (2026-07-21, ₹10/side, pair #1) added
+                # click diagnostics and found the actual failure mode: the click
+                # WAS found and fired on both sides every time (clicked=True),
+                # but never registered -- portfolio stayed exactly at the staked
+                # amount (₹10) the whole round. The click-diagnostic trace showed
+                # readiness (window closed + portfolio>0) was reached the instant
+                # betting closed, while portfolio was still == the stake -- i.e.
+                # before the position had actually gone live server-side.
+                # probe_live_cashout.py's ONE working cash-out (2026-07-20) only
+                # ever attempted a click after explicitly confirming the
+                # portfolio had diverged from the staked value (a real "MOVING"
+                # check) -- that requirement was never carried over into this
+                # round loop's readiness gate. Added here: track each side's
+                # first-seen portfolio value once window-closed+portfolio>0,
+                # and require it to move away from that value before treating
+                # the position as actually cashable.
                 co_deadline = time.time() + game.settle_secs
                 ready = False
                 co_trace = []          # phase/portfolio/opacity, for diagnosis
                 co_live_dump = None    # button markup while a position rides
+                first_port_b = first_port_p = None
+                moved_b = moved_p = False
                 while time.time() < co_deadline:
                     if should_stop():
                         break
-                    p_fut = player_exec.submit(_cashout_ready, fr_p, game)
-                    b_ready = _cashout_ready(fr_b, game)
-                    p_ready = p_fut.result()
+                    p_fut = player_exec.submit(read_portfolio, fr_p, game)
+                    port_b_now = read_portfolio(fr_b, game)
+                    port_p_now = p_fut.result()
+                    p_open_fut = player_exec.submit(_betting_open, fr_p, game)
+                    b_closed = not _betting_open(fr_b, game)
+                    p_closed = not p_open_fut.result()
+
+                    b_pos = b_closed and port_b_now is not None and port_b_now > 0
+                    p_pos = p_closed and port_p_now is not None and port_p_now > 0
+                    if b_pos and first_port_b is None:
+                        first_port_b = port_b_now
+                    if p_pos and first_port_p is None:
+                        first_port_p = port_p_now
+                    if (b_pos and first_port_b is not None
+                            and abs(port_b_now - first_port_b) > 0.01):
+                        moved_b = True
+                    if (p_pos and first_port_p is not None
+                            and abs(port_p_now - first_port_p) > 0.01):
+                        moved_p = True
+
                     # Record how the three signals move, so a failure says WHY
                     # rather than just "it didn't work" (the button's enabled
                     # state is invisible in a screenshot once the run has torn
                     # the context down).
                     snap = (_read_instruction(fr_b, game.instruction_role),
-                            read_portfolio(fr_b, game),
+                            port_b_now,
                             _cashout_enabled(fr_b, game))
                     if not co_trace or co_trace[-1][:3] != snap:
                         co_trace.append(snap + (round(time.time() - co_deadline
@@ -2586,7 +2632,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                                                          game.cashout_role)
                         except Exception as e:
                             co_live_dump = {"error": str(e)[:120]}
-                    if b_ready and p_ready:
+                    if b_pos and p_pos and moved_b and moved_p:
                         ready = True
                         break
                     time.sleep(0.4)
@@ -2610,25 +2656,51 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 port_b = read_portfolio(fr_b, game)
                 port_p = p_fut.result()
 
-                # Both clicks, concurrently, same pattern as the bets.
-                p_fut = player_exec.submit(_click_cashout, fr_p, game)
-                _click_cashout(fr_b, game)
-                p_fut.result()
-                time.sleep(2)
-
-                # Verify both closed; retry once for whichever side didn't.
-                p_fut = player_exec.submit(_cashout_ready, fr_p, game)
-                still_b = _cashout_ready(fr_b, game)
-                still_p = p_fut.result()
-                if still_b or still_p:
-                    if still_p:
-                        player_exec.submit(_click_cashout, fr_p, game).result()
+                # Persistent retry, not just one or two clicks. A live test
+                # (2026-07-21, pair #1) confirmed the click DOES land (found +
+                # fired, no exception) yet does not register on the first try
+                # or two even with a confirmed-live, moving position. The one
+                # cash-out that WAS ever confirmed working (probe_live_cashout.py,
+                # 2026-07-20, single account) needed clicks roughly every 1.5s
+                # over up to ~75s before one actually took -- so keep clicking
+                # whichever side(s) are still open at that same cadence, each
+                # side stopping independently the moment ITS OWN portfolio
+                # confirms closed, for up to CASHOUT_CLICK_WINDOW_SECS.
+                CASHOUT_CLICK_WINDOW_SECS = 30
+                CASHOUT_CLICK_INTERVAL = 1.5
+                click_attempts = []
+                still_b = still_p = True
+                click_deadline = time.time() + CASHOUT_CLICK_WINDOW_SECS
+                attempt_no = 0
+                while (still_b or still_p) and time.time() < click_deadline:
+                    attempt_no += 1
+                    dbg_b, dbg_p = {}, {}
+                    clk_b = clk_p = None
+                    p_fut = (player_exec.submit(_click_cashout, fr_p, game, 5000, dbg_p)
+                             if still_p else None)
                     if still_b:
-                        _click_cashout(fr_b, game)
-                    time.sleep(2)
+                        clk_b = _click_cashout(fr_b, game, 5000, dbg_b)
+                    if p_fut is not None:
+                        clk_p = p_fut.result()
+                    time.sleep(1.2)
                     p_fut = player_exec.submit(_cashout_ready, fr_p, game)
-                    still_b = _cashout_ready(fr_b, game)
-                    still_p = p_fut.result()
+                    now_b = _cashout_ready(fr_b, game) if still_b else False
+                    now_p = p_fut.result() if still_p else False
+                    click_attempts.append({
+                        "attempt": attempt_no,
+                        "banker": ({"clicked": clk_b, **dbg_b} if still_b
+                                   else {"skipped": "already_closed"}),
+                        "player": ({"clicked": clk_p, **dbg_p} if still_p
+                                   else {"skipped": "already_closed"}),
+                        "still_open_after": {"banker": now_b, "player": now_p},
+                    })
+                    still_b, still_p = now_b, now_p
+                    if still_b or still_p:
+                        time.sleep(max(0.0, CASHOUT_CLICK_INTERVAL - 1.2))
+
+                click_diag = {"attempts": click_attempts}
+                summary.setdefault("cashout_click_diag", []).append(
+                    {"round": rnd, "diag": click_diag})
 
                 if still_b and still_p:
                     # NEITHER side cashed out. That is a failure worth stopping
@@ -2639,7 +2711,8 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     # and alarming, so the two cases are reported separately.
                     summary["stop_reason"] = "cashout_failed"
                     summary["messages"].append(
-                        f"Round {rnd}: neither side cashed out — ₹{port_b} "
+                        f"Round {rnd}: neither side cashed out (click diagnostics: "
+                        f"{click_diag}) — ₹{port_b} "
                         f"({game.side_a_label}) and ₹{port_p} ({game.side_b_label}) "
                         f"are both still open. They stay hedged against each other "
                         f"and will settle on their own, so nothing needs closing by "
