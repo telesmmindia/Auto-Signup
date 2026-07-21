@@ -1372,6 +1372,75 @@ elements render their number as SVG with empty `innerText`, so the values
 aren't readable that way yet. Deliberately deferred rather than guessed at
 with real money.
 
+## Sheet-driven hedge runs (`sheet_watcher.py`)
+
+A third way to kick off a paired hedge run, alongside the CLI and Telegram
+`/pair`+`/run`: a shared Google Sheet queue
+(`https://docs.google.com/spreadsheets/d/14unqPI3VsjfUqhhmg666lPJBeFQu3x9VEwSLk_o05dM`),
+columns `PLAYER 1 | PASSWORD | PLAYER 2 | PASSWORD | BETS AMOUNTS | ROUNDS |
+STATUS`. `sheet_watcher.py` polls it (default every `SHEET_POLL_SECONDS=20`)
+and, for any row with A-F filled and STATUS empty, calls
+`main.run_paired_hedge()` directly (Baccarat, matching the sheet's own title)
+and writes the outcome back into STATUS (`⏳ queued` -> `🏃 running` -> a
+result line with rounds hedged, stop reason, and each side's final
+balance/net). Clearing STATUS on a row makes the watcher re-run it.
+
+Run it against the gameplay bot's own site/proxy config rather than
+duplicating it into a new env file:
+```
+.venv/bin/pip install gspread google-auth
+.venv/bin/python sheet_watcher.py --env .env.gameplay
+```
+`--env` is parsed the same way as `telegram_bot.py`'s (see that section) --
+`load_dotenv(_env_file, override=True)` after `import main` so `--env`
+reliably wins over `main.py`'s own bare `load_dotenv()` import-time call.
+`current_proxy()` re-reads `.env.gameplay`'s `SETTINGS_FILE`
+(`bot_settings.gameplay.json`) on every run, so `/setproxy` on the gameplay
+Telegram bot also applies here automatically -- no separate proxy config to
+keep in sync.
+
+**Deliberately standalone, not wired into `pairs.json`/`pair_runs.json`.**
+Each sheet row already carries full credentials, so there's no need for a
+persisted "pair id" -- and having two processes (this script + the gameplay
+bot) write the *same* `pairs.cricmatch.json`/`pair_runs.cricmatch.json` file
+concurrently would risk exactly the clobbering problem `ADMINS_FILE`/
+`SETTINGS_FILE` were split per-bot-instance to avoid (see "Running one bot
+per site / per role" above). Run history instead goes to its own
+`sheet_runs.json` (gitignored, `SHEET_RUNS_FILE` to override), and STATUS in
+the sheet itself is the primary at-a-glance result.
+
+**No cross-process account-busy guard against the Telegram bot.** Within
+`sheet_watcher.py`'s own process, two rows sharing a username are serialized
+(an in-flight-usernames set, mirroring `run_cmd`'s `busy` check) -- but if
+the gameplay bot's `/run` and this script pick the same account at the same
+time, nothing stops it, unlike same-process runs which do collide-check.
+Don't run a sheet-queued pair's accounts through `/run` manually while the
+watcher might also pick up a row for them, and vice versa.
+
+**Requires a Google Cloud service account** (Sheets API, not OAuth) since
+this needs to run unattended with no browser-based consent step:
+1. Google Cloud Console -> new (or existing) project -> enable the "Google
+   Sheets API".
+2. IAM & Admin -> Service Accounts -> Create -> any name -> skip granting it
+   project roles (not needed, access is via the sheet share, not IAM) -> done.
+3. Open the service account -> Keys -> Add Key -> JSON -> download it, save
+   as `service_account.json` in the repo root (gitignored via
+   `service_account*.json`; `SHEET_CREDENTIALS_FILE` overrides the path/name).
+4. Open the sheet -> Share -> paste the service account's email (looks like
+   `something@project-id.iam.gserviceaccount.com`, visible on its Cloud
+   Console page or inside the downloaded JSON's `client_email` field) ->
+   Editor access (needed for the STATUS write-back, not just Viewer).
+
+Amounts/rounds are parsed leniently (`_clean_number()` strips `₹` and `,`
+before `int()`), so `"100"`, `"₹100"`, and `"1,000"` all work in the BETS
+AMOUNTS column. An unparsable or non-positive amount/rounds writes a `❌`
+STATUS instead of raising, and the row is left alone (not retried) same as
+any other terminal STATUS -- fix the cell value and clear STATUS to retry.
+
+**Not yet run against the live sheet** -- built and import/wiring-verified
+(env resolution, proxy passthrough, syntax) but no service account has been
+created yet, so no row has actually been polled or run end-to-end.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an
