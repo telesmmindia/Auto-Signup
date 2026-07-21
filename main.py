@@ -2342,9 +2342,40 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
         summary["final_balance"]["banker"] = summary["start_balance"]["banker"]
         summary["final_balance"]["player"] = summary["start_balance"]["player"]
 
-        for rnd in range(1, rounds + 1):
+        # Round loop is attempt-based, not a plain `for rnd in range(rounds)`:
+        # a missed betting window or a one-sided (unhedged) landing used to
+        # `break`/`return` the WHOLE run after a single bad round, well short
+        # of the requested `rounds`. Neither is evidence the run can't
+        # continue -- both are the kind of one-off timing hiccup
+        # `_open_table_with_retry` already treats as retry-worthy during
+        # setup (site-side flakiness that clears if you wait and try again),
+        # so the round loop now retries the SAME round slot (not counted
+        # toward rounds_done) with a cooldown instead of giving up
+        # immediately. `consecutive_failures` still gives up (a hard stop,
+        # not another retry) after several in a row with zero progress --
+        # that pattern means a persistent problem (site down, WAF block, a
+        # genuinely closed table), not a blip, and retrying forever would
+        # just burn time/requests without ever reaching `rounds`.
+        # `banker_out_of_balance`/`player_out_of_balance`/`amount_mismatch`
+        # (below) stay immediate hard stops -- waiting doesn't refill a
+        # balance or change a table's chip menu, so retrying those can't
+        # help, unlike a missed window or a one-sided landing.
+        MAX_CONSECUTIVE_ROUND_FAILURES = 5
+        ROUND_RETRY_COOLDOWN_SECS = 6
+        max_attempts = max(rounds * 4, 20)
+        consecutive_failures = 0
+        attempt = 0
+        while summary["rounds_done"] < rounds:
             if should_stop():
                 summary["stop_reason"] = "stopped_by_user"
+                break
+            attempt += 1
+            if attempt > max_attempts:
+                summary["stop_reason"] = "max_attempts_exceeded"
+                summary["messages"].append(
+                    f"Gave up after {attempt - 1} attempts without reaching "
+                    f"{rounds} hedged rounds ({summary['rounds_done']} done) -- "
+                    "stopping rather than retrying indefinitely.")
                 break
 
             p_fut = player_exec.submit(read_game_balance, fr_p)
@@ -2379,6 +2410,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             # already near, then round 2 hit `no_open_window` simply because
             # the next window opened after the budget expired.
             placed = False
+            unhedged = False
             drain_deadline = time.time() + game.drain_secs   # (a) let a mid-way window pass
             while time.time() < drain_deadline:
                 p_fut = player_exec.submit(_betting_open, fr_p, game)
@@ -2433,27 +2465,74 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     _screenshot_pair(gp_b, gp_p, summary, "mismatch", player_exec)
                     return summary
                 if bool(tb_b) != bool(tb_p):
-                    # Exactly one side landed -> UNHEDGED real exposure. Stop now.
+                    # Exactly one side landed -> real exposure for this one
+                    # hand. Baccarat hands resolve on their own (no button to
+                    # press, unlike Stock Market's live position) -- so unlike
+                    # a cash-out failure, there is nothing further waiting
+                    # makes worse. Don't count it as a hedged round; wait for
+                    # this hand to settle below, then retry the round slot.
+                    unhedged = True
                     exposed = banker_creds["username"] if tb_b else player_creds["username"]
                     side = game.side_a_label if tb_b else game.side_b_label
-                    summary["stop_reason"] = "partial_unhedged"
                     summary["messages"].append(
-                        f"Round {rnd}: only the {side} bet landed (account {exposed} is "
-                        f"exposed for ₹{amount} this hand). Stopping immediately.")
-                    _screenshot_pair(gp_b, gp_p, summary, "partial", player_exec)
-                    return summary
+                        f"Attempt {attempt}: only the {side} bet landed (account "
+                        f"{exposed} exposed for ₹{amount} this hand, not counted as "
+                        f"hedged). Waiting for it to settle, then retrying.")
+                    summary.setdefault("unhedged_rounds", []).append(
+                        {"attempt": attempt, "side": side, "account": exposed,
+                         "amount": amount})
+                    _screenshot_pair(gp_b, gp_p, summary,
+                                     f"partial-attempt{attempt}", player_exec)
+                    break
                 # neither landed (window closed) -> retry the window.
                 time.sleep(2)
 
-            if not placed:
-                if summary["stop_reason"] == "stopped_by_user":
-                    break
-                summary["stop_reason"] = "no_open_window"
-                summary["messages"].append(
-                    f"Round {rnd}: could not get both bets into one open betting "
-                    "window; stopping.")
+            if summary["stop_reason"] == "stopped_by_user":
                 break
 
+            if unhedged:
+                # Wait for the exposed hand to resolve before trying again --
+                # same settle-wait the normal end-of-round path uses below --
+                # so the retry starts on a clean board, not mid-hand.
+                for _ in range(game.settle_secs):
+                    p_fut = player_exec.submit(_read_total_bet, fr_p)
+                    b_tb = _read_total_bet(fr_b)
+                    if (b_tb or 0) == 0 and (p_fut.result() or 0) == 0:
+                        break
+                    time.sleep(1)
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_ROUND_FAILURES:
+                    summary["stop_reason"] = "repeated_unhedged_exposure"
+                    summary["messages"].append(
+                        f"{consecutive_failures} unhedged exposures in a row -- "
+                        "stopping rather than risking more.")
+                    break
+                progress(f"⚠️ Attempt {attempt}: unhedged exposure, retrying "
+                         f"({summary['rounds_done']}/{rounds} hedged so far)…")
+                for _ in range(ROUND_RETRY_COOLDOWN_SECS):
+                    if should_stop():
+                        break
+                    time.sleep(1)
+                continue
+
+            if not placed:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_ROUND_FAILURES:
+                    summary["stop_reason"] = "no_open_window"
+                    summary["messages"].append(
+                        f"{consecutive_failures} missed betting windows in a row -- "
+                        "stopping rather than retrying indefinitely.")
+                    break
+                progress(f"⏳ Attempt {attempt}: missed the betting window, retrying "
+                         f"({summary['rounds_done']}/{rounds} hedged so far)…")
+                for _ in range(ROUND_RETRY_COOLDOWN_SECS):
+                    if should_stop():
+                        break
+                    time.sleep(1)
+                continue
+
+            consecutive_failures = 0
+            rnd = summary["rounds_done"] + 1
             summary["rounds_done"] = rnd
 
             # ---- cash-out (Stock Market Live only) -------------------------

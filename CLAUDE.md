@@ -1083,9 +1083,43 @@ site_url, progress, should_stop, browser=None)` in `main.py` reuses `login()` /
   dispatched the same way: submit the Player-side call to `player_exec`
   first, do the Banker-side call inline, then `.result()` the Player future
   — so paired reads run concurrently too, not just the bet clicks.
-- **Partial round → stop immediately** (deliberate choice): if only one side's
-  bet lands (unhedged real exposure), the run halts, names the exposed account,
-  and screenshots both tabs (`shots/hedge-partial-*.png`).
+- **A missed betting window or a one-sided (unhedged) landing retries the
+  same round slot instead of ending the run (changed 2026-07-21; previously
+  both were an immediate hard stop -- see git history for the old
+  return-on-first-failure version).** The round loop in `run_paired_hedge` is
+  now attempt-based rather than a plain `for rnd in range(rounds)`: neither
+  case blocks the accounts from trying again, so retrying (after a
+  `ROUND_RETRY_COOLDOWN_SECS=6` pause) is what actually gets a run to the
+  requested `rounds` instead of stopping short on the first hiccup. A
+  one-sided landing is real exposure for that one hand, but baccarat hands
+  resolve themselves with no button to press (unlike Stock Market's live
+  cash-out) -- the round loop waits out the settle (`game.settle_secs`,
+  reusing the same 0/0 TOTAL BET poll the normal end-of-round path uses) so
+  the retry starts clean, screenshots both tabs
+  (`shots/hedge-partial-attempt<N>-*.png`), and logs it to
+  `summary["unhedged_rounds"]` (persisted in `pair_runs.json`/`sheet_runs.json`
+  and shown in `/runlog`) without counting it toward `rounds_done`.
+  `consecutive_failures` (reset on every successful round) still gives up
+  after `MAX_CONSECUTIVE_ROUND_FAILURES=5` in a row with zero progress --
+  that pattern means something persistent (site down, WAF block, a table
+  that's genuinely stuck), not a blip, so retrying forever would just burn
+  time without ever reaching `rounds`. New stop reasons for that case:
+  `repeated_unhedged_exposure`, `no_open_window` (now only reached after 5
+  consecutive misses, not the first one), and `max_attempts_exceeded` (a
+  `rounds * 4` / minimum-20 attempt ceiling, purely a worst-case safety
+  valve). **Left as immediate hard stops, deliberately NOT retried**:
+  `banker_out_of_balance`/`player_out_of_balance` (waiting doesn't refill a
+  balance), `amount_mismatch` (waiting doesn't change a table's chip menu --
+  retrying would just repeat the same wrong-size bet every round),
+  `chip_select_failed`, `different_tables`/`setup_failed` (setup already gets
+  its own 4-attempt retry via `_open_table_with_retry`, see above), and
+  `stopped_by_user`. Stock Market's cash-out failure branches
+  (`cashout_partial`/`cashout_divergence`/`no_cashout_window`) are also
+  unchanged -- currently unreachable anyway since `STOCKMARKET.needs_cashout`
+  is `False` (see "Cash-out is OFF" below), and a live, still-moving unclosed
+  position is a fundamentally different risk than a settled baccarat hand
+  (waiting there makes the exposure worse, not resolves it), so it wasn't
+  folded into this same retry treatment.
 - **Setup (login → table-live) runs the two accounts in parallel on two
   threads/browsers (added 2026-07-19; previously sequential on one thread —
   see git history if you need the old single-thread version).**
