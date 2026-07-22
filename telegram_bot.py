@@ -49,6 +49,12 @@ Master-only commands:
                          browser automatically for sites that don't support
                          it -- see CLAUDE.md)
     /fast             -> show the current fast-mode state
+    /freenumber on|off -> toggle freeing the signup phone number: right after
+                         a signup's OTP is verified, swap the account onto a
+                         random throwaway number (cricmatch247 only), so the
+                         real phone number just used can be reused for the
+                         next signup -- see CLAUDE.md
+    /freenumber       -> show the current free-number-mode state
     /setproxy <proxy> -> set the GLOBAL proxy for every admin's signups
                          (host:port, host:port:username:password, or a URL)
     /proxy            -> show the global proxy
@@ -129,11 +135,11 @@ from sites import profile_for
 from main import (
     SHOTS_DIR, SITE_URL,
     capsolver_key, check_phone_taken, click_first_visible, extract_referral_code,
-    fill_register_form, gen_account, http_fetch_csrf, http_is_error,
-    http_is_phone_taken, http_register_call, http_session_for, is_waf_captcha,
-    maybe_bridge_proxy, open_signup_modal, parse_proxy, read_result, run_paired_hedge,
-    stop_bridge, submit_register, test_baccarat, wait_for_otp_outcome,
-    wait_for_register_outcome,
+    fill_register_form, free_phone_number, gen_account, http_fetch_csrf,
+    http_free_phone_number, http_is_error, http_is_phone_taken, http_register_call,
+    http_session_for, is_waf_captcha, maybe_bridge_proxy, open_signup_modal, parse_proxy,
+    read_result, run_paired_hedge, stop_bridge, submit_register, test_baccarat,
+    wait_for_otp_outcome, wait_for_register_outcome,
 )
 from sites.games import BACCARAT, STOCKMARKET
 
@@ -351,6 +357,7 @@ if SIGNUP_ENABLED:
         BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
         BotCommand("password", "Show the current password mode"),
         BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
+        BotCommand("freenumber", "Toggle freeing the signup phone number after each account"),
     ]
 if GAMEPLAY_ENABLED:
     MASTER_COMMANDS.append(
@@ -512,6 +519,12 @@ class Session:
         self.use_fast = False
         self.http_session = None
         self.http_csrf = None
+        # Free-number mode (global_settings["free_number"], see /freenumber) --
+        # set once in begin_signup(), same lifecycle as use_fast above. When
+        # True, a successful OTP verify is immediately followed by a call that
+        # swaps the account onto a random throwaway phone number, freeing the
+        # real one just used for the next signup.
+        self.free_number = False
 
 
 def _valid_phone(text):
@@ -682,7 +695,14 @@ def _blocking_verify_otp(session, otp):
     if outcome == "timeout":
         return {"ok": False, "message": "OTP screen still showing — likely wrong/expired code.",
                 "shot": str(otp_result)}
-    return {"ok": True, "message": "OTP verified — account registered.", "shot": str(otp_result)}
+
+    message = "OTP verified — account registered."
+    freed_phone = None
+    if session.free_number:
+        ok, new_phone, fn_msg = free_phone_number(session.page, session.site_url or BOT_SITE_URL)
+        freed_phone = new_phone if ok else None
+        message += f" | Free-number: {fn_msg}" if ok else f" | Free-number FAILED: {fn_msg}"
+    return {"ok": True, "message": message, "shot": str(otp_result), "freed_phone": freed_phone}
 
 
 # --- HTTP-fast mode (no browser) -- see /fast and main.py's http_signup_once ---
@@ -742,8 +762,14 @@ def _blocking_http_verify_otp(session, otp):
     if http_is_error(verify_json):
         return {"ok": False, "message": f"OTP rejected: {verify_json.get('message') or verify_json}",
                 "shot": None}
-    return {"ok": True, "message": verify_json.get("message") or "OTP verified — account registered.",
-            "shot": None}
+
+    message = verify_json.get("message") or "OTP verified — account registered."
+    freed_phone = None
+    if session.free_number:
+        ok, new_phone, fn_msg = http_free_phone_number(session.http_session, session.http_csrf, url)
+        freed_phone = new_phone if ok else None
+        message += f" | Free-number: {fn_msg}" if ok else f" | Free-number FAILED: {fn_msg}"
+    return {"ok": True, "message": message, "shot": None, "freed_phone": freed_phone}
 
 
 async def begin_signup(update, chat_id, sub_id):
@@ -783,9 +809,19 @@ async def begin_signup(update, chat_id, sub_id):
     if fast_wanted and not prof.supports_http_fast:
         fallback_note = f" (⚡ fast mode is ON, but {prof.key} needs a real browser — using it for this one)"
 
+    # Same "requested but only applies if the site supports it" pattern as
+    # use_fast above (see sites/base.py's supports_free_number) -- ON by
+    # default (unlike use_fast/fast_wanted above), hence the True default:
+    # only an explicit /freenumber off turns it off.
+    free_number_wanted = bool(global_settings.get("free_number", True))
+    session.free_number = free_number_wanted and prof.supports_free_number
+    if free_number_wanted and not prof.supports_free_number:
+        fallback_note += f" (🔓 free-number is ON, but {prof.key} doesn't support it — skipping that step)"
+
     sessions.setdefault(chat_id, {})[sub_id] = session
 
     tag = "⚡ " if session.use_fast else ""
+    tag += "🔓 " if session.free_number else ""
     await update.message.reply_text(
         f"{tag}📱 [#{sub_id}] Send the phone number to use for this signup.{fallback_note}")
 
@@ -938,6 +974,39 @@ async def fast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global_settings["fast"] = (arg == "on")
     save_settings()
     await update.message.reply_text(f"⚡ Fast mode: {'ON' if arg == 'on' else 'OFF'}")
+
+
+@require_role(is_master)
+async def freenumber_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/freenumber on|off -- toggle free-number mode globally (applies to
+    every admin's /newacc). ON BY DEFAULT (unlike /fast) -- right after a
+    signup's OTP verify succeeds, the account is immediately swapped onto a
+    random throwaway phone number (sites whose profile sets
+    supports_free_number=True -- currently cricmatch247 only, see
+    sites/cricmatch.py and CLAUDE.md's "Freeing the signup phone number"
+    section), freeing the real phone number just used so it can be entered
+    again for the next signup. Sites that don't support it are skipped for
+    that one signup, same fallback pattern as /fast. No args shows the
+    current state."""
+    if not context.args:
+        state = "ON" if global_settings.get("free_number", True) else "OFF"
+        await update.message.reply_text(
+            f"🔓 Free-number mode: {state} (default: ON)\n"
+            "Usage: /freenumber on | /freenumber off\n\n"
+            "Right after a signup's OTP is verified, the account's "
+            "registered mobile is swapped to a random throwaway number "
+            "(cricmatch247 only) -- freeing the real phone number you just "
+            "used so it can be reused for the next signup. Use /freenumber "
+            "off to disable this."
+        )
+        return
+    arg = context.args[0].lower()
+    if arg not in ("on", "off"):
+        await update.message.reply_text("Usage: /freenumber on | /freenumber off")
+        return
+    global_settings["free_number"] = (arg == "on")
+    save_settings()
+    await update.message.reply_text(f"🔓 Free-number mode: {'ON' if arg == 'on' else 'OFF'}")
 
 
 @require_role(is_master)
@@ -1816,6 +1885,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                          f"{result['message']} (screenshot: {result.get('shot')})")
         db.update_status(conn, session.row_id, status,
                          notes=result["message"], screenshot=result.get("shot"))
+        if result.get("freed_phone"):
+            db.update_freed_phone(conn, session.row_id, result["freed_phone"])
 
         if result["ok"]:
             # Success: just a plain confirmation, no photo/caption/CSV -- the
@@ -1885,6 +1956,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if SIGNUP_ENABLED:
             settings_lines.append("/setpassword <pw> | --random   ·   /password")
             settings_lines.append("/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)")
+            settings_lines.append("/freenumber on|off — free the signup phone number after each account")
         settings_lines.append("/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]")
         if SIGNUP_ENABLED:
             settings_lines.append("/seturl <url> · /url · /clearurl · /btag [code]")
@@ -1998,6 +2070,7 @@ def main():
         app.add_handler(CommandHandler("setpassword", setpassword))
         app.add_handler(CommandHandler("password", show_password))
         app.add_handler(CommandHandler("fast", fast_cmd))
+        app.add_handler(CommandHandler("freenumber", freenumber_cmd))
         app.add_handler(CommandHandler("list", list_accounts))
         app.add_handler(CommandHandler("photo", photo_cmd))
         app.add_handler(CommandHandler("export", export_cmd))

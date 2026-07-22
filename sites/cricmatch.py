@@ -22,6 +22,13 @@ PROFILE = SiteProfile(
     # CSRF via a static per-session token (meta[name=csrf-token] + cookies),
     # no WAF/JS challenge -- see the "HTTP-fast signup" section of CLAUDE.md.
     supports_http_fast=True,
+    # Confirmed live via manual HTTP request interception (Kiwi browser +
+    # its request-editor extension, 2026-07-19-ish): on an authenticated
+    # session, POSTing a new phone to /send_otp overwrites the account's
+    # registered mobile immediately, no OTP re-entry needed -- see the
+    # "Freeing the signup phone number" section of CLAUDE.md.
+    supports_free_number=True,
+    free_number_path="/send_otp",
     sel={
         # ---- signup ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",

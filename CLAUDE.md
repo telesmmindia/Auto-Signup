@@ -242,6 +242,78 @@ correctly reported the server's real "Please enter valid OTP" rejection, and
 stored the attempt in `accounts.db` with `screenshot=NULL` — no Chromium
 process was ever spawned for the run.
 
+### Freeing the signup phone number (on by default; `--no-free-number` to disable)
+
+Right after a signup's OTP is verified (cricmatch247 only), swap the
+brand-new account onto a random throwaway phone number, so the **real** phone
+number just used to receive the actual SMS OTP is freed up and can be entered
+again for the next signup in the same run — useful when you only have one
+real SMS-capable number and want to generate many test accounts against it in
+a loop, instead of needing a fresh real number per signup.
+
+**On by default** (`args.free_number` defaults to `True`, via the
+`--free-number`/`--no-free-number` pair of `store_true`/`store_false`
+`argparse` actions sharing one `dest`) — pass `--no-free-number` to keep a
+signup's real phone number registered on the account instead of swapping it
+out. This differs from `--fast`, which defaults off.
+
+The underlying mechanism was found by manually intercepting a mobile browser
+session's HTTP traffic (a Kiwi Browser request-editor extension) against an
+existing, logged-in cricmatch247 account: on an **authenticated** session,
+`POST https://cricmatch247.com/send_otp` with body `_token=<csrf>&phone=
+<new_number>` immediately overwrites the account's registered mobile number
+— confirmed manually, with **no OTP re-entry required** for the change to
+take effect, unlike the OTP-gated number entered at signup time. This is the
+same endpoint the signup flow's own OTP send goes through, just called on an
+authenticated session instead of an anonymous one.
+
+Implementation, shared by both the browser and `--fast` HTTP paths (mirroring
+how CapSolver/WAF-retry logic is shared — see `sites/base.py`'s
+`supports_free_number` flag, `True` only for cricmatch247):
+- **Browser path**: `free_phone_number(page, site_url)` in `main.py`, called
+  from `signup_once()` right after `enter_otp()` returns a success result.
+  Reads the CSRF token straight off the live page's `meta[name=csrf-token]`
+  tag and POSTs via `page.context.request` (Playwright's `APIRequestContext`,
+  which shares the browser context's cookies), so no separate session/token
+  bookkeeping is needed beyond what the page already has.
+- **`--fast` HTTP path**: `http_free_phone_number(session, csrf_token,
+  site_url)` in `main.py`, called from `http_signup_once()` right after a
+  successful OTP verify. Reuses the exact same `requests.Session` and CSRF
+  token already established for the register + OTP-verify calls — the token
+  is already known (from `http_register_call()`) to stay valid across
+  multiple calls in one session, so no fresh GET is needed first.
+- Both generate the new number via `gen_free_phone()` (a random 10-digit
+  Indian-format mobile, first digit 6-9) and return `(ok, new_phone,
+  message)`; the caller appends a `"Free-number: ..."` /
+  `"Free-number FAILED: ..."` line to `result["messages"]` and sets
+  `result["freed_phone"]` (only on success) rather than failing the whole
+  signup if this step doesn't work — the account itself already registered
+  successfully by this point, so a free-number failure is reported
+  separately, not conflated with signup failure.
+- `db.py`'s `accounts` table gained a `freed_phone` column (migrated in like
+  `proxy`/`url`/`referral_code` were) via `db.update_freed_phone(conn, row_id,
+  freed_phone)`, called from `main()`'s per-account loop whenever
+  `res.get("freed_phone")` is set. `phone` keeps the **original**,
+  OTP-verified signup number for the historical record (that's what actually
+  received the real SMS) — `freed_phone` records what the account's mobile
+  number was switched to afterward, so both are visible in `--list`/`--export-csv`
+  without losing either fact.
+- The free-number step is a no-op alongside `--no-submit` implicitly (not an
+  explicit error, just unreachable code): both `signup_once()` and
+  `http_signup_once()` return early on `--no-submit` before ever reaching a
+  successful OTP verify, so it never fires in that mode regardless of the
+  `--free-number`/`--no-free-number` setting.
+
+**Not yet verified live by this code path itself** — only the manual
+Kiwi-browser interception was confirmed live; treat the first real signup run
+(watching the account's Profile Data mobile number actually change) as the
+verification of this implementation specifically, same as any other
+"confirmed live" claim in this file. If the free-number POST doesn't actually
+change the number (e.g. the site requires something the manual test's
+session state carried that a fresh signup's session doesn't), the failure
+surfaces as a `"Free-number FAILED: ..."` message rather than silently
+pretending it worked.
+
 ## Telegram bot
 
 `telegram_bot.py` wraps the same signup/OTP logic behind a chat interface, for
@@ -488,6 +560,42 @@ override has a `NULL` `referral_code`) — this is the per-btag signup count.
 `/stats <btag>` instead filters `WHERE referral_code = ?` and shows just that
 btag's own status breakdown (how many succeeded/failed/etc under that one
 tag), mirroring how `/export`'s status/url filters narrow its CSV dump.
+
+### `/freenumber`: freeing the signup phone number (bot side)
+
+Same feature as the CLI's free-number step (see the "Freeing the signup phone
+number" section above), wired into the bot's chat-driven flow the same way
+`/fast` is, except **on by default**: `/freenumber on` / `/freenumber off`
+sets `global_settings["free_number"]` (persisted via `save_settings()`,
+global across every admin's `/newacc`, not per-chat); `/freenumber` with no
+args shows the current state. Reading it always goes through
+`global_settings.get("free_number", True)` (note the `True` default, unlike
+`use_fast`'s plain `global_settings.get("fast")`) so an untouched/fresh
+`bot_settings*.json` behaves as ON — only an explicit `/freenumber off`
+turns it off, and that choice persists across restarts same as any other
+`global_settings` key.
+
+Decided once per session in `begin_signup()`, same lifecycle as
+`session.use_fast`: `session.free_number = free_number_wanted and
+prof.supports_free_number`. If free-number mode is (implicitly or
+explicitly) ON but the resolved site doesn't support it (anything but
+cricmatch247), `begin_signup()` says so right in the "send the phone number"
+prompt (a `🔓` tag joins the `⚡` fast-mode tag there) and just skips that step
+for the signup, same fallback pattern as `/fast`.
+
+`_blocking_verify_otp()` (browser path) and `_blocking_http_verify_otp()`
+(HTTP-fast path) both check `session.free_number` right after a successful
+OTP verify and, if set, call `free_phone_number(session.page, ...)` /
+`http_free_phone_number(session.http_session, session.http_csrf, ...)` —
+appending a `"Free-number: ..."` / `"Free-number FAILED: ..."` note to the
+success message and returning `"freed_phone"` in the result dict.
+`handle_message()`'s `await_otp` branch persists it via
+`db.update_freed_phone(conn, session.row_id, result["freed_phone"])`
+alongside the existing `db.update_status()` call, whenever it's set.
+
+**Not yet verified live through the bot's own code path** — same caveat as
+the CLI section above; only the manual Kiwi-browser interception has been
+confirmed live so far.
 
 ### Continuous signup loop
 

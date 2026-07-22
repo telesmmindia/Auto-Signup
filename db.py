@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 # Columns added after the initial release; migrated in on every connect so
 # older accounts.db files keep working.
-_MIGRATED_COLUMNS = ("proxy TEXT", "url TEXT", "referral_code TEXT")
+_MIGRATED_COLUMNS = ("proxy TEXT", "url TEXT", "referral_code TEXT", "freed_phone TEXT")
 
 
 def get_connection(db_path=DB_PATH):
@@ -61,8 +61,16 @@ def update_status(conn, row_id, status, notes=None, screenshot=None):
     conn.commit()
 
 
+def update_freed_phone(conn, row_id, freed_phone):
+    """Record the throwaway number an account got swapped onto post-signup
+    (--free-number). `phone` keeps the original, OTP-verified signup number
+    for the historical record; this is the number the account holds now."""
+    conn.execute("UPDATE accounts SET freed_phone = ? WHERE id = ?", (freed_phone, row_id))
+    conn.commit()
+
+
 COLUMNS = ("id", "created_at", "username", "email", "password", "phone",
-           "status", "proxy", "url", "referral_code", "screenshot", "notes")
+           "status", "proxy", "url", "referral_code", "screenshot", "notes", "freed_phone")
 
 
 def list_accounts(conn, limit=20, status=None, url=None):

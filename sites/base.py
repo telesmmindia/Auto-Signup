@@ -62,3 +62,20 @@ class SiteProfile:
     # Number of OTP digits the SMS code has, used only when supports_http_fast
     # is True (there's no DOM to count digit boxes in without a browser).
     http_otp_digits: int = 6
+
+    # Whether this site's mobile-number field can be overwritten post-signup
+    # by POSTing a new number to `free_number_path` on the now-authenticated
+    # session -- confirmed live (manual request interception) that this
+    # updates the account's registered mobile with NO further OTP entry
+    # required, unlike the OTP-gated number used at signup time. Lets a
+    # single real phone number be reused across many signups: right after an
+    # account registers, its number is swapped to a random throwaway one,
+    # freeing the real one for the next signup. False (e.g. spin24star, not
+    # inspected) -> the free-number step is skipped for that site.
+    supports_free_number: bool = False
+
+    # Path (relative to the site's origin) that accepts the new phone number
+    # for the free-number swap above. Same endpoint the signup OTP itself
+    # goes through, but called on an authenticated session instead of an
+    # anonymous one.
+    free_number_path: str = "/send_otp"
