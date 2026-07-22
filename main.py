@@ -794,10 +794,25 @@ def free_phone_number(page, site_url=None):
     page.wait_for_timeout(4000)  # let the session "settle" -- see docstring
     parts = urlsplit(site_url or page.url)
     path = f"{parts.scheme}://{parts.netloc}{prof.free_number_path}"
-    try:
-        result = page.evaluate(_FREE_NUMBER_FETCH_JS, [path, new_phone])
-    except Exception as e:
-        return False, new_phone, f"free-number request failed: {str(e)[:150]}"
+
+    # A post-OTP-verify redirect (the site's own JS navigating the page, e.g.
+    # to a welcome/dashboard view) can land RIGHT around when this fires and
+    # kill the execution context mid-evaluate ("Execution context was
+    # destroyed, most likely because of a navigation") -- confirmed live,
+    # this is a timing race with that redirect, not a real failure, so retry
+    # once after giving any in-flight navigation time to finish rather than
+    # reporting it as a hard failure on the first hit.
+    result = None
+    last_err = None
+    for attempt in range(2):
+        try:
+            result = page.evaluate(_FREE_NUMBER_FETCH_JS, [path, new_phone])
+            break
+        except Exception as e:
+            last_err = e
+            page.wait_for_timeout(3000)
+    if result is None:
+        return False, new_phone, f"free-number request failed: {str(last_err)[:150]}"
 
     try:
         body = json.loads(result["text"])

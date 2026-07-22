@@ -301,7 +301,13 @@ and `free_number_path`, `"/send_otp_touser"`):
   investigation (a separate, out-of-band HTTP client that doesn't carry
   whatever else a real in-page request does). Judges success the same way
   `http_is_error()` does (via the response's `message_class`), not just HTTP
-  status.
+  status. Retries the `page.evaluate()` call once (after a 3s pause) if it
+  raises at all -- confirmed live this is needed: a post-OTP-verify redirect
+  (the site's own JS navigating the page) can land right around when this
+  fires and kill the execution context mid-call ("Execution context was
+  destroyed, most likely because of a navigation"), which is a timing race
+  with that redirect, not a real failure -- a retry after the navigation
+  settles succeeds normally.
 - **`--fast` HTTP path — NOT CONFIRMED, likely still broken.**
   `http_free_phone_number(session, csrf_token, site_url)` in `main.py`, same
   call site convention as the browser path. Uses the corrected path/headers,
