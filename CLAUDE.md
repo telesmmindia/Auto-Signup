@@ -257,31 +257,61 @@ a loop, instead of needing a fresh real number per signup.
 signup's real phone number registered on the account instead of swapping it
 out. This differs from `--fast`, which defaults off.
 
-The underlying mechanism was found by manually intercepting a mobile browser
-session's HTTP traffic (a Kiwi Browser request-editor extension) against an
-existing, logged-in cricmatch247 account: on an **authenticated** session,
-`POST https://cricmatch247.com/send_otp` with body `_token=<csrf>&phone=
-<new_number>` immediately overwrites the account's registered mobile number
-— confirmed manually, with **no OTP re-entry required** for the change to
-take effect, unlike the OTP-gated number entered at signup time. This is the
-same endpoint the signup flow's own OTP send goes through, just called on an
-authenticated session instead of an anonymous one.
+The real endpoint is `POST https://cricmatch247.com/send_otp_touser` with
+body `_token=<csrf>&phone=<new_number>` on an **authenticated** session —
+found live via manual Tamper Dev request interception (redirecting an
+in-flight `getBalance` call to this path instead) against a real cricmatch247
+account. **Confirmed live end-to-end 2026-07-22**: called against a real
+account (`kabirdas4250`), then confirmed by reloading its Account Details page
+that the Mobile Number field actually changed (`7566637976` →
+`9226389176`), with **no OTP re-entry required**.
 
-Implementation, shared by both the browser and `--fast` HTTP paths (mirroring
-how CapSolver/WAF-retry logic is shared — see `sites/base.py`'s
-`supports_free_number` flag, `True` only for cricmatch247):
-- **Browser path**: `free_phone_number(page, site_url)` in `main.py`, called
-  from `signup_once()` right after `enter_otp()` returns a success result.
-  Reads the CSRF token straight off the live page's `meta[name=csrf-token]`
-  tag and POSTs via `page.context.request` (Playwright's `APIRequestContext`,
-  which shares the browser context's cookies), so no separate session/token
-  bookkeeping is needed beyond what the page already has.
-- **`--fast` HTTP path**: `http_free_phone_number(session, csrf_token,
-  site_url)` in `main.py`, called from `http_signup_once()` right after a
-  successful OTP verify. Reuses the exact same `requests.Session` and CSRF
-  token already established for the register + OTP-verify calls — the token
-  is already known (from `http_register_call()`) to stay valid across
-  multiple calls in one session, so no fresh GET is needed first.
+Two non-obvious things were required to get a clean response, both found by
+trial and error against the real account, not guessed:
+1. **The path is `/send_otp_touser`, not `/send_otp`.** An earlier version of
+   this guessed `/send_otp` — misread off a small phone-screenshot of the
+   interceptor UI, which visually truncates the URL field at "send_otp" while
+   the real "_touser" suffix sits scrolled out of view. That guess was
+   confirmed wrong live first (a hard 405, "Supported methods: GET, HEAD" —
+   Laravel's routing layer rejecting it before any auth/CSRF check even
+   runs), which is what proved a re-check was needed rather than trusting the
+   video frame.
+2. **The call needs a "settled" authenticated session, not a freshly-logged-in
+   one.** Calling it immediately after login gets a generic 500
+   (`{"message":"Server Error"}`), even with byte-for-byte identical
+   headers/body to a real captured request. The real session had cookies
+   (`domain_switch`, `screenwidth`, and Laravel-encrypted `username`/
+   `password` cookies) that only appear after the login flow's own follow-up
+   calls finish — confirmed by transplanting a real, settled browser
+   session's cookies into a plain `requests.Session` and getting the same
+   clean 200 that way too, so this isn't a "must be a real browser" quirk,
+   just a "must wait for the session to finish settling" one.
+
+Implementation (mirroring how CapSolver/WAF-retry logic is shared — see
+`sites/base.py`'s `supports_free_number` flag, `True` only for cricmatch247,
+and `free_number_path`, `"/send_otp_touser"`):
+- **Browser path — CONFIRMED WORKING LIVE.** `free_phone_number(page,
+  site_url)` in `main.py`, called from `signup_once()` right after
+  `enter_otp()` returns a success result. Waits ~4s (the "settle" margin —
+  in the real signup flow the account already went through register+OTP-
+  verify by this point, which naturally takes a while, so this is a safety
+  margin more than a hard requirement) then fires the request as a real
+  in-page `fetch()` via `page.evaluate()` — **not** `page.context.request`,
+  which kept 500ing even with an identical URL/body/headers during
+  investigation (a separate, out-of-band HTTP client that doesn't carry
+  whatever else a real in-page request does). Judges success the same way
+  `http_is_error()` does (via the response's `message_class`), not just HTTP
+  status.
+- **`--fast` HTTP path — NOT CONFIRMED, likely still broken.**
+  `http_free_phone_number(session, csrf_token, site_url)` in `main.py`, same
+  call site convention as the browser path. Uses the corrected path/headers,
+  but a `--fast` signup's `requests.Session` never runs any client JS and so
+  likely never acquires the `domain_switch`/`screenwidth`/`username`/
+  `password` cookies the real fix turned out to need — meaning it may well
+  hit the same generic 500 the browser path did before those cookies
+  existed. Treat a `"Free-number FAILED: HTTP 500"` here as an open question,
+  not a regression, until someone runs a real `--fast` signup with free
+  numbers on and checks.
 - Both generate the new number via `gen_free_phone()` (a random 10-digit
   Indian-format mobile, first digit 6-9) and return `(ok, new_phone,
   message)`; the caller appends a `"Free-number: ..."` /
@@ -304,15 +334,14 @@ how CapSolver/WAF-retry logic is shared — see `sites/base.py`'s
   successful OTP verify, so it never fires in that mode regardless of the
   `--free-number`/`--no-free-number` setting.
 
-**Not yet verified live by this code path itself** — only the manual
-Kiwi-browser interception was confirmed live; treat the first real signup run
-(watching the account's Profile Data mobile number actually change) as the
-verification of this implementation specifically, same as any other
-"confirmed live" claim in this file. If the free-number POST doesn't actually
-change the number (e.g. the site requires something the manual test's
-session state carried that a fresh signup's session doesn't), the failure
-surfaces as a `"Free-number FAILED: ..."` message rather than silently
-pretending it worked.
+**The account's Account Details page has no self-service "change mobile
+number" UI at all** (confirmed live by dumping the real, authenticated page
+DOM) — no edit icon, no change link, just a static "Verified" badge next to
+Mobile Number that does nothing when clicked (no request fires). This
+mechanism is not something a human user is expected to trigger through the
+normal site UI; it's an internal endpoint reachable only by crafting the
+request directly, same as this whole file's `--fast` HTTP-only signup path
+already does for registration.
 
 ## Telegram bot
 
@@ -593,9 +622,12 @@ success message and returning `"freed_phone"` in the result dict.
 `db.update_freed_phone(conn, session.row_id, result["freed_phone"])`
 alongside the existing `db.update_status()` call, whenever it's set.
 
-**Not yet verified live through the bot's own code path** — same caveat as
-the CLI section above; only the manual Kiwi-browser interception has been
-confirmed live so far.
+Both `_blocking_verify_otp()` and `_blocking_http_verify_otp()` call the same
+`free_phone_number()`/`http_free_phone_number()` functions the CLI uses (see
+the "Freeing the signup phone number" section above for what's confirmed live
+vs. not) — the browser path is confirmed working (real before/after mobile
+number change on a real account), the `--fast` path is not yet confirmed and
+may still 500 for the reason described there (missing login-only cookies).
 
 ### Continuous signup loop
 

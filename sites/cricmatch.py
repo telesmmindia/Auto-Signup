@@ -24,11 +24,16 @@ PROFILE = SiteProfile(
     supports_http_fast=True,
     # Confirmed live via manual HTTP request interception (Kiwi browser +
     # its request-editor extension, 2026-07-19-ish): on an authenticated
-    # session, POSTing a new phone to /send_otp overwrites the account's
-    # registered mobile immediately, no OTP re-entry needed -- see the
-    # "Freeing the signup phone number" section of CLAUDE.md.
+    # session, POSTing a new phone to /send_otp_touser overwrites the
+    # account's registered mobile immediately, no OTP re-entry needed -- see
+    # the "Freeing the signup phone number" section of CLAUDE.md. NOTE: an
+    # earlier version of this guessed the path as "/send_otp" (misread off a
+    # small phone screenshot -- the field visually truncates at "send_otp",
+    # the "_touser" suffix was scrolled out of view) -- that guess was
+    # confirmed WRONG live (405, route only supports GET/HEAD) before the
+    # real path was given directly.
     supports_free_number=True,
-    free_number_path="/send_otp",
+    free_number_path="/send_otp_touser",
     sel={
         # ---- signup ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",
