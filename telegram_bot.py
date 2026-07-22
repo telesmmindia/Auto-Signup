@@ -44,6 +44,14 @@ Master-only commands:
     /setpassword <pw> -> fixed password for every future signup;
                          /setpassword --random reverts to a random one
     /password         -> show the current password mode
+    /setphone <number> -> reuse this ONE real phone number for every future
+                         signup instead of asking each time -- /newacc then
+                         skips straight to asking for the OTP; pairs with
+                         free-number mode (on by default), which frees this
+                         number again right after each signup so it's ready
+                         for the next one. /setphone --random reverts to
+                         asking for a phone number each time (the default)
+    /phone            -> show the current phone mode
     /fast on|off      -> toggle HTTP-fast signup mode (no browser at all,
                          cricmatch247 only, ~10-20x faster; falls back to the
                          browser automatically for sites that don't support
@@ -356,6 +364,8 @@ if SIGNUP_ENABLED:
         BotCommand("stats", "Counts of signups by status and btag"),
         BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
         BotCommand("password", "Show the current password mode"),
+        BotCommand("setphone", "Reuse one phone number for every signup, or --random"),
+        BotCommand("phone", "Show the current phone mode"),
         BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
         BotCommand("freenumber", "Toggle freeing the signup phone number after each account"),
     ]
@@ -822,8 +832,24 @@ async def begin_signup(update, chat_id, sub_id):
 
     tag = "⚡ " if session.use_fast else ""
     tag += "🔓 " if session.free_number else ""
-    await update.message.reply_text(
-        f"{tag}📱 [#{sub_id}] Send the phone number to use for this signup.{fallback_note}")
+
+    # /setphone (global_settings["phone"]) pins every future signup to ONE
+    # real number instead of prompting for it each time -- meant to pair with
+    # free-number mode: that number gets freed right after this signup
+    # verifies, so it's available again by the time the NEXT begin_signup()
+    # (continuous-mode auto-restart) reaches here. If it ISN'T free yet (e.g.
+    # free-number failed last round), this will just report phone_taken like
+    # any other run and the continuous loop will retry the same fixed number
+    # again -- there's no other number to fall back to by design.
+    fixed_phone = global_settings.get("phone")
+    if fixed_phone:
+        session.stage = "await_otp"  # _submit_phone() sets this properly; harmless placeholder
+        await _submit_phone(update, chat_id, sub_id, session, fixed_phone, tag=tag,
+                            fallback_note=fallback_note)
+    else:
+        session.stage = "await_phone"
+        await update.message.reply_text(
+            f"{tag}📱 [#{sub_id}] Send the phone number to use for this signup.{fallback_note}")
 
 
 @require_role(is_admin)
@@ -944,6 +970,56 @@ async def show_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🔑 Password mode: FIXED — {pw}")
     else:
         await update.message.reply_text("🔑 Password mode: RANDOM (default, per-signup)")
+
+
+@require_role(is_master)
+async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/setphone <number> -- pin every future /newacc to ONE real phone
+    number instead of prompting for it each time: begin_signup() skips the
+    "send the phone number" prompt entirely and goes straight to submitting
+    the form with this number, so a continuous run only ever asks for the
+    OTP. Meant to pair with free-number mode (on by default, see
+    /freenumber): that mode frees this exact number right after each signup
+    verifies, so it's normally available again by the time the next signup
+    in the loop reaches here. If it ISN'T free yet for any reason, that
+    signup just reports phone_taken like any other run -- there's no
+    fallback number to try instead, by design (the whole point is reusing
+    this one)."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /setphone <number>  (reuse this number for every future signup)\n"
+            "/setphone --random  (back to asking for a phone number each time, the default)"
+        )
+        return
+    if context.args[0] == "--random":
+        if global_settings.pop("phone", None) is not None:
+            save_settings()
+        await update.message.reply_text(
+            "📱 Phone mode: ASK EACH TIME — /newacc will prompt for a phone number again."
+        )
+        return
+    phone = context.args[0]
+    if not _valid_phone(phone):
+        await update.message.reply_text(
+            "That doesn't look like a valid phone number (digits only, 7-15 characters)."
+        )
+        return
+    global_settings["phone"] = phone
+    save_settings()
+    await update.message.reply_text(
+        f"📱 Phone mode: FIXED — every future signup will use: {phone}\n"
+        "/newacc will skip straight to asking for the OTP. Use /setphone --random "
+        "to go back to being asked for a phone number each time."
+    )
+
+
+@require_role(is_master)
+async def show_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    phone = global_settings.get("phone")
+    if phone:
+        await update.message.reply_text(f"📱 Phone mode: FIXED — {phone}")
+    else:
+        await update.message.reply_text("📱 Phone mode: ASK EACH TIME (default, per-signup)")
 
 
 @require_role(is_master)
@@ -1796,6 +1872,72 @@ def _pop_session(chat_id, sub_id):
         del sessions[chat_id]
 
 
+async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallback_note=""):
+    """Kick off registration for `phone`: handles phone_taken/failure (ending
+    the session, auto-restarting if looping) or success (transitioning to
+    await_otp). Shared by handle_message()'s interactive "await_phone" branch
+    and begin_signup()'s fixed-phone path (/setphone) -- `tag`/`fallback_note`
+    are only passed by the latter, folding the ⚡/🔓/fallback info that would
+    otherwise have gone into a "send the phone number" prompt into this first
+    message instead, since that prompt is skipped entirely when a fixed phone
+    is set."""
+    loop = asyncio.get_running_loop()
+    session.acct["phone"] = phone
+    session.acct["proxy"] = session.proxy
+    session.acct["url"] = session.site_url
+    session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
+    session.row_id = db.insert_account(conn, session.acct)
+    await update.message.reply_text(
+        f"{tag}⏳ [#{sub_id}] Submitting the signup form ({phone}) and "
+        f"requesting an OTP, one moment…{fallback_note}")
+
+    logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
+                f"(phone {phone}, url {session.site_url or BOT_SITE_URL}, "
+                f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'}, "
+                f"fast={session.use_fast})")
+    if session.use_fast:
+        # No Playwright involved -- run on asyncio's default executor instead
+        # of a _pw_executors[slot], so this doesn't queue behind (or block)
+        # browser-based signups sharing that slot.
+        result = await loop.run_in_executor(None, _blocking_http_register, session, phone)
+    else:
+        result = await loop.run_in_executor(
+            _pw_executors[session.slot], _blocking_fill_and_register, session, phone)
+
+    if result.get("phone_taken"):
+        logger.warning(f"#{session.row_id} {session.acct['username']}: phone taken -- {result['message']}")
+        db.update_status(conn, session.row_id, "phone_taken", notes=result["message"])
+        await end_session(session)
+        await update.message.reply_text(f"⚠️ [#{sub_id}] {result['message']}")
+        _pop_session(chat_id, sub_id)
+        if (chat_id, sub_id) in looping_chats:
+            await begin_signup(update, chat_id, sub_id)
+        return
+
+    if not result["ok"]:
+        # Failure: just a plain confirmation, no photo/caption/CSV -- the
+        # real error is logged to the console and stored in accounts.db
+        # (notes + screenshot columns), retrievable via /list or /export,
+        # rather than pushed into the chat (which would mean sending the
+        # account's username/email/password/phone/proxy on every failure).
+        logger.error(f"#{session.row_id} {session.acct['username']}: FAILED -- "
+                     f"{result['message']} (screenshot: {result.get('shot')})")
+        db.update_status(conn, session.row_id, "failed", notes=result["message"],
+                         screenshot=result.get("shot"))
+        await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
+        await end_session(session)
+        _pop_session(chat_id, sub_id)
+        if (chat_id, sub_id) in looping_chats:
+            await begin_signup(update, chat_id, sub_id)
+        return
+
+    logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
+    session.stage = "await_otp"
+    await update.message.reply_text(
+        f"📩 [#{sub_id}] OTP sent to {phone}. Send the {result['digits']}-digit code you received."
+    )
+
+
 @require_role(is_admin)
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -1812,59 +1954,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"⚠️ [#{sub_id}] That doesn't look like a valid phone "
                                              "number (digits only, 7-15 characters). Try again.")
             return
-        session.acct["phone"] = text
-        session.acct["proxy"] = session.proxy
-        session.acct["url"] = session.site_url
-        session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
-        session.row_id = db.insert_account(conn, session.acct)
-        await update.message.reply_text(f"⏳ [#{sub_id}] Submitting the signup form and "
-                                         "requesting an OTP, one moment…")
-
-        logger.info(f"#{session.row_id} {session.acct['username']}: submitting "
-                    f"(phone {text}, url {session.site_url or BOT_SITE_URL}, "
-                    f"proxy {mask_proxy_display(session.proxy) if session.proxy else 'none'}, "
-                    f"fast={session.use_fast})")
-        if session.use_fast:
-            # No Playwright involved -- run on asyncio's default executor
-            # instead of a _pw_executors[slot], so this doesn't queue behind
-            # (or block) browser-based signups sharing that slot.
-            result = await loop.run_in_executor(None, _blocking_http_register, session, text)
-        else:
-            result = await loop.run_in_executor(
-                _pw_executors[session.slot], _blocking_fill_and_register, session, text)
-
-        if result.get("phone_taken"):
-            logger.warning(f"#{session.row_id} {session.acct['username']}: phone taken -- {result['message']}")
-            db.update_status(conn, session.row_id, "phone_taken", notes=result["message"])
-            await end_session(session)
-            await update.message.reply_text(f"⚠️ [#{sub_id}] {result['message']}")
-            _pop_session(chat_id, sub_id)
-            if (chat_id, sub_id) in looping_chats:
-                await begin_signup(update, chat_id, sub_id)
-            return
-
-        if not result["ok"]:
-            # Failure: just a plain confirmation, no photo/caption/CSV -- the
-            # real error is logged to the console and stored in accounts.db
-            # (notes + screenshot columns), retrievable via /list or /export,
-            # rather than pushed into the chat (which would mean sending the
-            # account's username/email/password/phone/proxy on every failure).
-            logger.error(f"#{session.row_id} {session.acct['username']}: FAILED -- "
-                         f"{result['message']} (screenshot: {result.get('shot')})")
-            db.update_status(conn, session.row_id, "failed", notes=result["message"],
-                             screenshot=result.get("shot"))
-            await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
-            await end_session(session)
-            _pop_session(chat_id, sub_id)
-            if (chat_id, sub_id) in looping_chats:
-                await begin_signup(update, chat_id, sub_id)
-            return
-
-        logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
-        session.stage = "await_otp"
-        await update.message.reply_text(
-            f"📩 [#{sub_id}] OTP sent to {text}. Send the {result['digits']}-digit code you received."
-        )
+        await _submit_phone(update, chat_id, sub_id, session, text)
 
     elif session.stage == "await_otp":
         if not text.isdigit():
@@ -1955,6 +2045,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_lines = ["⚙️ Settings (global)"]
         if SIGNUP_ENABLED:
             settings_lines.append("/setpassword <pw> | --random   ·   /password")
+            settings_lines.append("/setphone <number> | --random   ·   /phone — reuse one number every signup")
             settings_lines.append("/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)")
             settings_lines.append("/freenumber on|off — free the signup phone number after each account")
         settings_lines.append("/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]")
@@ -2069,6 +2160,8 @@ def main():
         app.add_handler(CommandHandler("stats", stats))
         app.add_handler(CommandHandler("setpassword", setpassword))
         app.add_handler(CommandHandler("password", show_password))
+        app.add_handler(CommandHandler("setphone", setphone_cmd))
+        app.add_handler(CommandHandler("phone", show_phone))
         app.add_handler(CommandHandler("fast", fast_cmd))
         app.add_handler(CommandHandler("freenumber", freenumber_cmd))
         app.add_handler(CommandHandler("list", list_accounts))

@@ -629,6 +629,46 @@ vs. not) — the browser path is confirmed working (real before/after mobile
 number change on a real account), the `--fast` path is not yet confirmed and
 may still 500 for the reason described there (missing login-only cookies).
 
+### `/setphone`: reusing one real phone number for every signup
+
+Pairs with free-number mode (on by default): instead of asking for a phone
+number on every `/newacc`, pin every future signup to ONE real number —
+`/setphone <number>` sets `global_settings["phone"]` (persisted via
+`save_settings()`, global across every admin, not per-chat); `/setphone
+--random` clears it (default: prompt for a phone number each time, as
+before); `/phone` shows the current state.
+
+`begin_signup()` checks `global_settings.get("phone")` right after building
+the session (proxy/URL/fast/free-number all already decided by this point):
+if set, it skips the "send the phone number" prompt entirely and calls a new
+shared helper, `_submit_phone(update, chat_id, sub_id, session, phone, tag=,
+fallback_note=)`, directly with the fixed number — the exact same function
+`handle_message()`'s `await_phone` branch now calls after validating a
+manually-typed number (the branch's body was extracted into this helper so
+both paths can't drift). `tag`/`fallback_note` (the ⚡/🔓 mode indicators and
+any "site doesn't support X" fallback note) are folded into `_submit_phone`'s
+first message instead of a separate prompt, since with a fixed phone there's
+no "send the phone number" message for them to ride along on. Everything
+downstream — phone_taken handling, failure handling, the continuous-loop
+auto-restart, transitioning to `await_otp` — is unchanged, since it all now
+lives in the one shared function regardless of which path called it.
+
+**Why this is expected to keep working across a whole continuous run**: the
+same number staying usable relies entirely on free-number mode actually
+freeing it each time (see above) before `begin_signup()`'s next auto-restart
+reaches this fixed-phone check again. If a free-number call ever fails for
+this account, the *next* signup in the loop will get a `phone_taken` result
+for this same fixed number and report that like any other run — there's
+deliberately no fallback to a different number, since reusing this one
+specific number is the entire point of setting it.
+
+Verified via a mock run of `begin_signup()` (stubbing
+`_blocking_fill_and_register`, no real browser/site involved): with
+`global_settings["phone"]` set, it sent no "send the phone number" prompt at
+all — straight from lane-start to `"⏳ Submitting the signup form
+(<number>)..."` then `"📩 OTP sent..."`, with `session.stage` correctly
+landing on `"await_otp"`.
+
 ### Continuous signup loop
 
 `/newacc` no longer means "one signup" — it adds the chat to `looping_chats`
