@@ -301,23 +301,35 @@ and `free_number_path`, `"/send_otp_touser"`):
   investigation (a separate, out-of-band HTTP client that doesn't carry
   whatever else a real in-page request does). Judges success the same way
   `http_is_error()` does (via the response's `message_class`), not just HTTP
-  status. Retries the `page.evaluate()` call once (after a 3s pause) if it
-  raises at all -- confirmed live this is needed: a post-OTP-verify redirect
-  (the site's own JS navigating the page) can land right around when this
-  fires and kill the execution context mid-call ("Execution context was
-  destroyed, most likely because of a navigation"), which is a timing race
-  with that redirect, not a real failure -- a retry after the navigation
-  settles succeeds normally.
+  status.
+- **Retries up to `FREE_NUMBER_MAX_ATTEMPTS` (4) times, waiting
+  `FREE_NUMBER_RETRY_COOLDOWN_SECS` (10s) between each — for ANY failure, not
+  just one specific error.** Originally this only retried once, specifically
+  for a post-OTP-verify redirect (the site's own JS navigating the page)
+  landing right around the call and killing the execution context mid-call
+  ("Execution context was destroyed, most likely because of a navigation").
+  That one-shot retry wasn't enough: confirmed live, a real continuous run
+  hit `phone_taken` on its *next* signup because one round's free-number call
+  failed for some other reason and was never retried, leaving the real
+  number still attached to that earlier account — and since success/failure
+  here isn't shown in the bot's terse chat replies, this went unnoticed until
+  the following round broke. Both `free_phone_number()` and
+  `http_free_phone_number()` now retry the same way regardless of failure
+  cause (exception, 500, or a rejected `message_class`), giving the site up
+  to ~40s worst-case to stop rate-limiting or the session to stop being in a
+  weird state before giving up and reporting `"Free-number FAILED: gave up
+  after 4 attempts: ..."`.
 - **`--fast` HTTP path — NOT CONFIRMED, likely still broken.**
   `http_free_phone_number(session, csrf_token, site_url)` in `main.py`, same
-  call site convention as the browser path. Uses the corrected path/headers,
-  but a `--fast` signup's `requests.Session` never runs any client JS and so
-  likely never acquires the `domain_switch`/`screenwidth`/`username`/
-  `password` cookies the real fix turned out to need — meaning it may well
-  hit the same generic 500 the browser path did before those cookies
-  existed. Treat a `"Free-number FAILED: HTTP 500"` here as an open question,
-  not a regression, until someone runs a real `--fast` signup with free
-  numbers on and checks.
+  call site convention as the browser path (including the same retry loop
+  above). Uses the corrected path/headers, but a `--fast` signup's
+  `requests.Session` never runs any client JS and so likely never acquires
+  the `domain_switch`/`screenwidth`/`username`/`password` cookies the real
+  fix turned out to need — meaning it may well hit the same generic 500 the
+  browser path did before those cookies existed, attempt after attempt.
+  Treat a `"Free-number FAILED: gave up after 4 attempts: HTTP 500"` here as
+  an open question, not a regression, until someone runs a real `--fast`
+  signup with free numbers on and checks.
 - Both generate the new number via `gen_free_phone()` (a random 10-digit
   Indian-format mobile, first digit 6-9) and return `(ok, new_phone,
   message)`; the caller appends a `"Free-number: ..."` /

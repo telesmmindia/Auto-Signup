@@ -732,6 +732,9 @@ def enter_otp(page, acct, result):
     return result
 
 
+FREE_NUMBER_MAX_ATTEMPTS = 4
+FREE_NUMBER_RETRY_COOLDOWN_SECS = 10
+
 _FREE_NUMBER_FETCH_JS = """async (args) => {
     const [path, phone] = args;
     const csrf = document.querySelector('meta[name=csrf-token]').content;
@@ -785,7 +788,18 @@ def free_phone_number(page, site_url=None):
     `sites/cricmatch.py`'s `free_number_path`, "/send_otp_touser". Its JSON
     response follows the same {"message","message_class",...} shape as the
     register endpoint (see http_is_error()), so success is judged the same
-    way, not just by HTTP status."""
+    way, not just by HTTP status.
+
+    Retries up to FREE_NUMBER_MAX_ATTEMPTS times, waiting
+    FREE_NUMBER_RETRY_COOLDOWN_SECS between each, for ANY failure -- not just
+    the exec-context-destroyed race above, but also a plain rejection (e.g. a
+    transient 500, or the site's own OTP rate-limiting) -- confirmed live: a
+    real run hit `phone_taken` on its NEXT signup because one round's
+    free-number call failed and only retried once, leaving the real number
+    still attached to that account. A generous multi-attempt retry budget
+    (~40s worst case) gives the site time to stop rate-limiting or the
+    session to stop being in a weird state, rather than giving up on the
+    first bad response."""
     prof = profile_for(page.url)
     if not prof.supports_free_number:
         return False, None, f"{prof.key} does not support freeing the signup phone number."
@@ -795,32 +809,28 @@ def free_phone_number(page, site_url=None):
     parts = urlsplit(site_url or page.url)
     path = f"{parts.scheme}://{parts.netloc}{prof.free_number_path}"
 
-    # A post-OTP-verify redirect (the site's own JS navigating the page, e.g.
-    # to a welcome/dashboard view) can land RIGHT around when this fires and
-    # kill the execution context mid-evaluate ("Execution context was
-    # destroyed, most likely because of a navigation") -- confirmed live,
-    # this is a timing race with that redirect, not a real failure, so retry
-    # once after giving any in-flight navigation time to finish rather than
-    # reporting it as a hard failure on the first hit.
-    result = None
-    last_err = None
-    for attempt in range(2):
+    ok, msg = False, "unknown error"
+    for attempt in range(1, FREE_NUMBER_MAX_ATTEMPTS + 1):
         try:
             result = page.evaluate(_FREE_NUMBER_FETCH_JS, [path, new_phone])
-            break
         except Exception as e:
-            last_err = e
-            page.wait_for_timeout(3000)
-    if result is None:
-        return False, new_phone, f"free-number request failed: {str(last_err)[:150]}"
+            # e.g. a post-OTP-verify redirect killing the execution context
+            # mid-evaluate -- a timing race, not a real failure.
+            ok, msg = False, f"request failed: {str(e)[:150]}"
+        else:
+            try:
+                body = json.loads(result["text"])
+                msg = body.get("message") or str(body)
+                ok = result["status"] < 400 and not http_is_error(body)
+            except (ValueError, TypeError):
+                ok, msg = False, f"HTTP {result['status']}: {result['text'][:150]}"
 
-    try:
-        body = json.loads(result["text"])
-        msg = body.get("message") or str(body)
-        ok = result["status"] < 400 and not http_is_error(body)
-    except (ValueError, TypeError):
-        msg = f"HTTP {result['status']}: {result['text'][:150]}"
-        ok = False
+        if ok or attempt == FREE_NUMBER_MAX_ATTEMPTS:
+            break
+        page.wait_for_timeout(FREE_NUMBER_RETRY_COOLDOWN_SECS * 1000)
+
+    if not ok and FREE_NUMBER_MAX_ATTEMPTS > 1:
+        msg = f"gave up after {FREE_NUMBER_MAX_ATTEMPTS} attempts: {msg}"
     return ok, new_phone, msg
 
 
@@ -1025,7 +1035,13 @@ def http_free_phone_number(session, csrf_token, site_url):
     well hit the same generic 500 the browser path did before that cookie set
     existed. Treat a "Free-number FAILED: HTTP 500" here as an open question,
     not a code bug, until someone runs a real --fast signup with
-    free_number=True and checks."""
+    free_number=True and checks.
+
+    Retries up to FREE_NUMBER_MAX_ATTEMPTS times (waiting
+    FREE_NUMBER_RETRY_COOLDOWN_SECS between each), same as
+    free_phone_number() -- see its docstring for why a single attempt isn't
+    enough (a real run hit phone_taken on the next signup after one
+    free-number call failed and wasn't retried)."""
     prof = profile_for(site_url)
     if not prof.supports_free_number:
         return False, None, f"{prof.key} does not support freeing the signup phone number."
@@ -1042,18 +1058,27 @@ def http_free_phone_number(session, csrf_token, site_url):
         "Origin": f"{parts.scheme}://{parts.netloc}",
         "Referer": site_url,
     }
-    try:
-        resp = session.post(url, data=data, headers=headers, timeout=20)
-    except requests.RequestException as e:
-        return False, new_phone, f"free-number request failed: {str(e)[:150]}"
 
-    try:
-        body = resp.json()
-        msg = body.get("message") or str(body)
-        ok = resp.ok and not http_is_error(body)
-    except ValueError:
-        msg = f"HTTP {resp.status_code}: {resp.text[:150]}"
-        ok = False
+    ok, msg = False, "unknown error"
+    for attempt in range(1, FREE_NUMBER_MAX_ATTEMPTS + 1):
+        try:
+            resp = session.post(url, data=data, headers=headers, timeout=20)
+        except requests.RequestException as e:
+            ok, msg = False, f"free-number request failed: {str(e)[:150]}"
+        else:
+            try:
+                body = resp.json()
+                msg = body.get("message") or str(body)
+                ok = resp.ok and not http_is_error(body)
+            except ValueError:
+                ok, msg = False, f"HTTP {resp.status_code}: {resp.text[:150]}"
+
+        if ok or attempt == FREE_NUMBER_MAX_ATTEMPTS:
+            break
+        time.sleep(FREE_NUMBER_RETRY_COOLDOWN_SECS)
+
+    if not ok and FREE_NUMBER_MAX_ATTEMPTS > 1:
+        msg = f"gave up after {FREE_NUMBER_MAX_ATTEMPTS} attempts: {msg}"
     return ok, new_phone, msg
 
 
