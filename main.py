@@ -732,8 +732,18 @@ def enter_otp(page, acct, result):
     return result
 
 
-FREE_NUMBER_MAX_ATTEMPTS = 4
-FREE_NUMBER_RETRY_COOLDOWN_SECS = 10
+# Retry budget for freeing the signup phone number. Started at 4x10s (~40s)
+# but that wasn't enough for a real failure mode: a bare 403 Forbidden (no
+# JSON body -- unlike the app-level 500 covered above, this looks like an
+# edge/WAF-level block, e.g. from calling this endpoint too rapidly), which
+# needs meaningfully longer to clear than a transient app error does. Bumped
+# to 10x20s (~200s / ~3.3min worst case) so a signup only gives up on this
+# step after a real chance to ride out a short rate-limit window -- the whole
+# point of this feature is guaranteeing the number is free before the NEXT
+# signup in a continuous run tries to use it again, so a short retry budget
+# that gives up early defeats that purpose.
+FREE_NUMBER_MAX_ATTEMPTS = 10
+FREE_NUMBER_RETRY_COOLDOWN_SECS = 20
 
 _FREE_NUMBER_FETCH_JS = """async (args) => {
     const [path, phone] = args;
@@ -793,13 +803,16 @@ def free_phone_number(page, site_url=None):
     Retries up to FREE_NUMBER_MAX_ATTEMPTS times, waiting
     FREE_NUMBER_RETRY_COOLDOWN_SECS between each, for ANY failure -- not just
     the exec-context-destroyed race above, but also a plain rejection (e.g. a
-    transient 500, or the site's own OTP rate-limiting) -- confirmed live: a
-    real run hit `phone_taken` on its NEXT signup because one round's
-    free-number call failed and only retried once, leaving the real number
-    still attached to that account. A generous multi-attempt retry budget
-    (~40s worst case) gives the site time to stop rate-limiting or the
-    session to stop being in a weird state, rather than giving up on the
-    first bad response."""
+    transient 500, or a bare 403 -- edge/WAF-level rate-limiting from calling
+    this endpoint too rapidly, seen live and needing longer to clear than an
+    app-level 500 does). Confirmed live: a real run hit `phone_taken` on its
+    NEXT signup because one round's free-number call failed and wasn't
+    retried enough, leaving the real number still attached to that account.
+    A generous multi-attempt retry budget (see the module-level constants'
+    comment for the current worst-case time) gives the site real odds of
+    clearing whatever rate limit it's applying, rather than giving up early
+    and letting the next signup in a continuous run collide with a number
+    that's still taken."""
     prof = profile_for(page.url)
     if not prof.supports_free_number:
         return False, None, f"{prof.key} does not support freeing the signup phone number."
