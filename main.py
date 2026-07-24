@@ -95,12 +95,48 @@ FIRST_NAMES = ["aarav", "vivaan", "aditya", "vihaan", "arjun", "sai", "reyansh",
                "rahul", "amit", "vikram", "arnav", "dev", "aryan",
                "ananya", "diya", "saanvi", "aadhya", "kiara", "myra", "pari",
                "anika", "ishita", "riya", "priya", "neha", "pooja", "sneha",
-               "kavya", "meera", "shreya", "tanvi", "isha", "aarohi"]
+               "kavya", "meera", "shreya", "tanvi", "isha", "aarohi",
+               "rudra", "atharv", "vivan", "aadi", "yash", "harsh", "nikhil",
+               "siddharth", "varun", "akash", "gaurav", "manish", "suresh",
+               "rajesh", "sanjay", "deepak", "ravi", "ankit", "abhishek",
+               "tarun", "naveen", "pranav", "kunal", "rohit", "vishal",
+               "saurabh", "gautam", "anand", "mohit", "raj",
+               "aditi", "kritika", "jiya", "avni", "khushi", "simran", "tanya",
+               "nisha", "swati", "ritu", "pallavi", "sonal", "deepika",
+               "madhuri", "sunita", "geeta", "anjali", "komal", "preeti",
+               "rekha", "sarita", "vandana", "alka", "bharti", "chitra",
+               "divya", "ekta", "falguni", "garima", "hina",
+               "aarush", "veer", "shaurya", "kian", "laksh", "arhan",
+               "agastya", "advait", "ansh", "samar", "viraj", "yuvraj",
+               "darsh", "ojas", "parth", "shivansh", "tejas", "om", "ronit",
+               "mayank", "nakul", "chirag", "rishabh", "sameer", "pratik",
+               "ajay", "sunil", "vinod", "ramesh", "dinesh", "alok", "ashok",
+               "prakash", "sandeep", "umesh", "vijay", "rakesh", "jitendra",
+               "mahesh",
+               "zara", "anaya", "ira", "siya", "navya", "prisha", "amara",
+               "disha", "arya", "nandini", "radhika", "shweta", "poonam",
+               "seema", "rani", "usha", "mamta", "lata", "kamla", "indira",
+               "shanta", "manisha", "jyoti", "archana", "vidya", "asha",
+               "shobha", "rajni", "kalpana", "savita"]
 LAST_NAMES = ["sharma", "verma", "gupta", "singh", "kumar", "patel", "reddy",
               "nair", "iyer", "rao", "mehta", "joshi", "agarwal", "bhatt",
               "choudhary", "malhotra", "kapoor", "chatterjee", "mukherjee",
               "banerjee", "das", "dutta", "pillai", "menon", "naidu",
-              "shetty", "hegde", "bose", "sinha", "tiwari"]
+              "shetty", "hegde", "bose", "sinha", "tiwari",
+              "yadav", "mishra", "pandey", "thakur", "chauhan", "rathore",
+              "chowdhury", "saxena", "srivastava", "tripathi", "dubey",
+              "pathak", "trivedi", "bhat", "kaur", "gill", "sandhu", "arora",
+              "khanna", "chopra", "bajaj", "jain", "shah", "desai", "goel",
+              "garg", "mittal", "aggarwal", "bansal", "kulkarni", "deshmukh",
+              "pawar", "gaikwad", "jadhav",
+              "bhatia", "ahluwalia", "sethi", "kohli", "khurana", "walia",
+              "anand", "chandra", "bhardwaj", "tandon", "mahajan", "bakshi",
+              "grover", "batra", "ghosh", "sen", "roy", "dey", "saha",
+              "ganguly", "chakraborty", "bhattacharya", "iyengar",
+              "subramaniam", "krishnan", "venkatesh", "raman", "natarajan",
+              "gowda", "shenoy", "kamath", "prabhu", "bhandari", "rawat",
+              "bisht", "negi", "panchal", "rana", "solanki", "chavan",
+              "more", "kale", "salunkhe", "nikam"]
 EMAIL_DOMAIN = "gmail.com"
 
 # Per-site selectors + behavior now live in one profile file per site under
@@ -845,6 +881,40 @@ def free_phone_number(page, site_url=None):
     if not ok and FREE_NUMBER_MAX_ATTEMPTS > 1:
         msg = f"gave up after {FREE_NUMBER_MAX_ATTEMPTS} attempts: {msg}"
     return ok, new_phone, msg
+
+
+def free_account_number(page, username, password, site_url=None):
+    """Free up the phone number on an EXISTING account (not a fresh signup):
+    log in with `username`/`password`, then swap the account's mobile number
+    to a random new one via free_phone_number(), the same call the signup
+    flow makes automatically right after OTP verify. Returns a result dict in
+    the same shape convention as test_baccarat(): {"ok", "messages", "shot",
+    "freed_phone"}. Does not write to accounts.db -- like test_baccarat(),
+    this operates on an account someone already has, not one generated here."""
+    result = {"ok": False, "messages": [], "shot": None, "freed_phone": None}
+
+    outcome, msgs = login(page, username, password, site_url=site_url)
+    if outcome != "ok":
+        result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
+        SHOTS_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        shot = SHOTS_DIR / f"{username}-{stamp}-login-failed.png"
+        page.screenshot(path=str(shot))
+        result["shot"] = str(shot)
+        return result
+
+    ok, new_phone, msg = free_phone_number(page, site_url=site_url)
+    result["ok"] = ok
+    result["messages"] = [msg]
+    if ok:
+        result["freed_phone"] = new_phone
+
+    SHOTS_DIR.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    shot = SHOTS_DIR / f"{username}-{stamp}-free-number.png"
+    page.screenshot(path=str(shot))
+    result["shot"] = str(shot)
+    return result
 
 
 def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy=None,

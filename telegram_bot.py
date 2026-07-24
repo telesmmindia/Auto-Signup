@@ -143,11 +143,11 @@ from sites import profile_for
 from main import (
     SHOTS_DIR, SITE_URL,
     capsolver_key, check_phone_taken, click_first_visible, extract_referral_code,
-    fill_register_form, free_phone_number, gen_account, http_fetch_csrf,
-    http_free_phone_number, http_is_error, http_is_phone_taken, http_register_call,
-    http_session_for, is_waf_captcha, maybe_bridge_proxy, open_signup_modal, parse_proxy,
-    read_result, run_paired_hedge, stop_bridge, submit_register, test_baccarat,
-    wait_for_otp_outcome, wait_for_register_outcome,
+    fill_register_form, free_account_number, free_phone_number, gen_account,
+    http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
+    http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
+    open_signup_modal, parse_proxy, read_result, run_paired_hedge, stop_bridge,
+    submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
 from sites.games import BACCARAT, STOCKMARKET
 
@@ -368,6 +368,7 @@ if SIGNUP_ENABLED:
         BotCommand("phone", "Show the current phone mode"),
         BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
         BotCommand("freenumber", "Toggle freeing the signup phone number after each account"),
+        BotCommand("freenum", "Log into an account and free up its phone number"),
     ]
 if GAMEPLAY_ENABLED:
     MASTER_COMMANDS.append(
@@ -1281,6 +1282,62 @@ def _blocking_test_baccarat(username, password, amount):
         stop_bridge(bridge_proc)
 
 
+def _blocking_free_number(username, password):
+    """Runs on _pw_executors[0]. Opens a throwaway context (same "share slot
+    0, always clean up" pattern as _blocking_test_baccarat) and calls
+    main.free_account_number() to log into an EXISTING account and swap its
+    mobile number to a random new one."""
+    browser = _blocking_ensure_browser(0)
+    raw = global_settings.get("proxy")
+    proxy_conf = parse_proxy(raw) if raw else None
+    bridge_proc = None
+    try:
+        proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+    except RuntimeError as e:
+        return {"ok": False, "messages": [f"Proxy bridge failed to start: {e}"],
+                "shot": None, "freed_phone": None}
+    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+    try:
+        page = context.new_page()
+        return free_account_number(page, username, password, site_url=BOT_SITE_URL)
+    except PWError as e:
+        return {"ok": False, "messages": [f"Playwright error: {str(e)[:300]}"],
+                "shot": None, "freed_phone": None}
+    finally:
+        context.close()
+        stop_bridge(bridge_proc)
+
+
+@require_role(is_master)
+async def freenum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log into an EXISTING account and free up its current phone number by
+    swapping it to a random new one (same mechanism the signup flow uses
+    automatically after OTP verify -- see main.py's free_phone_number()).
+    Master-only: takes another account's credentials as a chat argument, same
+    restricted scope as /testbaccarat."""
+    args = context.args
+    if len(args) != 2:
+        await update.message.reply_text(
+            "Usage: /freenum <username> <password>\n\n"
+            "Logs into an EXISTING account and frees up its current phone "
+            "number by swapping it to a random new one, so that number can "
+            "be reused for another signup."
+        )
+        return
+
+    username, password = args[0], args[1]
+    await update.message.reply_text(f"Freeing the phone number on {username}...")
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(_pw_executors[0], _blocking_free_number,
+                                        username, password)
+
+    status = "OK" if result["ok"] else "FAILED"
+    caption = f"Free-number [{status}] for {username}\n" + "\n".join(result["messages"])
+    if result.get("freed_phone"):
+        caption += f"\nNew number: {result['freed_phone']}"
+    await send_result_photo(update, result.get("shot"), caption[:1024])
+
+
 @require_role(is_master)
 async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Login + place a REAL bet on both Player and Banker in a live Baccarat
@@ -2048,6 +2105,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings_lines.append("/setphone <number> | --random   ·   /phone — reuse one number every signup")
             settings_lines.append("/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)")
             settings_lines.append("/freenumber on|off — free the signup phone number after each account")
+            settings_lines.append("/freenum <user> <pass> — log into an account and free its phone number")
         settings_lines.append("/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]")
         if SIGNUP_ENABLED:
             settings_lines.append("/seturl <url> · /url · /clearurl · /btag [code]")
@@ -2164,6 +2222,7 @@ def main():
         app.add_handler(CommandHandler("phone", show_phone))
         app.add_handler(CommandHandler("fast", fast_cmd))
         app.add_handler(CommandHandler("freenumber", freenumber_cmd))
+        app.add_handler(CommandHandler("freenum", freenum_cmd))
         app.add_handler(CommandHandler("list", list_accounts))
         app.add_handler(CommandHandler("photo", photo_cmd))
         app.add_handler(CommandHandler("export", export_cmd))
