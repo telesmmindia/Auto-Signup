@@ -692,45 +692,80 @@ bare-403 edge-block described above and exhausted the whole retry budget —
 prompting the widening to 15x45s (~10.5min) noted there; that widening
 itself is not yet re-confirmed against a fresh 403.
 
-### `/setphone`: reusing one real phone number for every signup
+### `/setphone`: rotating a pool of real phone numbers across signups
 
 Pairs with free-number mode (on by default): instead of asking for a phone
-number on every `/newacc`, pin every future signup to ONE real number —
-`/setphone <number>` sets `global_settings["phone"]` (persisted via
-`save_settings()`, global across every admin, not per-chat); `/setphone
---random` clears it (default: prompt for a phone number each time, as
-before); `/phone` shows the current state.
+number on every `/newacc`, pin every future signup to a **rotating pool** of
+real numbers — `/setphone <number> [number2] [number3] ...` sets
+`global_settings["phones"]` (a list, persisted via `save_settings()`, global
+across every admin, not per-chat) plus resets `global_settings["phone_idx"]`
+to 0; `/setphone --random` clears both (default: prompt for a phone number
+each time, as before); `/addphone <number>` / `/delphone <number>` add/remove
+one number without replacing the rest of the pool; `/phone` shows the current
+pool, which number is up next, and the round cooldown (see below). A
+single-number pool behaves exactly like the old one-number `/setphone` did.
+**Migration**: a settings file still holding the old single-value
+`global_settings["phone"]` key is converted to `{"phones": [that number]}` at
+import time (see the migration block right after `global_settings` loads),
+so upgrading needs no manual settings edit.
 
-`begin_signup()` checks `global_settings.get("phone")` right after building
-the session (proxy/URL/fast/free-number all already decided by this point):
-if set, it skips the "send the phone number" prompt entirely and calls a new
-shared helper, `_submit_phone(update, chat_id, sub_id, session, phone, tag=,
-fallback_note=)`, directly with the fixed number — the exact same function
-`handle_message()`'s `await_phone` branch now calls after validating a
-manually-typed number (the branch's body was extracted into this helper so
-both paths can't drift). `tag`/`fallback_note` (the ⚡/🔓 mode indicators and
-any "site doesn't support X" fallback note) are folded into `_submit_phone`'s
-first message instead of a separate prompt, since with a fixed phone there's
-no "send the phone number" message for them to ride along on. Everything
-downstream — phone_taken handling, failure handling, the continuous-loop
-auto-restart, transitioning to `await_otp` — is unchanged, since it all now
-lives in the one shared function regardless of which path called it.
+**Why a pool instead of one number (added 2026-07-25, replacing the earlier
+single-number-only version — see git history):** live testing of a
+continuous `/newacc` loop with a single fixed number still intermittently hit
+"number already in use," even with `free_phone_number()`'s generous retry
+budget (main.py, up to ~10.5min worst case) — the free-number call itself
+was reported successful, but the very next round's register call, fired
+immediately after, sometimes raced ahead of the site's own backend actually
+reflecting the swap. A single number has zero slack for that; a pool of N
+numbers gives each one N-1 other rounds' worth of time before it's needed
+again, which is a much bigger margin than any fixed per-call wait can
+practically buy.
 
-**Why this is expected to keep working across a whole continuous run**: the
-same number staying usable relies entirely on free-number mode actually
-freeing it each time (see above) before `begin_signup()`'s next auto-restart
-reaches this fixed-phone check again. If a free-number call ever fails for
-this account, the *next* signup in the loop will get a `phone_taken` result
-for this same fixed number and report that like any other run — there's
-deliberately no fallback to a different number, since reusing this one
-specific number is the entire point of setting it.
+`_next_fixed_phone()` (telegram_bot.py) pops `phones[phone_idx % len(phones)]`
+and advances+persists `phone_idx`, so rotation position survives a bot
+restart. `begin_signup()` calls it right after building the session
+(proxy/URL/fast/free-number all already decided by this point); if it returns
+non-`None`, `begin_signup()` skips the "send the phone number" prompt
+entirely and calls the shared `_submit_phone(update, chat_id, sub_id,
+session, phone, tag=, fallback_note=)` helper directly with that round's
+number — the exact same function `handle_message()`'s `await_phone` branch
+calls after validating a manually-typed number (the branch's body was
+extracted into this helper so both paths can't drift). Everything downstream
+— phone_taken handling, failure handling, transitioning to `await_otp` — is
+unchanged.
+
+**`ROUND_COOLDOWN_SECS` (default 12s, env-overridable) — a pause before the
+continuous loop auto-restarts, added alongside the pool for the same live
+failure.** `_auto_restart(update, chat_id, sub_id)` replaced the three
+inline `if (chat_id, sub_id) in looping_chats: await begin_signup(...)`
+call sites (phone_taken, register-failure, and post-OTP-verify branches, all
+in `_submit_phone`/`handle_message`) — it still checks `looping_chats` the
+same way, but when a phone pool is set, it `asyncio.sleep(ROUND_COOLDOWN_SECS)`
+first. This only applies in fixed-phone/pool mode: that's the only path where
+a round's register call fires with no human pacing it (ask-each-time mode
+already waits on someone to type the next number). Paired with this,
+`free_phone_number()`'s pre-call settle wait (main.py) was widened from 4s to
+8s for the same reason — both changes buy the site more time to make a
+free-number swap visible before it's relied on again, one on the sending
+side, one on the receiving side.
+
+**Why this is expected to keep working across a whole continuous run**: each
+number staying usable relies on free-number mode actually freeing it each
+time it's used (see above) before rotation brings it back around. If a
+free-number call ever fails for one round, that number's *next* turn in the
+loop will get a `phone_taken` result and report that like any other run —
+there's deliberately no fallback beyond the rest of the pool.
 
 Verified via a mock run of `begin_signup()` (stubbing
 `_blocking_fill_and_register`, no real browser/site involved): with
-`global_settings["phone"]` set, it sent no "send the phone number" prompt at
+`global_settings["phones"]` set, it sent no "send the phone number" prompt at
 all — straight from lane-start to `"⏳ Submitting the signup form
 (<number>)..."` then `"📩 OTP sent..."`, with `session.stage` correctly
-landing on `"await_otp"`.
+landing on `"await_otp"`. The pool/rotation/cooldown themselves were
+exercised live 2026-07-25 against a real single-number pool (post-migration)
+but **not yet against a multi-number pool** — do that before relying on it
+for volume if the single-number "already in use" failure resurfaces even
+with the wider settle wait.
 
 ### Continuous signup loop
 

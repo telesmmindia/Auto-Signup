@@ -44,14 +44,17 @@ Master-only commands:
     /setpassword <pw> -> fixed password for every future signup;
                          /setpassword --random reverts to a random one
     /password         -> show the current password mode
-    /setphone <number> -> reuse this ONE real phone number for every future
-                         signup instead of asking each time -- /newacc then
-                         skips straight to asking for the OTP; pairs with
-                         free-number mode (on by default), which frees this
-                         number again right after each signup so it's ready
-                         for the next one. /setphone --random reverts to
+    /setphone <n> [n2] [n3] ... -> rotate through these real phone number(s)
+                         for every future signup instead of asking each time
+                         -- /newacc then skips straight to asking for the
+                         OTP; pairs with free-number mode (on by default),
+                         which frees a number again right after the signup
+                         that used it, so it's ready by the time rotation
+                         comes back around. /setphone --random reverts to
                          asking for a phone number each time (the default)
-    /phone            -> show the current phone mode
+    /addphone <number> / /delphone <number> -> add/remove one number from
+                         the pool without replacing the rest of it
+    /phone            -> show the current phone pool/mode
     /fast on|off      -> toggle HTTP-fast signup mode (no browser at all,
                          cricmatch247 only, ~10-20x faster; falls back to the
                          browser automatically for sites that don't support
@@ -214,6 +217,18 @@ RUN_GAME = STOCKMARKET if STOCKMARKET_ENABLED else BACCARAT
 # single-worker behavior) if unset.
 BOT_CONCURRENCY = max(1, int(os.environ.get("BOT_CONCURRENCY", "1")))
 
+# Pause before a continuous-mode loop (see /newacc) auto-restarts the NEXT
+# round, but only when a fixed phone pool is set (/setphone) -- see
+# _auto_restart() below. That round's own register call fires automatically,
+# with no human typing a phone number to pace it, so back-to-back rounds can
+# both re-hit a number the site hasn't finished processing the free-number
+# swap for yet ("already in use") and trip WAF/rate-limit blocks on the
+# register endpoint itself. Added 2026-07-25 after live testing (see
+# CLAUDE.md) still occasionally hit "already in use" even with generous
+# free-number retry budgets -- this buys the site extra settle time on top of
+# that. Env-overridable for tuning without a code change.
+ROUND_COOLDOWN_SECS = float(os.environ.get("ROUND_COOLDOWN_SECS", "12"))
+
 # Shared across handlers; all handler coroutines run on the same asyncio event
 # loop thread, so one sqlite3 connection is safe to reuse.
 conn = db.get_connection()
@@ -286,6 +301,13 @@ def _save_json(path, data):
 
 admin_ids = set(_load_json(ADMINS_FILE, []))
 global_settings = _load_json(SETTINGS_FILE, {})
+# Migrate the old single-number /setphone value ("phone") into the new
+# rotating pool ("phones", a list) the first time a settings file with the
+# old key loads -- see _next_fixed_phone() below.
+if "phone" in global_settings and "phones" not in global_settings:
+    _legacy_phone = global_settings.pop("phone")
+    global_settings["phones"] = [_legacy_phone] if _legacy_phone else []
+    _save_json(SETTINGS_FILE, global_settings)
 # {"next_id": int, "pairs": {"<id>": {"banker": {"username","password"},
 #  "player": {"username","password"}, "created_at": iso}}}. acc1 -> banker,
 # acc2 -> player (fixed, so a pair always bets the same side per account).
@@ -364,8 +386,10 @@ if SIGNUP_ENABLED:
         BotCommand("stats", "Counts of signups by status and btag"),
         BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
         BotCommand("password", "Show the current password mode"),
-        BotCommand("setphone", "Reuse one phone number for every signup, or --random"),
-        BotCommand("phone", "Show the current phone mode"),
+        BotCommand("setphone", "Rotate through these numbers every signup, or --random"),
+        BotCommand("addphone", "Add one number to the phone pool"),
+        BotCommand("delphone", "Remove one number from the phone pool"),
+        BotCommand("phone", "Show the current phone pool/mode"),
         BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
         BotCommand("freenumber", "Toggle freeing the signup phone number after each account"),
         BotCommand("freenum", "Log into an account and free up its phone number"),
@@ -783,6 +807,48 @@ def _blocking_http_verify_otp(session, otp):
     return {"ok": True, "message": message, "shot": None, "freed_phone": freed_phone}
 
 
+def _next_fixed_phone():
+    """Pop the next number from the rotating phone pool (/setphone), advancing
+    and persisting global_settings["phone_idx"] so consecutive rounds -- and
+    rounds across a bot restart -- don't reuse the same real number back to
+    back. Returns None if no pool is set (the default: ask for a phone number
+    each time).
+
+    Rotating across N numbers instead of pinning one gives each number N-1
+    rounds of breathing room before it's needed again, which is what actually
+    matters here: free_phone_number()'s retry budget (up to ~10.5min, see
+    main.py) makes a single free-number call eventually succeed almost always,
+    but even a successful swap needs a few seconds for the site's own backend
+    to make it visible to the register endpoint again (see the widened
+    settle-wait in free_phone_number()) -- a single fixed number has zero
+    slack for that, a pool of several has minutes of it for free."""
+    phones = global_settings.get("phones")
+    if not phones:
+        return None
+    idx = global_settings.get("phone_idx", 0) % len(phones)
+    global_settings["phone_idx"] = (idx + 1) % len(phones)
+    save_settings()
+    return phones[idx]
+
+
+async def _auto_restart(update, chat_id, sub_id):
+    """Continue the continuous-mode loop (see /newacc) for lane sub_id, if
+    it's still active. When a fixed phone pool is set (ROUND_COOLDOWN_SECS,
+    /setphone), pause first -- the previous round's free-number swap (if any)
+    already ran synchronously to completion before this point, but the site's
+    backend still needs a moment to settle before the NEXT round's register
+    call reliably sees it (see free_phone_number()'s widened settle-wait) --
+    firing that call immediately risks both "already in use" and tripping a
+    WAF/rate-limit block from hammering the register endpoint. No delay when
+    no pool is set -- a human has to type the next phone number anyway, which
+    already paces things."""
+    if (chat_id, sub_id) not in looping_chats:
+        return
+    if global_settings.get("phones"):
+        await asyncio.sleep(ROUND_COOLDOWN_SECS)
+    await begin_signup(update, chat_id, sub_id)
+
+
 async def begin_signup(update, chat_id, sub_id):
     """Generate a new account and start a fresh session in lane sub_id.
     Shared by /newacc (each initial lane) and the continuous-mode
@@ -834,15 +900,16 @@ async def begin_signup(update, chat_id, sub_id):
     tag = "⚡ " if session.use_fast else ""
     tag += "🔓 " if session.free_number else ""
 
-    # /setphone (global_settings["phone"]) pins every future signup to ONE
-    # real number instead of prompting for it each time -- meant to pair with
-    # free-number mode: that number gets freed right after this signup
-    # verifies, so it's available again by the time the NEXT begin_signup()
-    # (continuous-mode auto-restart) reaches here. If it ISN'T free yet (e.g.
-    # free-number failed last round), this will just report phone_taken like
-    # any other run and the continuous loop will retry the same fixed number
-    # again -- there's no other number to fall back to by design.
-    fixed_phone = global_settings.get("phone")
+    # /setphone (global_settings["phones"]) pins every future signup to a
+    # rotating pool of real numbers instead of prompting for one each time --
+    # meant to pair with free-number mode: each number gets freed right after
+    # the signup that used it verifies, and _next_fixed_phone() rotates to a
+    # DIFFERENT number next round rather than reusing the same one
+    # immediately, so a slow-to-settle swap (see ROUND_COOLDOWN_SECS) has the
+    # rest of the pool's rounds as extra slack before it's needed again. If a
+    # number somehow still isn't free by the time its turn comes back around,
+    # that round just reports phone_taken like any other run.
+    fixed_phone = _next_fixed_phone()
     if fixed_phone:
         session.stage = "await_otp"  # _submit_phone() sets this properly; harmless placeholder
         await _submit_phone(update, chat_id, sub_id, session, fixed_phone, tag=tag,
@@ -975,29 +1042,73 @@ async def show_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 @require_role(is_master)
 async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/setphone <number> -- pin every future /newacc to ONE real phone
-    number instead of prompting for it each time: begin_signup() skips the
-    "send the phone number" prompt entirely and goes straight to submitting
-    the form with this number, so a continuous run only ever asks for the
-    OTP. Meant to pair with free-number mode (on by default, see
-    /freenumber): that mode frees this exact number right after each signup
-    verifies, so it's normally available again by the time the next signup
-    in the loop reaches here. If it ISN'T free yet for any reason, that
-    signup just reports phone_taken like any other run -- there's no
-    fallback number to try instead, by design (the whole point is reusing
-    this one)."""
+    """/setphone <number> [number2] [number3] ... -- replace the whole fixed
+    phone pool with the given number(s), pinning every future /newacc to
+    rotating through them instead of prompting for a phone number each time
+    (see _next_fixed_phone()/begin_signup()): begin_signup() skips the "send
+    the phone number" prompt entirely and goes straight to submitting the
+    form, so a continuous run only ever asks for the OTP. Meant to pair with
+    free-number mode (on by default, see /freenumber): each number gets freed
+    right after the signup that used it verifies, and rotating means it isn't
+    needed again for the rest of a lap through the pool -- unlike a single
+    fixed number, which needs the free-number swap (plus the site's own
+    settle time -- see ROUND_COOLDOWN_SECS/free_phone_number()) to fully land
+    before the very next round. A single-number pool still works exactly like
+    the old /setphone did, just with less slack. If a number somehow still
+    isn't free by the time its turn comes back around, that round just
+    reports phone_taken like any other run -- there's no fallback beyond the
+    rest of the pool."""
     if not context.args:
         await update.message.reply_text(
-            "Usage: /setphone <number>  (reuse this number for every future signup)\n"
-            "/setphone --random  (back to asking for a phone number each time, the default)"
+            "Usage: /setphone <number> [number2] [number3] ...  (rotate through these for every "
+            "future signup)\n"
+            "/setphone --random  (back to asking for a phone number each time, the default)\n"
+            "/addphone <number> · /delphone <number> — add/remove one number without "
+            "replacing the whole pool"
         )
         return
     if context.args[0] == "--random":
-        if global_settings.pop("phone", None) is not None:
+        changed = global_settings.pop("phones", None) is not None
+        changed = (global_settings.pop("phone_idx", None) is not None) or changed
+        if changed:
             save_settings()
         await update.message.reply_text(
             "📱 Phone mode: ASK EACH TIME — /newacc will prompt for a phone number again."
         )
+        return
+    bad = [p for p in context.args if not _valid_phone(p)]
+    if bad:
+        await update.message.reply_text(
+            f"These don't look like valid phone numbers (digits only, 7-15 characters): {', '.join(bad)}"
+        )
+        return
+    global_settings["phones"] = list(context.args)
+    global_settings["phone_idx"] = 0
+    save_settings()
+    if len(context.args) == 1:
+        await update.message.reply_text(
+            f"📱 Phone mode: FIXED — every future signup will use: {context.args[0]}\n"
+            "/newacc will skip straight to asking for the OTP. Add more numbers with /addphone "
+            "to rotate through a pool instead, or /setphone --random to go back to being asked "
+            "each time."
+        )
+    else:
+        listed = ", ".join(context.args)
+        await update.message.reply_text(
+            f"📱 Phone mode: ROTATING POOL ({len(context.args)} numbers) — {listed}\n"
+            "/newacc will skip straight to asking for the OTP, cycling through these one per "
+            "round. /setphone --random to go back to being asked each time."
+        )
+
+
+@require_role(is_master)
+async def addphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addphone <number> -- append one number to the fixed phone pool
+    (/setphone) without replacing the rest of it. Does not reset the
+    rotation position, so already-scheduled numbers keep their order; the new
+    number joins the end of the rotation."""
+    if not context.args:
+        await update.message.reply_text("Usage: /addphone <number>")
         return
     phone = context.args[0]
     if not _valid_phone(phone):
@@ -1005,20 +1116,58 @@ async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "That doesn't look like a valid phone number (digits only, 7-15 characters)."
         )
         return
-    global_settings["phone"] = phone
+    phones = global_settings.setdefault("phones", [])
+    if phone in phones:
+        await update.message.reply_text(f"📱 {phone} is already in the pool ({len(phones)} numbers).")
+        return
+    phones.append(phone)
     save_settings()
-    await update.message.reply_text(
-        f"📱 Phone mode: FIXED — every future signup will use: {phone}\n"
-        "/newacc will skip straight to asking for the OTP. Use /setphone --random "
-        "to go back to being asked for a phone number each time."
-    )
+    await update.message.reply_text(f"📱 Added {phone} — pool is now {len(phones)} number(s): "
+                                     f"{', '.join(phones)}")
+
+
+@require_role(is_master)
+async def delphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delphone <number> -- remove one number from the fixed phone pool
+    (/setphone). Leaves the pool in ASK EACH TIME mode (like /setphone
+    --random) if this empties it."""
+    if not context.args:
+        await update.message.reply_text("Usage: /delphone <number>")
+        return
+    phone = context.args[0]
+    phones = global_settings.get("phones") or []
+    if phone not in phones:
+        await update.message.reply_text(f"📱 {phone} isn't in the current pool.")
+        return
+    phones.remove(phone)
+    if phones:
+        global_settings["phones"] = phones
+        global_settings["phone_idx"] = global_settings.get("phone_idx", 0) % len(phones)
+        save_settings()
+        await update.message.reply_text(f"📱 Removed {phone} — pool is now {len(phones)} number(s): "
+                                         f"{', '.join(phones)}")
+    else:
+        global_settings.pop("phones", None)
+        global_settings.pop("phone_idx", None)
+        save_settings()
+        await update.message.reply_text(
+            f"📱 Removed {phone} — pool is now empty. Phone mode: ASK EACH TIME."
+        )
 
 
 @require_role(is_master)
 async def show_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phone = global_settings.get("phone")
-    if phone:
-        await update.message.reply_text(f"📱 Phone mode: FIXED — {phone}")
+    phones = global_settings.get("phones")
+    if phones:
+        idx = global_settings.get("phone_idx", 0) % len(phones)
+        if len(phones) == 1:
+            await update.message.reply_text(f"📱 Phone mode: FIXED — {phones[0]}")
+        else:
+            await update.message.reply_text(
+                f"📱 Phone mode: ROTATING POOL ({len(phones)} numbers), next up: {phones[idx]}\n"
+                f"Pool: {', '.join(phones)}\n"
+                f"Round-trip cooldown between rounds: {ROUND_COOLDOWN_SECS:.0f}s"
+            )
     else:
         await update.message.reply_text("📱 Phone mode: ASK EACH TIME (default, per-signup)")
 
@@ -1967,8 +2116,7 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
         await end_session(session)
         await update.message.reply_text(f"⚠️ [#{sub_id}] {result['message']}")
         _pop_session(chat_id, sub_id)
-        if (chat_id, sub_id) in looping_chats:
-            await begin_signup(update, chat_id, sub_id)
+        await _auto_restart(update, chat_id, sub_id)
         return
 
     if not result["ok"]:
@@ -1984,8 +2132,7 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
         await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
         await end_session(session)
         _pop_session(chat_id, sub_id)
-        if (chat_id, sub_id) in looping_chats:
-            await begin_signup(update, chat_id, sub_id)
+        await _auto_restart(update, chat_id, sub_id)
         return
 
     logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
@@ -2026,7 +2173,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         status = "success" if result["ok"] else "failed"
         if result["ok"]:
-            logger.info(f"#{session.row_id} {session.acct['username']}: SUCCESS")
+            logger.info(f"#{session.row_id} {session.acct['username']}: SUCCESS -- "
+                        f"{result['message']}")
         else:
             logger.error(f"#{session.row_id} {session.acct['username']}: OTP verify FAILED -- "
                          f"{result['message']} (screenshot: {result.get('shot')})")
@@ -2047,8 +2195,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await end_session(session)
         _pop_session(chat_id, sub_id)
-        if (chat_id, sub_id) in looping_chats:
-            await begin_signup(update, chat_id, sub_id)
+        await _auto_restart(update, chat_id, sub_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2102,7 +2249,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_lines = ["⚙️ Settings (global)"]
         if SIGNUP_ENABLED:
             settings_lines.append("/setpassword <pw> | --random   ·   /password")
-            settings_lines.append("/setphone <number> | --random   ·   /phone — reuse one number every signup")
+            settings_lines.append("/setphone <n> [n2] ... | --random   ·   /addphone · /delphone · /phone — "
+                                   "rotate a phone pool every signup")
             settings_lines.append("/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)")
             settings_lines.append("/freenumber on|off — free the signup phone number after each account")
             settings_lines.append("/freenum <user> <pass> — log into an account and free its phone number")
@@ -2219,6 +2367,8 @@ def main():
         app.add_handler(CommandHandler("setpassword", setpassword))
         app.add_handler(CommandHandler("password", show_password))
         app.add_handler(CommandHandler("setphone", setphone_cmd))
+        app.add_handler(CommandHandler("addphone", addphone_cmd))
+        app.add_handler(CommandHandler("delphone", delphone_cmd))
         app.add_handler(CommandHandler("phone", show_phone))
         app.add_handler(CommandHandler("fast", fast_cmd))
         app.add_handler(CommandHandler("freenumber", freenumber_cmd))

@@ -856,7 +856,12 @@ def free_phone_number(page, site_url=None):
         return False, None, f"{prof.key} does not support freeing the signup phone number."
 
     new_phone = gen_free_phone()
-    page.wait_for_timeout(4000)  # let the session "settle" -- see docstring
+    # Let the session "settle" -- see docstring. Widened from 4s to 8s after a
+    # live /newacc run (2026-07-25) still occasionally hit "number already in
+    # use" on the round right after a reported free-number success -- the
+    # call itself gets a 200, but the site's own backend appears to need more
+    # than 4s to make the swap visible to the register endpoint again.
+    page.wait_for_timeout(8000)
     parts = urlsplit(site_url or page.url)
     path = f"{parts.scheme}://{parts.netloc}{prof.free_number_path}"
 
