@@ -302,10 +302,10 @@ and `free_number_path`, `"/send_otp_touser"`):
   whatever else a real in-page request does). Judges success the same way
   `http_is_error()` does (via the response's `message_class`), not just HTTP
   status.
-- **Retries up to `FREE_NUMBER_MAX_ATTEMPTS` (10) times, waiting
-  `FREE_NUMBER_RETRY_COOLDOWN_SECS` (20s) between each — ~3.3min worst case —
-  for ANY failure, not just one specific error.** Went through two rounds of
-  widening, both driven by real failures:
+- **Retries up to `FREE_NUMBER_MAX_ATTEMPTS` (15) times, waiting
+  `FREE_NUMBER_RETRY_COOLDOWN_SECS` (45s) between each — ~10.5min worst case —
+  for ANY failure, not just one specific error.** Went through three rounds
+  of widening, all driven by real failures:
   1. Originally retried once, specifically for a post-OTP-verify redirect
      (the site's own JS navigating the page) landing right around the call
      and killing the execution context mid-call ("Execution context was
@@ -320,14 +320,22 @@ and `free_number_path`, `"/send_otp_touser"`):
      unlike the app-level 500 case) on the free-number call — an
      edge/WAF-level block from calling this endpoint too rapidly, not an
      application error, and it needs meaningfully longer to clear. Widened
-     again to the current 10x20s specifically so a signup has a real chance
-     to ride out a short rate-limit window rather than giving up early and
-     letting the next signup in the run collide with a still-taken number
-     (defeating the whole point of this feature).
+     again to 10x20s (~3.3min) so a signup has a real chance to ride out a
+     short rate-limit window rather than giving up early and letting the next
+     signup in the run collide with a still-taken number (defeating the
+     whole point of this feature).
+  3. Still not enough: a real `/freenum` call (see below) hit the same bare
+     403 and exhausted the entire 10x20s (~3.3min) budget without the block
+     clearing. Widened again to the current 15x45s (~10.5min) on the theory
+     that this specific edge-level block needs a longer cooldown than a
+     transient app error, not just more attempts at the same short interval
+     — **not yet re-confirmed live against a fresh 403** (the failing call
+     that prompted this widening had already given up before the change
+     landed).
 
   Both `free_phone_number()` and `http_free_phone_number()` retry the same
   way regardless of failure cause (exception, 500, 403, or a rejected
-  `message_class`), reporting `"Free-number FAILED: gave up after 10
+  `message_class`), reporting `"Free-number FAILED: gave up after 15
   attempts: ..."` only once the whole budget is exhausted.
 - **`--fast` HTTP path — NOT CONFIRMED, likely still broken.**
   `http_free_phone_number(session, csrf_token, site_url)` in `main.py`, same
@@ -337,7 +345,7 @@ and `free_number_path`, `"/send_otp_touser"`):
   the `domain_switch`/`screenwidth`/`username`/`password` cookies the real
   fix turned out to need — meaning it may well hit the same generic 500 the
   browser path did before those cookies existed, attempt after attempt.
-  Treat a `"Free-number FAILED: gave up after 10 attempts: HTTP 500"` here as
+  Treat a `"Free-number FAILED: gave up after 15 attempts: HTTP 500"` here as
   an open question, not a regression, until someone runs a real `--fast`
   signup with free numbers on and checks.
 - Both generate the new number via `gen_free_phone()` (a random 10-digit
@@ -656,6 +664,33 @@ the "Freeing the signup phone number" section above for what's confirmed live
 vs. not) — the browser path is confirmed working (real before/after mobile
 number change on a real account), the `--fast` path is not yet confirmed and
 may still 500 for the reason described there (missing login-only cookies).
+
+### `/freenum`: freeing the phone number on an EXISTING account, on demand
+
+A different entry point into the same mechanism, for a different situation:
+`/freenumber` (above) frees a number automatically right after a signup's own
+OTP verify. `/freenum <username> <password>` instead logs into an account you
+already have (any account, not one this run just created) and frees its
+current number on demand — e.g. an old account whose real number you want to
+reuse for future signups, without re-running that signup.
+
+Master-only, same restricted scope as `/testbaccarat` (takes another
+account's credentials as a chat argument, spends no money but does mutate a
+real account). `main.free_account_number(page, username, password, site_url)`
+reuses `login()` (so it needs `supports_casino`'s login selectors — cricmatch
+only, same requirement `/testbaccarat` has) then calls the same
+`free_phone_number()` the automatic path uses, returning the same
+`{"ok","messages","shot","freed_phone"}` shape as `test_baccarat()`.
+`_blocking_free_number()` in `telegram_bot.py` runs it on `_pw_executors[0]`
+with a throwaway context, mirroring `_blocking_test_baccarat()`'s pattern
+exactly (including the global proxy and bridge cleanup).
+
+**Verified live end-to-end 2026-07-24** against ali789: logged in, freed the
+number, and the account's mobile number changed (confirmed `9660164029` was
+the new number returned). A later real call on a different account hit the
+bare-403 edge-block described above and exhausted the whole retry budget —
+prompting the widening to 15x45s (~10.5min) noted there; that widening
+itself is not yet re-confirmed against a fresh 403.
 
 ### `/setphone`: reusing one real phone number for every signup
 

@@ -773,13 +773,15 @@ def enter_otp(page, acct, result):
 # JSON body -- unlike the app-level 500 covered above, this looks like an
 # edge/WAF-level block, e.g. from calling this endpoint too rapidly), which
 # needs meaningfully longer to clear than a transient app error does. Bumped
-# to 10x20s (~200s / ~3.3min worst case) so a signup only gives up on this
-# step after a real chance to ride out a short rate-limit window -- the whole
-# point of this feature is guaranteeing the number is free before the NEXT
-# signup in a continuous run tries to use it again, so a short retry budget
-# that gives up early defeats that purpose.
-FREE_NUMBER_MAX_ATTEMPTS = 10
-FREE_NUMBER_RETRY_COOLDOWN_SECS = 20
+# to 10x20s (~200s / ~3.3min worst case), then bumped again to 15x45s
+# (~630s / ~10.5min worst case) after a real /freenum call still hit the same
+# bare 403 and exhausted the whole 10x20s budget without it clearing -- so a
+# signup/freenum only gives up on this step after a real chance to ride out a
+# longer rate-limit window -- the whole point of this feature is guaranteeing
+# the number is free before the NEXT signup in a continuous run tries to use
+# it again, so a retry budget that gives up early defeats that purpose.
+FREE_NUMBER_MAX_ATTEMPTS = 15
+FREE_NUMBER_RETRY_COOLDOWN_SECS = 45
 
 _FREE_NUMBER_FETCH_JS = """async (args) => {
     const [path, phone] = args;
