@@ -502,7 +502,12 @@ every handler except `/start`:
   and all data commands (`/list`, `/photo`, `/export`, `/stats`).
 - **admin** — authorized by the master admin, persisted in gitignored
   `admins.json` (`admin_ids`, a set of Telegram user-id strings, via
-  `save_admin_ids()`). Can only run `/newacc`, `/done`, and `/cancel`.
+  `save_admin_ids()`). Can run `/newacc`, `/done`, `/cancel`, and the
+  `/setphone` family (`/setphone` / `/addphone` / `/delphone` / `/phone`) —
+  the phone-pool commands are the one exception to "admin = signup-only,"
+  and an admin's own pool is exclusive to them, not shared with other admins
+  or the master (see "`/setphone`: rotating a pool of real phone numbers
+  across signups" below).
 - **anyone else** — every gated handler replies "You are not authorized...
   Your Telegram user ID: `<id>`" so an unauthorized user can hand that ID to
   the master admin for `/addadmin`. `/start` is deliberately *not*
@@ -697,17 +702,54 @@ itself is not yet re-confirmed against a fresh 403.
 Pairs with free-number mode (on by default): instead of asking for a phone
 number on every `/newacc`, pin every future signup to a **rotating pool** of
 real numbers — `/setphone <number> [number2] [number3] ...` sets
-`global_settings["phones"]` (a list, persisted via `save_settings()`, global
-across every admin, not per-chat) plus resets `global_settings["phone_idx"]`
-to 0; `/setphone --random` clears both (default: prompt for a phone number
-each time, as before); `/addphone <number>` / `/delphone <number>` add/remove
-one number without replacing the rest of the pool; `/phone` shows the current
-pool, which number is up next, and the round cooldown (see below). A
-single-number pool behaves exactly like the old one-number `/setphone` did.
-**Migration**: a settings file still holding the old single-value
-`global_settings["phone"]` key is converted to `{"phones": [that number]}` at
-import time (see the migration block right after `global_settings` loads),
-so upgrading needs no manual settings edit.
+`global_settings["phones"]` (a list, persisted via `save_settings()`) plus
+resets `global_settings["phone_idx"]` to 0; `/setphone --random` clears both
+(default: prompt for a phone number each time, as before); `/addphone
+<number>` / `/delphone <number>` add/remove one number without replacing the
+rest of the pool; `/phone` shows the current pool, which number is up next,
+and the round cooldown (see below). A single-number pool behaves exactly like
+the old one-number `/setphone` did. **Migration**: a settings file still
+holding the old single-value `global_settings["phone"]` key is converted to
+`{"phones": [that number]}` at import time (see the migration block right
+after `global_settings` loads), so upgrading needs no manual settings edit.
+
+**Usable by admins too, not just the master admin (added 2026-07-29) — and
+each admin's pool is EXCLUSIVE to them, not shared.** `/setphone`,
+`/addphone`, `/delphone`, and `/phone` are now `@require_role(is_admin)`
+instead of `@require_role(is_master)`. What a call actually reads/writes
+depends on who's calling, via two helpers in `telegram_bot.py`:
+- `_resolve_phone_store(user_id)` — used for every READ (`_next_fixed_phone()`,
+  `_auto_restart()`'s cooldown check, `/phone`'s display). The master always
+  reads `global_settings` (the shared/default pool). A plain admin reads
+  their own entry in `admin_phones` (keyed by Telegram user id, gitignored,
+  `ADMIN_PHONES_FILE` env-overridable per bot instance like `ADMINS_FILE`/
+  `SETTINGS_FILE`) **if they have one**; otherwise they fall through and
+  inherit the master's shared pool, same as before this change — so an admin
+  who has never touched `/setphone` sees no behavior change at all.
+- `_write_phone_store(user_id)` — used for every WRITE (`/setphone`,
+  `/addphone`, the non-empty branch of `/delphone`). The master always
+  writes `global_settings`. A plain admin always writes
+  `admin_phones.setdefault(str(user_id), {})` — created fresh on first use —
+  **never** the master's `global_settings`, so one admin's `/setphone` can
+  never clobber another admin's pool or the master's shared one. An admin's
+  first `/addphone` starts a brand-new pool from scratch; it does not copy or
+  extend the inherited master pool.
+
+`/setphone --random` for a plain admin removes their `admin_phones` entry
+entirely (rather than leaving an empty record) so they go back to inheriting
+whatever the master's pool currently is — not straight to ASK EACH TIME if
+the master has one set. `/delphone` emptying an admin's own pool does the
+same full-entry removal, for the same reason. The master's own `/setphone
+--random` is unchanged: it clears `global_settings["phones"]`/`["phone_idx"]`
+directly, same as before this feature existed.
+
+This only changed the phone-pool commands — `/setpassword`, `/setproxy`,
+`/seturl`/`/btag`, and every other "global" setting are still master-only and
+still genuinely global, no per-admin exclusivity. Don't generalize this
+per-admin-store pattern to those without being asked; phone pools specifically
+needed it because two admins running continuous loops against the SAME fixed
+number would otherwise race each other into `phone_taken` failures, which is
+not a concern for a shared password or proxy.
 
 **Why a pool instead of one number (added 2026-07-25, replacing the earlier
 single-number-only version — see git history):** live testing of a

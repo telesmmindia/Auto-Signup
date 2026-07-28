@@ -7,9 +7,9 @@ Two roles:
                     create/remove admins, set the GLOBAL proxy
                     and site URL (applies to every admin's signups), and
                     view/export all stored account data.
-    admin        -> authorized by the master admin (/addadmin). Can only
-                    run /newacc and /cancel -- no proxy/URL/admin/data
-                    commands.
+    admin        -> authorized by the master admin (/addadmin). Can run
+                    /newacc, /cancel, and the /setphone family (see below) --
+                    no proxy/URL/admin/data commands.
 Anyone else gets an "unauthorized" reply showing their own Telegram user ID
 so they can ask the master admin to add them. Telegram's native "/" command
 menu is scoped per user (BotCommandScopeChat) so each role only ever *sees*
@@ -44,17 +44,6 @@ Master-only commands:
     /setpassword <pw> -> fixed password for every future signup;
                          /setpassword --random reverts to a random one
     /password         -> show the current password mode
-    /setphone <n> [n2] [n3] ... -> rotate through these real phone number(s)
-                         for every future signup instead of asking each time
-                         -- /newacc then skips straight to asking for the
-                         OTP; pairs with free-number mode (on by default),
-                         which frees a number again right after the signup
-                         that used it, so it's ready by the time rotation
-                         comes back around. /setphone --random reverts to
-                         asking for a phone number each time (the default)
-    /addphone <number> / /delphone <number> -> add/remove one number from
-                         the pool without replacing the rest of it
-    /phone            -> show the current phone pool/mode
     /fast on|off      -> toggle HTTP-fast signup mode (no browser at all,
                          cricmatch247 only, ~10-20x faster; falls back to the
                          browser automatically for sites that don't support
@@ -84,6 +73,23 @@ Master-only commands:
 
 Everyone (master + admins):
     /cancel           -> abandon an in-progress signup (also stops looping)
+    /setphone <n> [n2] [n3] ... -> rotate through these real phone number(s)
+                         for every future signup instead of asking each time
+                         -- /newacc then skips straight to asking for the
+                         OTP; pairs with free-number mode (on by default),
+                         which frees a number again right after the signup
+                         that used it, so it's ready by the time rotation
+                         comes back around. /setphone --random reverts to
+                         asking for a phone number each time (the default).
+                         The MASTER's pool is the shared/default one, which
+                         any admin inherits until they set their own -- a
+                         plain ADMIN's /setphone instead creates their own
+                         pool, EXCLUSIVE to them (never touches the master's
+                         pool or another admin's)
+    /addphone <number> / /delphone <number> -> add/remove one number from
+                         the caller's own pool without replacing the rest
+    /phone            -> show the pool that applies to the caller (their own
+                         exclusive one if set, else the inherited shared one)
 
 Setup:
     cp .env.example .env
@@ -284,6 +290,14 @@ PAIRS_FILE = Path(os.environ.get("PAIRS_FILE", "pairs.json"))
 # Holds account usernames + balances (no passwords), so it's gitignored like
 # pairs.json all the same; give each bot instance its own via PAIR_RUNS_FILE.
 PAIR_RUNS_FILE = Path(os.environ.get("PAIR_RUNS_FILE", "pair_runs.json"))
+# Per-admin EXCLUSIVE phone pools (see /setphone) -- {"<user_id>": {"phones":
+# [...], "phone_idx": N}}, one entry per non-master admin who has set their
+# own pool. Deliberately separate from global_settings["phones"] (the
+# master's pool, which non-overriding admins still inherit -- see
+# _resolve_phone_store()) so one admin's /setphone can never clobber another
+# admin's or the master's. Overridable per bot instance for the same reason
+# as ADMINS_FILE/SETTINGS_FILE above.
+ADMIN_PHONES_FILE = Path(os.environ.get("ADMIN_PHONES_FILE", "admin_phones.json"))
 
 
 def _load_json(path, default):
@@ -314,6 +328,7 @@ if "phone" in global_settings and "phones" not in global_settings:
 pairs = _load_json(PAIRS_FILE, {"next_id": 1, "pairs": {}})
 # {"next_id": int, "runs": [ {run record, one per /run, see run_cmd} ]}.
 pair_runs = _load_json(PAIR_RUNS_FILE, {"next_id": 1, "runs": []})
+admin_phones = _load_json(ADMIN_PHONES_FILE, {})
 
 
 def save_admin_ids():
@@ -322,6 +337,10 @@ def save_admin_ids():
 
 def save_settings():
     _save_json(SETTINGS_FILE, global_settings)
+
+
+def save_admin_phones():
+    _save_json(ADMIN_PHONES_FILE, admin_phones)
 
 
 def save_pairs():
@@ -375,6 +394,10 @@ if SIGNUP_ENABLED:
         BotCommand("newacc", "Start continuous test signups"),
         BotCommand("done", "Stop continuous signups after the current one"),
         BotCommand("cancel", "Abandon an in-progress signup"),
+        BotCommand("setphone", "Rotate through these numbers every signup, or --random"),
+        BotCommand("addphone", "Add one number to your phone pool"),
+        BotCommand("delphone", "Remove one number from your phone pool"),
+        BotCommand("phone", "Show the current phone pool/mode"),
     ]
 ADMIN_COMMANDS.append(BotCommand("start", "Show available commands"))
 MASTER_COMMANDS = list(ADMIN_COMMANDS)
@@ -386,10 +409,6 @@ if SIGNUP_ENABLED:
         BotCommand("stats", "Counts of signups by status and btag"),
         BotCommand("setpassword", "Set a fixed password for all signups, or --random"),
         BotCommand("password", "Show the current password mode"),
-        BotCommand("setphone", "Rotate through these numbers every signup, or --random"),
-        BotCommand("addphone", "Add one number to the phone pool"),
-        BotCommand("delphone", "Remove one number from the phone pool"),
-        BotCommand("phone", "Show the current phone pool/mode"),
         BotCommand("fast", "Toggle HTTP-fast signup mode (no browser, cricmatch only)"),
         BotCommand("freenumber", "Toggle freeing the signup phone number after each account"),
         BotCommand("freenum", "Log into an account and free up its phone number"),
@@ -807,12 +826,41 @@ def _blocking_http_verify_otp(session, otp):
     return {"ok": True, "message": message, "shot": None, "freed_phone": freed_phone}
 
 
-def _next_fixed_phone():
-    """Pop the next number from the rotating phone pool (/setphone), advancing
-    and persisting global_settings["phone_idx"] so consecutive rounds -- and
+def _resolve_phone_store(user_id):
+    """Which dict a /setphone-family READ should consult for this user, and
+    whether it's the shared global one (for choosing the right save
+    function). The master's pool lives in global_settings and is the
+    fallback every non-overriding admin inherits; any admin who has run
+    /setphone (or /addphone) for themselves gets their OWN entry in
+    admin_phones, which takes priority and is exclusive to them -- it's
+    never read or written by anyone else, including the master."""
+    if not is_master(user_id):
+        own = admin_phones.get(str(user_id))
+        if own is not None:
+            return own, False
+    return global_settings, True
+
+
+def _write_phone_store(user_id):
+    """Where a /setphone-family WRITE should land for this caller. Unlike
+    _resolve_phone_store() above, this never falls back to the shared pool
+    for a plain admin -- a write always targets (and, on first use, creates)
+    that admin's own exclusive record, so setting/adding a number can never
+    modify the master's global pool or another admin's pool. Returns
+    (store_dict, save_fn)."""
+    if is_master(user_id):
+        return global_settings, save_settings
+    return admin_phones.setdefault(str(user_id), {}), save_admin_phones
+
+
+def _next_fixed_phone(user_id):
+    """Pop the next number from the caller's rotating phone pool (/setphone),
+    advancing and persisting its "phone_idx" so consecutive rounds -- and
     rounds across a bot restart -- don't reuse the same real number back to
-    back. Returns None if no pool is set (the default: ask for a phone number
-    each time).
+    back. Returns None if no pool applies to this user (the default: ask for
+    a phone number each time). See _resolve_phone_store() for which pool
+    ("own" exclusive vs the master's shared/default one) a given caller
+    actually reads from.
 
     Rotating across N numbers instead of pinning one gives each number N-1
     rounds of breathing room before it's needed again, which is what actually
@@ -822,29 +870,33 @@ def _next_fixed_phone():
     to make it visible to the register endpoint again (see the widened
     settle-wait in free_phone_number()) -- a single fixed number has zero
     slack for that, a pool of several has minutes of it for free."""
-    phones = global_settings.get("phones")
+    store, is_global = _resolve_phone_store(user_id)
+    phones = store.get("phones")
     if not phones:
         return None
-    idx = global_settings.get("phone_idx", 0) % len(phones)
-    global_settings["phone_idx"] = (idx + 1) % len(phones)
-    save_settings()
+    idx = store.get("phone_idx", 0) % len(phones)
+    store["phone_idx"] = (idx + 1) % len(phones)
+    (save_settings if is_global else save_admin_phones)()
     return phones[idx]
 
 
 async def _auto_restart(update, chat_id, sub_id):
     """Continue the continuous-mode loop (see /newacc) for lane sub_id, if
-    it's still active. When a fixed phone pool is set (ROUND_COOLDOWN_SECS,
-    /setphone), pause first -- the previous round's free-number swap (if any)
-    already ran synchronously to completion before this point, but the site's
-    backend still needs a moment to settle before the NEXT round's register
-    call reliably sees it (see free_phone_number()'s widened settle-wait) --
-    firing that call immediately risks both "already in use" and tripping a
-    WAF/rate-limit block from hammering the register endpoint. No delay when
-    no pool is set -- a human has to type the next phone number anyway, which
-    already paces things."""
+    it's still active. When a fixed phone pool applies to this caller
+    (ROUND_COOLDOWN_SECS, /setphone -- their own exclusive pool if they have
+    one, otherwise the master's shared/default one, see
+    _resolve_phone_store()), pause first -- the previous round's free-number
+    swap (if any) already ran synchronously to completion before this point,
+    but the site's backend still needs a moment to settle before the NEXT
+    round's register call reliably sees it (see free_phone_number()'s widened
+    settle-wait) -- firing that call immediately risks both "already in use"
+    and tripping a WAF/rate-limit block from hammering the register endpoint.
+    No delay when no pool is set -- a human has to type the next phone number
+    anyway, which already paces things."""
     if (chat_id, sub_id) not in looping_chats:
         return
-    if global_settings.get("phones"):
+    store, _ = _resolve_phone_store(update.effective_user.id)
+    if store.get("phones"):
         await asyncio.sleep(ROUND_COOLDOWN_SECS)
     await begin_signup(update, chat_id, sub_id)
 
@@ -900,16 +952,18 @@ async def begin_signup(update, chat_id, sub_id):
     tag = "⚡ " if session.use_fast else ""
     tag += "🔓 " if session.free_number else ""
 
-    # /setphone (global_settings["phones"]) pins every future signup to a
-    # rotating pool of real numbers instead of prompting for one each time --
-    # meant to pair with free-number mode: each number gets freed right after
-    # the signup that used it verifies, and _next_fixed_phone() rotates to a
-    # DIFFERENT number next round rather than reusing the same one
-    # immediately, so a slow-to-settle swap (see ROUND_COOLDOWN_SECS) has the
-    # rest of the pool's rounds as extra slack before it's needed again. If a
-    # number somehow still isn't free by the time its turn comes back around,
-    # that round just reports phone_taken like any other run.
-    fixed_phone = _next_fixed_phone()
+    # /setphone pins every future signup to a rotating pool of real numbers
+    # instead of prompting for one each time -- meant to pair with
+    # free-number mode: each number gets freed right after the signup that
+    # used it verifies, and _next_fixed_phone() rotates to a DIFFERENT number
+    # next round rather than reusing the same one immediately, so a
+    # slow-to-settle swap (see ROUND_COOLDOWN_SECS) has the rest of the
+    # pool's rounds as extra slack before it's needed again. If a number
+    # somehow still isn't free by the time its turn comes back around, that
+    # round just reports phone_taken like any other run. Each admin's own
+    # pool (if they've set one) is exclusive to them; otherwise they inherit
+    # the master's shared/default pool -- see _resolve_phone_store().
+    fixed_phone = _next_fixed_phone(update.effective_user.id)
     if fixed_phone:
         session.stage = "await_otp"  # _submit_phone() sets this properly; harmless placeholder
         await _submit_phone(update, chat_id, sub_id, session, fixed_phone, tag=tag,
@@ -1040,7 +1094,7 @@ async def show_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔑 Password mode: RANDOM (default, per-signup)")
 
 
-@require_role(is_master)
+@require_role(is_admin)
 async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/setphone <number> [number2] [number3] ... -- replace the whole fixed
     phone pool with the given number(s), pinning every future /newacc to
@@ -1057,24 +1111,49 @@ async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     the old /setphone did, just with less slack. If a number somehow still
     isn't free by the time its turn comes back around, that round just
     reports phone_taken like any other run -- there's no fallback beyond the
-    rest of the pool."""
+    rest of the pool.
+
+    Usable by admins now, not just the master -- but the two write to
+    different places (see _write_phone_store()). The master's pool is the
+    shared/default one, inherited by any admin who hasn't set their own.
+    A plain admin's /setphone instead creates/replaces THEIR OWN pool,
+    exclusive to them -- it never touches the master's pool or any other
+    admin's, and takes priority over the shared one for that admin's own
+    /newacc runs."""
+    user_id = update.effective_user.id
+    master = is_master(user_id)
     if not context.args:
         await update.message.reply_text(
             "Usage: /setphone <number> [number2] [number3] ...  (rotate through these for every "
-            "future signup)\n"
+            "future signup of yours)\n"
             "/setphone --random  (back to asking for a phone number each time, the default)\n"
             "/addphone <number> · /delphone <number> — add/remove one number without "
-            "replacing the whole pool"
+            "replacing the whole pool" +
+            ("" if master else "\n(This is YOUR OWN pool, exclusive to you -- it doesn't affect "
+                                "the master's shared pool or other admins'.)")
         )
         return
     if context.args[0] == "--random":
-        changed = global_settings.pop("phones", None) is not None
-        changed = (global_settings.pop("phone_idx", None) is not None) or changed
-        if changed:
-            save_settings()
-        await update.message.reply_text(
-            "📱 Phone mode: ASK EACH TIME — /newacc will prompt for a phone number again."
-        )
+        if master:
+            changed = global_settings.pop("phones", None) is not None
+            changed = (global_settings.pop("phone_idx", None) is not None) or changed
+            if changed:
+                save_settings()
+            await update.message.reply_text(
+                "📱 Phone mode: ASK EACH TIME — /newacc will prompt for a phone number again."
+            )
+        else:
+            changed = admin_phones.pop(str(user_id), None) is not None
+            if changed:
+                save_admin_phones()
+            if global_settings.get("phones"):
+                await update.message.reply_text(
+                    "📱 Your phone mode: back to the master's shared pool (your own override was removed)."
+                )
+            else:
+                await update.message.reply_text(
+                    "📱 Your phone mode: ASK EACH TIME — /newacc will prompt for a phone number again."
+                )
         return
     bad = [p for p in context.args if not _valid_phone(p)]
     if bad:
@@ -1082,12 +1161,14 @@ async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"These don't look like valid phone numbers (digits only, 7-15 characters): {', '.join(bad)}"
         )
         return
-    global_settings["phones"] = list(context.args)
-    global_settings["phone_idx"] = 0
-    save_settings()
+    store, save_fn = _write_phone_store(user_id)
+    store["phones"] = list(context.args)
+    store["phone_idx"] = 0
+    save_fn()
+    scope = "" if master else " for your signups only (exclusive to you)"
     if len(context.args) == 1:
         await update.message.reply_text(
-            f"📱 Phone mode: FIXED — every future signup will use: {context.args[0]}\n"
+            f"📱 Phone mode: FIXED{scope} — every future signup will use: {context.args[0]}\n"
             "/newacc will skip straight to asking for the OTP. Add more numbers with /addphone "
             "to rotate through a pool instead, or /setphone --random to go back to being asked "
             "each time."
@@ -1095,18 +1176,22 @@ async def setphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         listed = ", ".join(context.args)
         await update.message.reply_text(
-            f"📱 Phone mode: ROTATING POOL ({len(context.args)} numbers) — {listed}\n"
+            f"📱 Phone mode: ROTATING POOL ({len(context.args)} numbers){scope} — {listed}\n"
             "/newacc will skip straight to asking for the OTP, cycling through these one per "
             "round. /setphone --random to go back to being asked each time."
         )
 
 
-@require_role(is_master)
+@require_role(is_admin)
 async def addphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/addphone <number> -- append one number to the fixed phone pool
-    (/setphone) without replacing the rest of it. Does not reset the
+    """/addphone <number> -- append one number to the caller's fixed phone
+    pool (/setphone) without replacing the rest of it. Does not reset the
     rotation position, so already-scheduled numbers keep their order; the new
-    number joins the end of the rotation."""
+    number joins the end of the rotation. Same master-vs-admin scoping as
+    /setphone (see _write_phone_store()) -- a plain admin's first /addphone
+    creates their own exclusive pool from scratch, it does not copy or
+    extend the master's shared one."""
+    user_id = update.effective_user.id
     if not context.args:
         await update.message.reply_text("Usage: /addphone <number>")
         return
@@ -1116,55 +1201,74 @@ async def addphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "That doesn't look like a valid phone number (digits only, 7-15 characters)."
         )
         return
-    phones = global_settings.setdefault("phones", [])
+    store, save_fn = _write_phone_store(user_id)
+    phones = store.setdefault("phones", [])
     if phone in phones:
         await update.message.reply_text(f"📱 {phone} is already in the pool ({len(phones)} numbers).")
         return
     phones.append(phone)
-    save_settings()
+    save_fn()
     await update.message.reply_text(f"📱 Added {phone} — pool is now {len(phones)} number(s): "
                                      f"{', '.join(phones)}")
 
 
-@require_role(is_master)
+@require_role(is_admin)
 async def delphone_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/delphone <number> -- remove one number from the fixed phone pool
-    (/setphone). Leaves the pool in ASK EACH TIME mode (like /setphone
-    --random) if this empties it."""
+    """/delphone <number> -- remove one number from the caller's fixed phone
+    pool (/setphone). Leaves that pool in ASK EACH TIME mode (like /setphone
+    --random) if this empties it -- for a plain admin, that also fully
+    removes their override so they go back to inheriting the master's
+    shared pool (see _resolve_phone_store())."""
+    user_id = update.effective_user.id
+    master = is_master(user_id)
     if not context.args:
         await update.message.reply_text("Usage: /delphone <number>")
         return
     phone = context.args[0]
-    phones = global_settings.get("phones") or []
+    store, save_fn = _write_phone_store(user_id)
+    phones = store.get("phones") or []
     if phone not in phones:
-        await update.message.reply_text(f"📱 {phone} isn't in the current pool.")
+        await update.message.reply_text(f"📱 {phone} isn't in your current pool.")
         return
     phones.remove(phone)
     if phones:
-        global_settings["phones"] = phones
-        global_settings["phone_idx"] = global_settings.get("phone_idx", 0) % len(phones)
-        save_settings()
+        store["phones"] = phones
+        store["phone_idx"] = store.get("phone_idx", 0) % len(phones)
+        save_fn()
         await update.message.reply_text(f"📱 Removed {phone} — pool is now {len(phones)} number(s): "
                                          f"{', '.join(phones)}")
     else:
-        global_settings.pop("phones", None)
-        global_settings.pop("phone_idx", None)
-        save_settings()
+        if master:
+            store.pop("phones", None)
+            store.pop("phone_idx", None)
+        else:
+            admin_phones.pop(str(user_id), None)
+        save_fn()
         await update.message.reply_text(
             f"📱 Removed {phone} — pool is now empty. Phone mode: ASK EACH TIME."
         )
 
 
-@require_role(is_master)
+@require_role(is_admin)
 async def show_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    phones = global_settings.get("phones")
+    """Shows the pool that actually applies to the CALLER: their own
+    exclusive one if they've set one (see _resolve_phone_store()), otherwise
+    the master's shared/default pool they're inheriting, otherwise ASK EACH
+    TIME."""
+    user_id = update.effective_user.id
+    master = is_master(user_id)
+    store, is_global = _resolve_phone_store(user_id)
+    phones = store.get("phones")
     if phones:
-        idx = global_settings.get("phone_idx", 0) % len(phones)
+        idx = store.get("phone_idx", 0) % len(phones)
+        scope = "" if master or not is_global else " (shared, set by the master admin)"
+        owner = "" if master or is_global else " (exclusive to you)"
         if len(phones) == 1:
-            await update.message.reply_text(f"📱 Phone mode: FIXED — {phones[0]}")
+            await update.message.reply_text(f"📱 Phone mode: FIXED{scope}{owner} — {phones[0]}")
         else:
             await update.message.reply_text(
-                f"📱 Phone mode: ROTATING POOL ({len(phones)} numbers), next up: {phones[idx]}\n"
+                f"📱 Phone mode: ROTATING POOL ({len(phones)} numbers){scope}{owner}, "
+                f"next up: {phones[idx]}\n"
                 f"Pool: {', '.join(phones)}\n"
                 f"Round-trip cooldown between rounds: {ROUND_COOLDOWN_SECS:.0f}s"
             )
@@ -2219,7 +2323,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"auto-starts the next). count runs that many in parallel (1-{MAX_PARALLEL_NEWACC}); "
         "reply \"<lane> <phone/OTP>\" when more than one is active\n"
         "/done [lane] — stop after the current signup finishes\n"
-        "/cancel [lane] — abandon in-progress signup(s)"
+        "/cancel [lane] — abandon in-progress signup(s)\n"
+        "/setphone <n> [n2] ... | --random · /addphone · /delphone · /phone — rotate a phone "
+        "pool for YOUR signups; exclusive to you (falls back to the master's shared pool, if "
+        "any is set, until you set your own)"
     )
     if is_master(user_id):
         sections = []
@@ -2249,8 +2356,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings_lines = ["⚙️ Settings (global)"]
         if SIGNUP_ENABLED:
             settings_lines.append("/setpassword <pw> | --random   ·   /password")
-            settings_lines.append("/setphone <n> [n2] ... | --random   ·   /addphone · /delphone · /phone — "
-                                   "rotate a phone pool every signup")
+            settings_lines.append("(/setphone etc. are under 📝 Signups above — yours as master sets "
+                                   "the shared/default pool; each admin can also set their own "
+                                   "exclusive one)")
             settings_lines.append("/fast on|off — HTTP-fast signup mode (no browser, cricmatch only)")
             settings_lines.append("/freenumber on|off — free the signup phone number after each account")
             settings_lines.append("/freenum <user> <pass> — log into an account and free its phone number")
@@ -2412,6 +2520,7 @@ def main():
     logger.info(f"Bot starting... env={_env_file} mode={BOT_MODE} site={BOT_SITE_URL} "
                 f"concurrency={BOT_CONCURRENCY} "
                 f"admins_file={ADMINS_FILE} settings_file={SETTINGS_FILE} "
+                f"admin_phones_file={ADMIN_PHONES_FILE} "
                 f"pairs_file={PAIRS_FILE} pair_runs_file={PAIR_RUNS_FILE}")
     try:
         # bootstrap_retries=-1: keep retrying the startup get_me() on transient

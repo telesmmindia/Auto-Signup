@@ -6,6 +6,8 @@ credentials.log
 accounts.db
 admins.json
 admins.*.json
+admin_phones.json
+admin_phones.*.json
 bot_settings.json
 bot_settings.*.json
 pairs.json
