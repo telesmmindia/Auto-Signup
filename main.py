@@ -924,6 +924,132 @@ def free_account_number(page, username, password, site_url=None):
     return result
 
 
+def read_wallet_balance(page):
+    """Best-effort scrape of the site's OWN wallet balance from the
+    logged-in header (cricmatch247 shows "MY WALLET" there) -- NOT the
+    in-game Evolution balance read_game_balance() reads from a live casino
+    table's own frame; this reads the site chrome around it instead.
+
+    NOT YET VERIFIED LIVE: no real selector for this element has been
+    inspected yet (unlike login()'s selectors, which come from
+    sites/cricmatch.py and were confirmed against real DOM). Run
+    inspect_wallet.py against one real account and compare its output to
+    what this returns before trusting these numbers for anything real.
+
+    Deliberately does not hardcode a single guessed selector -- instead it
+    scans the page for any short text node containing "wallet" and looks
+    for a rupee amount in that element or its immediate neighbors (label and
+    value are commonly split across two nodes, as they are for the in-game
+    balance read_game_balance() reads). Returns an int (rupees) or None if
+    nothing matched; a caller must treat None as "selector needs updating,"
+    never as "balance is 0.\""""
+    try:
+        raw = page.evaluate(
+            """() => {
+                const rupee = /[₹]\\s?([\\d,]+(?:\\.\\d+)?)/;
+                const nodes = Array.from(document.querySelectorAll('body *'));
+                for (const el of nodes) {
+                    const text = (el.innerText || '').trim();
+                    if (!text || text.length > 40 || !/wallet/i.test(text)) continue;
+                    const candidates = [el, el.nextElementSibling, el.parentElement]
+                        .filter(Boolean);
+                    for (const c of candidates) {
+                        const m = rupee.exec(c.innerText || '');
+                        if (m) return m[1];
+                    }
+                }
+                return null;
+            }"""
+        )
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return int(float(raw.replace(",", "")))
+    except ValueError:
+        return None
+
+
+def check_account_balance(page, username, password, site_url=None):
+    """Log into an EXISTING account and read its site wallet balance. Returns
+    a result dict in the same shape convention as free_account_number()/
+    test_baccarat(): {"ok", "balance", "messages", "shot"}. Read-only -- does
+    not place a bet or change anything, and does not write to accounts.db
+    (like free_account_number(), this operates on an account someone already
+    has, not one generated here)."""
+    result = {"ok": False, "balance": None, "messages": [], "shot": None}
+
+    outcome, msgs = login(page, username, password, site_url=site_url)
+    if outcome != "ok":
+        result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
+        SHOTS_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        shot = SHOTS_DIR / f"{username}-{stamp}-balance-login-failed.png"
+        page.screenshot(path=str(shot))
+        result["shot"] = str(shot)
+        return result
+
+    balance = read_wallet_balance(page)
+    SHOTS_DIR.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    shot = SHOTS_DIR / f"{username}-{stamp}-balance.png"
+    page.screenshot(path=str(shot))
+    result["shot"] = str(shot)
+    if balance is None:
+        result["messages"] = ["Logged in, but couldn't find the wallet balance on the page "
+                               "(selector not yet verified live -- see inspect_wallet.py)."]
+        return result
+
+    result["ok"] = True
+    result["balance"] = balance
+    result["messages"] = [f"Balance: ₹{balance}"]
+    return result
+
+
+def run_balance_check(username, password, site_url=None, proxy=None):
+    """Standalone single-call entry point for one account's balance check:
+    launches its own throwaway Playwright browser + context (same
+    _launch_pw_browser()/parse_proxy()/maybe_bridge_proxy() pattern
+    run_paired_hedge() uses per side), logs in, reads the balance, and tears
+    everything down on every exit path -- the one-call convention
+    balance_checker.py (or any other caller) uses, mirroring how
+    run_paired_hedge() is one call for a whole hedge run rather than exposing
+    browser plumbing to its callers. Returns check_account_balance()'s result
+    dict."""
+    result = {"ok": False, "balance": None, "messages": [], "shot": None}
+    try:
+        pw, browser = _launch_pw_browser()
+    except Exception as e:
+        result["messages"] = [f"Failed to launch browser: {e}"]
+        return result
+
+    bridge_proc = None
+    try:
+        proxy_conf = parse_proxy(proxy) if proxy else None
+        try:
+            proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+        except RuntimeError as e:
+            result["messages"] = [f"Proxy bridge failed to start: {e}"]
+            return result
+        context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        try:
+            page = context.new_page()
+            result = check_account_balance(page, username, password, site_url=site_url)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+    finally:
+        stop_bridge(bridge_proc)
+        try:
+            browser.close()
+        finally:
+            pw.stop()
+    return result
+
+
 def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy=None,
                 free_number=False):
     """Run one signup attempt. Returns a result dict.

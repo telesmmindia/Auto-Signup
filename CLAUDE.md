@@ -1778,6 +1778,101 @@ any other terminal STATUS -- fix the cell value and clear STATUS to retry.
 (env resolution, proxy passthrough, syntax) but no service account has been
 created yet, so no row has actually been polled or run end-to-end.
 
+## Sheet-driven balance checking (`balance_checker.py`)
+
+A separate feature from the hedge sheet above, added on request: instead of
+running hedges, this keeps a Google Sheet of plain username/password rows
+updated with each account's current site wallet balance, on a recurring
+poll -- e.g. to keep an eye on a pool of accounts' funds without checking
+each one by hand.
+
+Sheet layout (row 1 = header): `A: USERNAME | B: PASSWORD | C: BALANCE |
+D: STATUS`. **Deliberately its own sheet, not the hedge one** -- different
+columns, different purpose, and reusing the hedge sheet would risk this
+script and `sheet_watcher.py` (or the Telegram bot's `/run`) writing over
+each other's cells.
+
+Unlike the hedge sheet's queue semantics (a row runs once, STATUS then
+blocks it until cleared), there's no "already done" state here: **every**
+row with A+B filled gets re-checked on every poll cycle (default
+`BALANCE_POLL_SECONDS=300`, deliberately much longer than the hedge sheet's
+20s queue poll -- a balance check is a full login, easily 15-30s+ each, and
+this site rate-limits/WAF-blocks aggressive automated login traffic, same
+caveat as everywhere else in this file). STATUS shows the outcome of the
+most recent check (`✅ checked <timestamp>` or `❌ <timestamp> — <error>`);
+BALANCE holds the last **successfully** read number and is deliberately left
+alone on a failed check, so one transient login hiccup or WAF block doesn't
+blank out the last known-good figure.
+
+Engine (`main.py`):
+- `read_wallet_balance(page)` — scrapes the site's own header wallet
+  balance (cricmatch247 shows "MY WALLET" there), **not** the in-game
+  Evolution balance `read_game_balance()` reads elsewhere in this file (that
+  one reads a live casino table's own frame; this reads the surrounding site
+  chrome). **NOT YET VERIFIED LIVE** — no real selector has been inspected
+  against actual DOM yet (unlike `login()`'s selectors, which came from
+  `inspect_form.py`-style live inspection against `sites/cricmatch.py`).
+  Rather than guess a single class name, it scans for any short text node
+  containing "wallet" and looks for a rupee amount in that element or its
+  immediate neighbor (label/value commonly split across two nodes, same
+  pattern `read_game_balance()` relies on) — returns an int or `None`, and a
+  `None` must be read as "selector needs updating," never as "balance is 0."
+  `inspect_wallet.py` (new script, mirrors the `inspect_form.py`/
+  `probe_evo_lobby.py` precedent of "dump the DOM, then write selectors from
+  what's real") logs into one real account read-only and dumps every
+  wallet/₹-looking element plus what `read_wallet_balance()` currently
+  returns, so the heuristic can be checked/replaced with a real selector
+  once a real account is available to test against.
+- `check_account_balance(page, username, password, site_url=None)` — logs in
+  via the existing `login()` (same requirement as `test_baccarat()`/
+  `free_account_number()`: needs `supports_casino`'s login selectors,
+  cricmatch247 only) then calls `read_wallet_balance()`. Returns
+  `{"ok","balance","messages","shot"}`, same result-dict convention as
+  `free_account_number()`. Read-only — never places a bet, never writes to
+  `accounts.db` (operates on an account someone already has, not one this
+  run generated).
+- `run_balance_check(username, password, site_url=None, proxy=None)` — the
+  one-call entry point `balance_checker.py` actually uses: launches its own
+  throwaway browser + context (`_launch_pw_browser()` /
+  `parse_proxy()`/`maybe_bridge_proxy()`, the same per-side pattern
+  `run_paired_hedge()` uses), calls `check_account_balance()`, and tears
+  everything down (context, proxy bridge, browser) on every exit path —
+  mirrors `run_paired_hedge()` being one call for a whole hedge run rather
+  than exposing Playwright plumbing to callers.
+
+`balance_checker.py` itself mirrors `sheet_watcher.py`'s shape closely: same
+`--env <path>` flag and `load_dotenv(_env_file, override=True)`-after-
+`import main` gotcha, same `current_proxy()` pattern (re-reads `--env`'s
+`SETTINGS_FILE` live every check, so `/setproxy` on that bot instance applies
+automatically), same `--once` flag for a single pass. Config is separate from
+the hedge sheet's env vars so the two can point at different spreadsheets:
+`BALANCE_SHEET_SPREADSHEET_ID` (required — refuses to start without it, no
+default sheet baked in, unlike `sheet_watcher.py`'s hardcoded hedge-sheet
+ID), `BALANCE_SHEET_WORKSHEET_GID` (default `"0"`), `BALANCE_SHEET_CREDENTIALS_FILE`
+(falls back to `SHEET_CREDENTIALS_FILE`, then `service_account.json` — reuse
+the same service account as the hedge sheet, just share it with this new
+sheet too), `BALANCE_POLL_SECONDS` (default 300), `BALANCE_MAX_CONCURRENT`
+(default 2, same "size to your proxy/IP diversity" caveat as
+`MAX_CONCURRENT_RUNS` elsewhere).
+
+Run:
+```
+BALANCE_SHEET_SPREADSHEET_ID=<sheet id> .venv/bin/python balance_checker.py --env .env.cricmatch
+```
+
+**Setup steps are identical to the hedge sheet's** (see "Requires a Google
+Cloud service account" above) — same service account, same JSON key, just
+share the balance sheet with it too (Editor access, since BALANCE/STATUS get
+written back).
+
+**Not yet run against a live sheet or a live account** — built and
+import/wiring-verified (env resolution including the required-spreadsheet-id
+check, proxy passthrough, syntax) but no Google Sheet has been created for
+this yet and no service account JSON has been provided. The wallet-balance
+selector itself is also unverified (see `read_wallet_balance()` above) —
+run `inspect_wallet.py` against one real account before trusting any number
+this produces.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an
