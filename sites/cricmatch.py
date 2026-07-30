@@ -45,6 +45,18 @@ PROFILE = SiteProfile(
     supports_http_login=True,
     http_login_path="/login",
     http_balance_path="/api2/v2/getBalance",
+    # Confirmed live 2026-07-30 via a real, user-captured HTTP request/response
+    # (manual request interception, same investigative method used for
+    # send_otp_touser): on an authenticated session, POST /changePassword with
+    # oldPassword/newPassword/_token changes the login password immediately --
+    # verified end-to-end by logging in with the NEW password afterward and
+    # confirming the OLD one no longer works. Response shape is its OWN
+    # convention, NOT the message/message_class shape most other endpoints
+    # here use: {"status":200,"msg":"Password updated successfully"} -- note
+    # the key is "msg", not "message", and there is no "message_class" field,
+    # so http_is_error() does not apply to this endpoint.
+    supports_change_password=True,
+    change_password_path="/changePassword",
     sel={
         # ---- signup ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",

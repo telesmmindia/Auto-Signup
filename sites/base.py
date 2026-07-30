@@ -93,3 +93,15 @@ class SiteProfile:
     # Path that returns the logged-in account's wallet balance as JSON, used
     # only when supports_http_login.
     http_balance_path: str = "/api2/v2/getBalance"
+
+    # Whether an EXISTING, logged-in account's password can be changed via a
+    # direct POST to change_password_path (oldPassword/newPassword/_token) --
+    # confirmed live via a captured real request/response (see CLAUDE.md).
+    # False -> /changepassword refuses cleanly instead of guessing an
+    # unconfirmed endpoint.
+    supports_change_password: bool = False
+
+    # Path (relative to the site's origin) that accepts oldPassword/
+    # newPassword/_token and changes the logged-in account's password. Used
+    # only when supports_change_password is True.
+    change_password_path: str = "/changePassword"

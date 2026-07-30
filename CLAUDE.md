@@ -405,30 +405,36 @@ bot identity/token in Telegram and, more importantly, its own worker
 thread/browser — signups for different sites no longer serialize on the
 single shared `_pw_executor`.
 
-The current production layout is **three** bots (since 2026-07-20):
-cricmatch signup (`.env.cricmatch`, `BOT_MODE=signup`), spin24star signup
-(`.env.spin24star`, `BOT_MODE=signup`), and cricmatch gameplay
-(`.env.gameplay`, `BOT_MODE=gameplay` — the casino/hedge commands only).
+The current production layout is cricmatch signup (`.env.cricmatch`,
+`BOT_MODE=signup`), spin24star signup (`.env.spin24star`, `BOT_MODE=signup`),
+cricmatch gameplay (`.env.gameplay`, `BOT_MODE=gameplay` — the casino/hedge
+commands only), cricmatch stock market hedge (`.env.stockmarket`,
+`BOT_MODE=stockmarket`), and cricmatch password-change (`.env.password`,
+`BOT_MODE=password` — `/changepassword` only, since 2026-07-30).
 
 ```
 cp .env.cricmatch.example .env.cricmatch
 cp .env.spin24star.example .env.spin24star
 cp .env.gameplay.example .env.gameplay
+cp .env.stockmarket.example .env.stockmarket
+cp .env.password.example .env.password
 # edit each: a DIFFERENT TELEGRAM_BOT_TOKEN (one @BotFather bot per process),
 # BOT_SITE_URL, BOT_MODE, and distinct ADMINS_FILE / SETTINGS_FILE paths
 .venv/bin/python telegram_bot.py --env .env.cricmatch
-.venv/bin/python telegram_bot.py --env .env.spin24star   # separate terminal/tmux pane
-.venv/bin/python telegram_bot.py --env .env.gameplay     # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.spin24star    # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.gameplay      # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.stockmarket   # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.password      # separate terminal/tmux pane
 ```
 
-`BOT_MODE` (`signup` | `gameplay` | `stockmarket` | `all`, default `all` so a
-plain `.env` single-bot setup is unchanged) controls which command set an
-instance exposes, enforced at handler-registration time in `main()` — an
-out-of-mode command simply doesn't exist on that bot (Telegram ignores it;
-there's no "wrong bot" reply), and the per-role "/" menus
+`BOT_MODE` (`signup` | `gameplay` | `stockmarket` | `password` | `all`,
+default `all` so a plain `.env` single-bot setup is unchanged) controls which
+command set an instance exposes, enforced at handler-registration time in
+`main()` — an out-of-mode command simply doesn't exist on that bot (Telegram
+ignores it; there's no "wrong bot" reply), and the per-role "/" menus
 (`ADMIN_COMMANDS`/`MASTER_COMMANDS`) plus `/start`'s help text are built
-from the same `SIGNUP_ENABLED`/`GAMEPLAY_ENABLED` flags so they never
-advertise a command the instance doesn't have. The split:
+from the same `SIGNUP_ENABLED`/`GAMEPLAY_ENABLED`/`PASSWORD_ENABLED` flags so
+they never advertise a command the instance doesn't have. The split:
 - **signup**: `/newacc` `/done` `/cancel`, data (`/list` `/photo` `/export`
   `/stats`), `/setpassword` `/password` `/fast`, URL/btag commands.
 - **gameplay**: `/testbaccarat`, `/pair` `/pairs` `/delpair`, `/run`
@@ -436,7 +442,11 @@ advertise a command the instance doesn't have. The split:
   gameplay-mode bot has nothing to run — `/start` tells them so. URL
   commands are excluded on purpose: gameplay always targets `BOT_SITE_URL`
   directly, `/seturl` never affected it.
-- **both modes**: `/start` `/help`, proxy commands (`/setproxy` `/proxy`
+- **password**: `/changepassword` only, master-only, its own exclusive mode
+  like `stockmarket` (deliberately NOT part of `"all"`, so a plain single-bot
+  setup never accidentally exposes a command that mutates a real account's
+  login credential) — see `/changepassword`'s own section above.
+- **both/all modes**: `/start` `/help`, proxy commands (`/setproxy` `/proxy`
   `/clearproxy` `/testproxy` — hedge runs route through the global proxy
   too), and admin management. The `handle_message` phone/OTP text handler is
   only registered in signup modes. Browser-slot warmup stays in both
@@ -696,6 +706,78 @@ the new number returned). A later real call on a different account hit the
 bare-403 edge-block described above and exhausted the whole retry budget —
 prompting the widening to 15x45s (~10.5min) noted there; that widening
 itself is not yet re-confirmed against a fresh 403.
+
+### `/changepassword`: changing the password on an EXISTING account
+
+A separate, standalone bot mode (`BOT_MODE=password`, see "Running one bot
+per site / per role" below), for the same kind of on-demand, arbitrary-
+account action as `/freenum` above, but for the login password instead of
+the phone number: `/changepassword <username> <current_password>
+[new_password]` logs into an account you already have and changes its
+password. If `new_password` is omitted, a random policy-compliant one (via
+the same `gen_password()` signup uses — 5-60 chars, upper/lower/digit/
+special) is generated and reported back in the reply.
+
+**Finding the mechanism was genuinely greenfield** — unlike free-number
+(which had `/send_otp_touser` from the start of that investigation), nobody
+had ever looked for a change-password endpoint on this site before. A
+read-only discovery pass (`inspect_account_settings.py`, modeled on
+`inspect_wallet.py`) logged into a real account, dumped every password-
+related DOM element, and captured same-origin network traffic — and found
+**nothing**: the only password-reset mechanism anywhere in the page's
+~650KB source (checked twice, across two live runs) was the OTP-based
+"Forgot Password?" flow attached to the *login modal* (`#resetNewPassword`,
+`#cnfmPassword`, `.resetBTN`), not a self-service change-password form
+reachable from an authenticated session — the `#acctSec` "Account Details"
+flyout turned out to be a static marketing/support sidebar (Quick Links,
+Promotions, Help), with no internal link anywhere in the DOM to any
+`/account`, `/profile`, or `/settings`-style route.
+
+The real endpoint was instead found the same way `/send_otp_touser` was —
+**manual HTTP request interception** against a real account's own browser
+session (not automated discovery) — confirming `POST
+https://cricmatch247.com/changePassword` with body
+`oldPassword=<current>&newPassword=<new>&_token=<csrf>`, response `200`
+`{"status":200,"msg":"Password updated successfully"}`. Two things worth
+flagging so nobody re-guesses them:
+1. **The response shape is its own convention**, not the `{"message",
+   "message_class"}` shape most other endpoints here use (register,
+   send_otp_touser) — the key is `"msg"`, not `"message"`, and there is no
+   `"message_class"` field. `change_account_password()` (`main.py`) judges
+   success via the body's own `"status"` field equalling `200`, not
+   `http_is_error()`.
+2. **The account needs a verified mobile number.** Confirmed live
+   2026-07-30 against a real (phone-less) throwaway account: the call
+   returns a clean `200` but a logical rejection, `"please add phone number
+   before changing the password"` — not a bug, a real business rule on the
+   site's side. The rejection message is surfaced verbatim in the bot
+   reply, same as any other failure message.
+
+**Verified live end-to-end 2026-07-30**: the exact request/response above
+was captured from a real account's own session and confirmed both
+directions afterward (new password logs in, old password is rejected) —
+see `sites/cricmatch.py`'s `change_password_path` comment. `main.py`'s
+`change_account_password()`/`change_account_password_via_login()` mirror
+`free_phone_number()`/`free_account_number()`'s shape exactly (in-page
+`fetch()` via `page.evaluate()`, not `page.context.request`, same reasoning
+as free-number's confirmed Chromium-client-hints requirement) but were only
+exercised against the phone-less rejection case directly — the success path
+is confirmed via the user's own captured request, not yet via this repo's
+own code hitting a 200 end-to-end. Deliberately **no retry loop** (unlike
+free-number's 15x45s budget) — that width was earned empirically for a
+different endpoint's rate-limit behavior; don't port it here speculatively,
+only add one if live testing surfaces the same kind of WAF/rate-limit block.
+
+Master-only (`@require_role(is_master)`), same restricted scope as
+`/freenum`/`/testbaccarat` — mutates a real account's login credential.
+`_blocking_change_password()` in `telegram_bot.py` runs it on
+`_pw_executors[0]` with a throwaway context, mirroring
+`_blocking_free_number()`'s pattern exactly. The **current/old** password
+supplied as a command argument is never echoed back in the reply (same
+discipline as `/freenum`/`/testbaccarat`); the **new** password IS included
+in a successful reply's caption, matching `build_caption()`'s existing norm
+of including plaintext passwords in master-only chat captions for
+successful signups.
 
 ### `/setphone`: rotating a pool of real phone numbers across signups
 

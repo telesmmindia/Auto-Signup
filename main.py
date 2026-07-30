@@ -924,6 +924,113 @@ def free_account_number(page, username, password, site_url=None):
     return result
 
 
+_CHANGE_PASSWORD_FETCH_JS = """async (args) => {
+    const [path, oldPassword, newPassword] = args;
+    const csrf = document.querySelector('meta[name=csrf-token]').content;
+    const resp = await fetch(path, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "DNT": "1",
+        },
+        body: "oldPassword=" + encodeURIComponent(oldPassword)
+            + "&newPassword=" + encodeURIComponent(newPassword)
+            + "&_token=" + encodeURIComponent(csrf),
+    });
+    const text = await resp.text();
+    return {status: resp.status, text: text};
+}"""
+
+
+def change_account_password(page, current_password, new_password, site_url=None):
+    """Change the password on an already-logged-in account. `page` must
+    already be on a logged-in session (see change_account_password_via_login()
+    below, same login()-then-mutate pairing as free_phone_number()).
+
+    The endpoint (POST /changePassword, sites/cricmatch.py's
+    change_password_path) was found live via a real, user-captured HTTP
+    request/response (manual request interception, 2026-07-30) -- NOT
+    guessed. Confirmed end-to-end: logging in with the NEW password worked
+    afterward, and the OLD password no longer did.
+
+    Fired as a real in-page fetch() via page.evaluate(), same reasoning as
+    free_phone_number(): page.context.request is a separate out-of-band HTTP
+    client missing whatever Chromium's own in-page requests carry (e.g.
+    sec-ch-ua/* client hints), which other endpoints on this site have been
+    confirmed live to require.
+
+    The response is its OWN shape, NOT the {"message","message_class"} shape
+    most other endpoints here use -- confirmed live:
+    {"status":200,"msg":"Password updated successfully"}. Note the key is
+    "msg", not "message", and there is no "message_class" field, so
+    http_is_error() does not apply here; success is judged by the response
+    body's own "status" field (an app-level code, separate from the HTTP
+    status) equalling 200.
+
+    No retry loop (unlike free_phone_number()'s 15x45s budget) -- that width
+    was earned empirically against a rate-limit specific to THAT endpoint.
+    Don't add one here speculatively; only widen this if live testing
+    surfaces the same kind of WAF/rate-limit behavior.
+
+    Returns (ok, message)."""
+    prof = profile_for(page.url)
+    if not prof.supports_change_password:
+        return False, f"{prof.key} does not support self-service password change."
+
+    parts = urlsplit(site_url or page.url)
+    path = f"{parts.scheme}://{parts.netloc}{prof.change_password_path}"
+
+    try:
+        result = page.evaluate(_CHANGE_PASSWORD_FETCH_JS, [path, current_password, new_password])
+    except Exception as e:
+        return False, f"request failed: {str(e)[:150]}"
+
+    try:
+        body = json.loads(result["text"])
+    except (ValueError, TypeError):
+        return False, f"HTTP {result['status']}: {result['text'][:150]}"
+
+    msg = body.get("msg") or body.get("message") or str(body)
+    ok = result["status"] < 400 and body.get("status") == 200
+    return ok, msg
+
+
+def change_account_password_via_login(page, username, current_password, new_password, site_url=None):
+    """Change the password on an EXISTING account: log in with the CURRENT
+    password, then change it via change_account_password(). Returns a result
+    dict in the same shape convention as free_account_number()/test_baccarat():
+    {"ok", "messages", "shot", "new_password"}. Does not write to accounts.db
+    -- same "ad-hoc action on an account someone already has" lifecycle as
+    free_account_number()."""
+    result = {"ok": False, "messages": [], "shot": None, "new_password": None}
+
+    outcome, msgs = login(page, username, current_password, site_url=site_url)
+    if outcome != "ok":
+        result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
+        SHOTS_DIR.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        shot = SHOTS_DIR / f"{username}-{stamp}-login-failed.png"
+        page.screenshot(path=str(shot))
+        result["shot"] = str(shot)
+        return result
+
+    ok, msg = change_account_password(page, current_password, new_password, site_url=site_url)
+    result["ok"] = ok
+    result["messages"] = [msg]
+    if ok:
+        result["new_password"] = new_password
+
+    SHOTS_DIR.mkdir(exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    shot = SHOTS_DIR / f"{username}-{stamp}-change-password.png"
+    page.screenshot(path=str(shot))
+    result["shot"] = str(shot)
+    return result
+
+
 WALLET_BALANCE_TIMEOUT_SECS = 30
 WALLET_BALANCE_POLL_MS = 1000
 

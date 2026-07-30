@@ -151,8 +151,10 @@ import db
 from sites import profile_for
 from main import (
     SHOTS_DIR, SITE_URL,
-    capsolver_key, check_phone_taken, click_first_visible, extract_referral_code,
+    capsolver_key, change_account_password_via_login, check_phone_taken,
+    click_first_visible, extract_referral_code,
     fill_register_form, free_account_number, free_phone_number, gen_account,
+    gen_password,
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
     open_signup_modal, parse_proxy, read_result, run_paired_hedge, stop_bridge,
@@ -202,9 +204,9 @@ BOT_SITE_URL = os.environ.get("BOT_SITE_URL") or SITE_URL
 # don't exist on that instance -- Telegram replies nothing for them -- and
 # the "/" menus only show what the instance actually has.
 BOT_MODE = (os.environ.get("BOT_MODE") or "all").strip().lower()
-if BOT_MODE not in ("all", "signup", "gameplay", "stockmarket"):
+if BOT_MODE not in ("all", "signup", "gameplay", "stockmarket", "password"):
     raise SystemExit(
-        f"BOT_MODE must be 'signup', 'gameplay', 'stockmarket', or 'all' (got {BOT_MODE!r})")
+        f"BOT_MODE must be 'signup', 'gameplay', 'stockmarket', 'password', or 'all' (got {BOT_MODE!r})")
 SIGNUP_ENABLED = BOT_MODE in ("all", "signup")
 # "gameplay" = the original Evolution Baccarat hedge; "stockmarket" = the same
 # pair/run commands driving Evolution Stock Market Live (UP vs DOWN) instead.
@@ -215,6 +217,10 @@ GAMEPLAY_ENABLED = BOT_MODE in ("all", "gameplay")
 STOCKMARKET_ENABLED = BOT_MODE == "stockmarket"
 HEDGE_ENABLED = GAMEPLAY_ENABLED or STOCKMARKET_ENABLED
 RUN_GAME = STOCKMARKET if STOCKMARKET_ENABLED else BACCARAT
+# Exclusive mode, like "stockmarket" -- deliberately NOT part of "all", so a
+# plain single-bot `.env` setup never accidentally exposes a command that
+# mutates a real account's login credential.
+PASSWORD_ENABLED = BOT_MODE == "password"
 # How many signups this bot instance can run at once. Each slot is its own
 # Chromium process + dedicated worker thread (see the worker-pool comment
 # below) -- raising this increases real request concurrency against the
@@ -427,6 +433,9 @@ if HEDGE_ENABLED:
         BotCommand("runs", "List past hedge runs (optionally by pair id)"),
         BotCommand("runlog", "Per-round detail of one past run"),
     ]
+if PASSWORD_ENABLED:
+    MASTER_COMMANDS.append(
+        BotCommand("changepassword", "Change an existing account's password"))
 # Proxy commands apply to both modes (hedge runs route through the global
 # proxy too); URL/btag only affect signups (gameplay always uses BOT_SITE_URL).
 MASTER_COMMANDS += [
@@ -1591,6 +1600,74 @@ async def freenum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_result_photo(update, result.get("shot"), caption[:1024])
 
 
+def _blocking_change_password(username, current_password, new_password):
+    """Runs on _pw_executors[0]. Opens a throwaway context (same "share slot
+    0, always clean up" pattern as _blocking_test_baccarat/_blocking_free_number)
+    and calls main.change_account_password_via_login() to log into an
+    EXISTING account and change its password via the confirmed
+    POST /changePassword endpoint (see sites/cricmatch.py)."""
+    browser = _blocking_ensure_browser(0)
+    raw = global_settings.get("proxy")
+    proxy_conf = parse_proxy(raw) if raw else None
+    bridge_proc = None
+    try:
+        proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+    except RuntimeError as e:
+        return {"ok": False, "messages": [f"Proxy bridge failed to start: {e}"],
+                "shot": None, "new_password": None}
+    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+    try:
+        page = context.new_page()
+        return change_account_password_via_login(page, username, current_password,
+                                                  new_password, site_url=BOT_SITE_URL)
+    except PWError as e:
+        return {"ok": False, "messages": [f"Playwright error: {str(e)[:300]}"],
+                "shot": None, "new_password": None}
+    finally:
+        context.close()
+        stop_bridge(bridge_proc)
+
+
+@require_role(is_master)
+async def changepassword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log into an EXISTING account with its CURRENT password and change it to
+    a new one via the confirmed POST /changePassword endpoint (see main.py's
+    change_account_password_via_login()). Master-only, same restricted scope
+    as /freenum and /testbaccarat -- takes another account's credentials as a
+    chat argument and mutates a real account's login credential.
+
+    NOTE (confirmed live 2026-07-30): cricmatch247 refuses this with
+    "please add phone number before changing the password" for an account
+    with no verified mobile number attached -- not a bug here, a real
+    business rule on the site's side. The rejection message is surfaced
+    verbatim in the reply."""
+    args = context.args
+    if len(args) not in (2, 3):
+        await update.message.reply_text(
+            "Usage: /changepassword <username> <current_password> [new_password]\n\n"
+            "Logs into an EXISTING account with its current password and "
+            "changes it via the account's self-service change-password "
+            "endpoint. If new_password is omitted, a random policy-compliant "
+            "one is generated and reported back. The account needs a "
+            "verified mobile number -- the site refuses this otherwise."
+        )
+        return
+
+    username, current_password = args[0], args[1]
+    new_password = args[2] if len(args) == 3 else gen_password()
+
+    await update.message.reply_text(f"Changing password for {username}...")
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(_pw_executors[0], _blocking_change_password,
+                                        username, current_password, new_password)
+
+    status = "OK" if result["ok"] else "FAILED"
+    caption = f"Password change [{status}] for {username}\n" + "\n".join(result["messages"])
+    if result.get("new_password"):
+        caption += f"\nNew password: {result['new_password']}"
+    await send_result_photo(update, result.get("shot"), caption[:1024])
+
+
 @require_role(is_master)
 async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Login + place a REAL bet on both Player and Banker in a live Baccarat
@@ -2353,6 +2430,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if STOCKMARKET_ENABLED:
                 hedge.append("Table minimum is ₹10 — start with /run <pair> 10 1.")
             sections.append("\n".join(hedge))
+        if PASSWORD_ENABLED:
+            sections.append(
+                "🔑 Password change\n"
+                "/changepassword <user> <current_pw> [new_pw] — log into an "
+                "existing account and change its password (random "
+                "policy-compliant one if new_pw omitted, reported back in "
+                "chat). The account needs a verified mobile number, or the "
+                "site refuses the change."
+            )
         settings_lines = ["⚙️ Settings (global)"]
         if SIGNUP_ENABLED:
             settings_lines.append("/setpassword <pw> | --random   ·   /password")
@@ -2378,6 +2464,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "🤖 Admin — commands\n"
                 "━━━━━━━━━━━━━━\n"
                 + signup_admin_help
+            )
+        elif PASSWORD_ENABLED:
+            await update.message.reply_text(
+                "🤖 This bot instance only runs the password-change command, "
+                "which is master-only — there is nothing for admins here."
             )
         else:
             await update.message.reply_text(
@@ -2501,6 +2592,8 @@ def main():
         app.add_handler(CommandHandler("stoprun", stoprun))
         app.add_handler(CommandHandler("runs", runs_cmd))
         app.add_handler(CommandHandler("runlog", runlog_cmd))
+    if PASSWORD_ENABLED:
+        app.add_handler(CommandHandler("changepassword", changepassword_cmd))
     app.add_handler(CommandHandler("setproxy", setproxy))
     app.add_handler(CommandHandler("proxy", show_proxy))
     app.add_handler(CommandHandler("clearproxy", clearproxy))
