@@ -975,11 +975,23 @@ def change_account_password(page, current_password, new_password, site_url=None)
     Don't add one here speculatively; only widen this if live testing
     surfaces the same kind of WAF/rate-limit behavior.
 
+    Settle wait: confirmed live 2026-07-30 that calling this right after
+    login() returns "ok" gets a false "please add phone number before
+    changing the password" rejection even on an account that DOES have a
+    verified number -- looks like the exact same "session isn't settled
+    yet" failure mode free_phone_number() hit (see its docstring), just
+    surfacing as a different wrong message here instead of a 500. Added the
+    same 8s wait as a fix on that theory (not yet re-verified live against
+    the same account) -- if a real number+phone account still gets this
+    rejection after the wait, the theory is wrong and needs more digging,
+    not a wider wait.
+
     Returns (ok, message)."""
     prof = profile_for(page.url)
     if not prof.supports_change_password:
         return False, f"{prof.key} does not support self-service password change."
 
+    page.wait_for_timeout(8000)
     parts = urlsplit(site_url or page.url)
     path = f"{parts.scheme}://{parts.netloc}{prof.change_password_path}"
 
