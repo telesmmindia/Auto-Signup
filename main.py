@@ -1055,6 +1055,102 @@ def run_balance_check(username, password, site_url=None, proxy=None):
     return result
 
 
+# ---------------------------------------------------------------------------
+# HTTP-fast balance check (no browser at all) -- same idea as HTTP-fast
+# signup above, discovered the same way: capture a real Playwright login's
+# network traffic (probe_login_balance.py), then confirm live with a bare
+# requests.Session replay. For sites with supports_http_login=True this
+# replaces a ~20-30s browser login + poll-for-balance with two plain HTTP
+# POSTs -- roughly two orders of magnitude faster, and light enough that many
+# accounts can be checked concurrently without launching a browser per
+# account. Falls back to run_balance_check() (the Playwright path) for any
+# site that doesn't set the flag.
+# ---------------------------------------------------------------------------
+
+def http_login_call(session, csrf_token, username, password, site_url):
+    """POST the login endpoint. Returns the parsed JSON body (or a synthetic
+    error dict if the response isn't JSON)."""
+    prof = profile_for(site_url)
+    parts = urlsplit(site_url)
+    login_url = f"{parts.scheme}://{parts.netloc}{prof.http_login_path}"
+    data = {"username": username, "password": password, "remember_me": "1", "_token": csrf_token}
+    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url}
+    resp = session.post(login_url, data=data, headers=headers, timeout=20)
+    try:
+        return resp.json()
+    except ValueError:
+        return {"status": None, "message": f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"}
+
+
+def http_get_balance(session, csrf_token, site_url):
+    """POST the balance endpoint on an authenticated session. Returns the
+    parsed JSON body (or a synthetic error dict if the response isn't JSON)."""
+    prof = profile_for(site_url)
+    parts = urlsplit(site_url)
+    url = f"{parts.scheme}://{parts.netloc}{prof.http_balance_path}"
+    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url}
+    resp = session.post(url, data={"_token": csrf_token}, headers=headers, timeout=20)
+    try:
+        return resp.json()
+    except ValueError:
+        return {"status": None, "message": f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"}
+
+
+def http_check_account_balance(username, password, site_url=None, proxy=None):
+    """HTTP-only counterpart to run_balance_check(): no browser launch, no
+    page render, no polling for a delayed getBalance() call -- just the two
+    real POSTs the site's own JS makes (login, then getBalance). Same result
+    shape ({"ok","balance","messages","shot"}), "shot" always None since
+    there's no page to screenshot. Verified live 2026-07-30 against a real
+    account (ali789) -- balance matched the browser-path reading exactly."""
+    url = site_url or SITE_URL
+    prof = profile_for(url)
+    result = {"ok": False, "balance": None, "messages": [], "shot": None}
+
+    if not prof.supports_http_login:
+        result["messages"] = [f"{prof.key} does not support HTTP-fast balance checks."]
+        return result
+
+    try:
+        session = http_session_for(proxy)
+    except ValueError as e:
+        result["messages"] = [f"Bad proxy value: {e}"]
+        return result
+
+    try:
+        csrf = http_fetch_csrf(session, url)
+    except (requests.RequestException, RuntimeError) as e:
+        result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
+        return result
+
+    login_resp = http_login_call(session, csrf, username, password, url)
+    if login_resp.get("status") != 200:
+        result["messages"] = [login_resp.get("message") or f"Login failed: {login_resp}"]
+        return result
+
+    bal_resp = http_get_balance(session, csrf, url)
+    if bal_resp.get("status") != 200:
+        result["messages"] = [bal_resp.get("message") or f"Could not read balance: {bal_resp}"]
+        return result
+
+    bal = (bal_resp.get("balance") or {})
+    wallet = bal.get("wallet")
+    if wallet is None:
+        raw = bal.get("totalBalance") or bal.get("balance")
+        try:
+            wallet = float(str(raw).replace(",", ""))
+        except (TypeError, ValueError):
+            wallet = None
+    if wallet is None:
+        result["messages"] = [f"Logged in, but couldn't parse a balance out of the response: {bal_resp}"]
+        return result
+
+    result["ok"] = True
+    result["balance"] = float(wallet)
+    result["messages"] = [f"Balance: ₹{wallet}"]
+    return result
+
+
 def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy=None,
                 free_number=False):
     """Run one signup attempt. Returns a result dict.

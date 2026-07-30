@@ -1,0 +1,920 @@
+[
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://ad.doubleclick.net/ccm/s/collect?auid=1529870675.1785415112&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.google.com/rmkt/collect/17872581665/?random=1785415112064&cv=11&fst=1785415112064&fmt=8&bg=ffffff&guid=ON&async=1&en=gtag.config&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616985~115938466~115938468~118131810~118897920~118897930~119896802&u_w=1280&u_h=720&url=https%3A%2F%2Fcricmatch247.com%2F&rcb=16&frm=0&tiba=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&hn=www.googleadservices.com&npa=0&pscdl=noapi&auid=1529870675.1785415112&uaa=arm&uab=64&uafvl=Chromium%3B148.0.7778.96%7CHeadlessChrome%3B148.0.7778.96%7CNot%252FA)Brand%3B99.0.0.0&uamb=0&uam=&uap=macOS&uapv=26.5.1&uaw=0&data=event%3Dgtag.config&ept=68&gcp=5",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.google.com/ccm/collect?rcb=16&frm=0&auid=1529870675.1785415112&dt=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&en=page_view&dl=https%3A%2F%2Fcricmatch247.com%2F&scrsrc=www.googletagmanager.com&rnd=1334552250.1785415112&navt=n&npa=0&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616985~115938466~115938468~118131810~118897920~118897930~119896802&apvc=1&tids=AW-17872581665&tid=AW-17872581665&tft=1785415112075&tfd=3108&fmt=8",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/reportWindowSize",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "application/json, text/javascript, */*; q=0.01",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "width=1280"
+  },
+  {
+    "phase": "response",
+    "status": 204,
+    "url": "https://ad.doubleclick.net/ccm/s/collect?auid=1529870675.1785415112&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://www.google.com/rmkt/collect/17872581665/?random=1785415112064&cv=11&fst=1785415112064&fmt=8&bg=ffffff&guid=ON&async=1&en=gtag.config&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616985~115938466~115938468~118131810~118897920~118897930~119896802&u_w=1280&u_h=720&url=https%3A%2F%2Fcricmatch247.com%2F&rcb=16&frm=0&tiba=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&hn=www.googleadservices.com&npa=0&pscdl=noapi&auid=1529870675.1785415112&uaa=arm&uab=64&uafvl=Chromium%3B148.0.7778.96%7CHeadlessChrome%3B148.0.7778.96%7CNot%252FA)Brand%3B99.0.0.0&uamb=0&uam=&uap=macOS&uapv=26.5.1&uaw=0&data=event%3Dgtag.config&ept=68&gcp=5",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://www.google.com/ccm/collect?rcb=16&frm=0&auid=1529870675.1785415112&dt=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&en=page_view&dl=https%3A%2F%2Fcricmatch247.com%2F&scrsrc=www.googletagmanager.com&rnd=1334552250.1785415112&navt=n&npa=0&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616985~115938466~115938468~118131810~118897920~118897930~119896802&apvc=1&tids=AW-17872581665&tid=AW-17872581665&tft=1785415112075&tfd=3108&fmt=8",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/reportWindowSize",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:32 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.google.com/rmkt/collect/17872581665/?random=1785415114048&cv=11&fst=1785415114048&fmt=8&bg=ffffff&guid=ON&async=1&en=gtag.config&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938469~118131810~118897920~118897930~119793972~119896803&u_w=1280&u_h=720&url=https%3A%2F%2Fcricmatch247.com%2F&ref=https%3A%2F%2Fcricmatch247.com%2F&rcb=15&frm=0&tiba=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&hn=www.googleadservices.com&npa=0&pscdl=noapi&auid=1529870675.1785415112&uaa=arm&uab=64&uafvl=Chromium%3B148.0.7778.96%7CHeadlessChrome%3B148.0.7778.96%7CNot%252FA)Brand%3B99.0.0.0&uamb=0&uam=&uap=macOS&uapv=26.5.1&uaw=0&data=event%3Dgtag.config&ept=68&gcp=5",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.google.com/ccm/collect?rcb=15&frm=0&auid=1529870675.1785415112&dt=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&en=page_view&dl=https%3A%2F%2Fcricmatch247.com%2F&dr=cricmatch247.com&scrsrc=www.googletagmanager.com&rnd=1244072093.1785415114&navt=r&npa=0&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938469~118131810~118897920~118897930~119793972~119896803&apvc=1&tids=AW-17872581665&tid=AW-17872581665&tft=1785415114052&tfd=1729&fmt=8",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://www.google.com/ccm/collect?rcb=15&frm=0&auid=1529870675.1785415112&dt=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&en=page_view&dl=https%3A%2F%2Fcricmatch247.com%2F&dr=cricmatch247.com&scrsrc=www.googletagmanager.com&rnd=1244072093.1785415114&navt=r&npa=0&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938469~118131810~118897920~118897930~119793972~119896803&apvc=1&tids=AW-17872581665&tid=AW-17872581665&tft=1785415114052&tfd=1729&fmt=8",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://www.google.com/rmkt/collect/17872581665/?random=1785415114048&cv=11&fst=1785415114048&fmt=8&bg=ffffff&guid=ON&async=1&en=gtag.config&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938469~118131810~118897920~118897930~119793972~119896803&u_w=1280&u_h=720&url=https%3A%2F%2Fcricmatch247.com%2F&ref=https%3A%2F%2Fcricmatch247.com%2F&rcb=15&frm=0&tiba=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&hn=www.googleadservices.com&npa=0&pscdl=noapi&auid=1529870675.1785415112&uaa=arm&uab=64&uafvl=Chromium%3B148.0.7778.96%7CHeadlessChrome%3B148.0.7778.96%7CNot%252FA)Brand%3B99.0.0.0&uamb=0&uam=&uap=macOS&uapv=26.5.1&uaw=0&data=event%3Dgtag.config&ept=68&gcp=5",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/checkLoggedIn",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "_token=RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/indexRandomGame",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "_token=RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x"
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/append/searchpp",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "text/html, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/append/loginpp",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "text/html, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/checkLoggedIn",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:37 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"status_code\":\"invalid\"}\n"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/indexRandomGame",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:37 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "[{\"id\":1226,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/homebanner\\/pigaboom.png\",\"provider\":\"pigaboom\",\"link\":null,\"name\":\"pigaboom\",\"display_order\":-41,\"gt\":\"sl\"},{\"id\":979,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/aviator-1.png\",\"provider\":\"spribe\",\"link\":\"aviator\",\"name\":\"Aviator\",\"display_order\":-37,\"gt\":\"sl\"},{\"id\":4032,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/homebanner\\/jet_x.png\",\"provider\":\"smartsoft\",\"link\":\"smartsoft:JetX\",\"name\":\"JetX\",\"display_order\":-40,\"gt\":\"sw\"},{\"id\":1131,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/ishome\\/1128.png\",\"provider\":\"aviatrix\",\"link\":\"nft-aviatrix\",\"name\":\"Aviatrix\",\"display_order\":5,\"gt\":\"sl\"},{\"id\":692,\"image\":\"https:\\/\\/d2g8jl9s27zu.cloudfront.net\\/uploads\\/winmatch_royal_andhar_bahar.png\",\"provider\":\"winmatch\",\"link\":\"openTable=228003\",\"name\":\"Royal Andar Bahar\",\"display_order\":-1,\"gt\":\"cg\"},{\"id\":5153,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/chicken_road.png\",\"provider\":\"inout\",\"link\":\"inout:ChikenRoad\",\"name\":\"Chicken Road\",\"display_order\":20,\"gt\":\"sw\"},{\"id\":693,\"image\":\"https:\\/\\/d2g8jl9s27zu.cloudfront.net\\/uploads\\/winmatch_teen_patti.png\",\"provider\":\"winmatch\",\"link\":\"openTable=227104\",\"name\":\"Royal Bet on Teen Patti\",\"display_order\":20,\"gt\":\"cg\"},{\"id\":691,\"image\":\"https:\\/\\/d2g8jl9s27zu.cloudfront.net\\/uploads\\/winmatch_royal_roulette.png\",\"provider\":\"winmatch\",\"link\":\"openTable=221006\",\"name\":\"Royal Roulette\",\"display_order\":2,\"gt\":\"cg\"},{\"id\":3160,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/ishome\\/vortex.png\",\"provider\":\"turbogames\",\"link\":\"turbogames:VORTEX\",\"name\":\"VORTEX\",\"display_order\":7,\"gt\":\"sw\"},{\"id\":616,\"image\":\"https:\\/\\/s3.ap-south-1.amazonaws.com\\/tokyo.assets\\/uploads\\/newuploads\\/banners\\/ez_dealer.png\",\"provider\":\"winmatch\",\"link\":\"openTable=481005\",\"name\":\"Winmatch EZ Dealer Roulette\",\"display_order\":-12,\"gt\":\"cg\"},{\"id\":112,\"image\":\"https:\\/\\"
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/casinodata",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "application/json, text/javascript, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/append/searchpp",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "content-encoding": "gzip",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:37 GMT",
+      "content-type": "text/html; charset=UTF-8",
+      "vary": "Accept-Encoding",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "<div class=\"nw_searchRedirectPage\">\n    <svg class=\"nw_searchRedirectPageBackBtn\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\">\n        <path d=\"M9.57 18.82C9.38 18.82 9.19 18.75 9.04 18.6L2.97 12.53C2.68 12.24 2.68 11.76 2.97 11.47L9.04 5.4C9.33 5.11 9.81 5.11 10.1 5.4C10.39 5.69 10.39 6.17 10.1 6.46L4.56 12L10.1 17.54C10.39 17.83 10.39 18.31 10.1 18.6C9.96 18.75 9.76 18.82 9.57 18.82Z\" fill=\"white\"/>\n        <path d=\"M20.5 12.75H3.67C3.26 12.75 2.92 12.41 2.92 12C2.92 11.59 3.26 11.25 3.67 11.25H20.5C20.91 11.25 21.25 11.59 21.25 12C21.25 12.41 20.91 12.75 20.5 12.75Z\" fill=\"white\"/>\n    </svg>\n    <span>Search </span>\n</div>\n<div class=\"nw_newLeftSideSearchSection\">\n\n    <div class=\"nw_searchBox\">\n        <div class=\"SearchBar__searchContainer___1p84k\"  >\n            <div class=\"SearchBar__form___3KsGK nw_SearchBar__form___3KsGK pd_rm\" >\n                <div class=\"SearchBar__input___2JVJL focus-on-input nw_searchInputbox_bg mobile\">\n                    <svg class=\"nw_searchInputbox_bg_svg\" xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\">\n                        <path d=\"M16.4887 15.5735L12.6807 11.6129C13.6601 10.4508 14.197 8.97978 14.1962 7.45999C14.1962 3.89801 11.2982 1 7.73624 1C4.17425 1 1.27625 3.89801 1.27625 7.45999C1.27625 11.022 4.17425 13.92 7.73624 13.92C9.07346 13.92 10.3478 13.5167 11.4373 12.751L15.2742 16.7416C15.4346 16.9082 15.6503 17 15.8814 17C16.1002 17 16.3078 16.9166 16.4654 16.7649C16.6262 16.6099 16.719 16.3974 16.7233 16.174C16.7277 15.9507 16.6433 15.7347 16.4887 15.5735ZM7.73624 2.68522C10.3691 2.68522 12.511 4.82713 12.511 7.45999C12.511 10.0929 10.3691 12.2348 7.73624 12.2348C5.10337 12.2348 2.96146 10.0929 2.96146 7.45999C2.96146 4.82713 5.10337 2.68522 7.73624 2.68522Z\" fill=\"#C2C2C2\"/>\n                    </svg>\n                    <input type=\"text\" placeholder=\"Search Team/Event names/games\" class=\"SearchBar__searchLabelImage___1Ugdb headerS"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/append/loginpp",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "content-encoding": "gzip",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:37 GMT",
+      "content-type": "text/html; charset=UTF-8",
+      "vary": "Accept-Encoding",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "<div class=\"login_popup_wrpr cls_auth_sec modal-content new_modal_cont\" id=\"nwGuestSec\" style=\"display: none;\">\n    <div class=\"mobile_popupContent\">\n                <div class=\"model_header_desktop\" >\n                <h4>LOGIN</h4>\n                <a class=\"close_desktop mb-modal__header__icon\" onclick=\"loginFunc()\">\n                    <svg width=\"14px\" height=\"14px\" viewBox=\"0 0 14 14\" version=\"1.1\">\n                        <defs></defs>\n                        <g id=\"Page-1\" stroke=\"none\" stroke-width=\"1\" fill=\"none\" fill-rule=\"evenodd\">\n                            <g id=\"Icons\" transform=\"translate(-81.000000, -971.000000)\" fill=\"#FFFFFF\">\n                            <polygon id=\"close\" points=\"95 972.41 93.59 971 88 976.59 82.41 971 81 972.41 86.59 978 81 983.59 82.41 985 88 979.41 93.59 985 95 983.59 89.41 978\">\n                            </polygon>\n                            </g>\n                        </g>\n                    </svg>\n                </a>\n        </div>\n\n        <div class=\"login_model_body\">\n            <div class=\"login_model_left\">\n                <div class=\"modal-header\">\n                    <div class=\"login_header\">\n                        <a href=\"javascript:void(0);\" class=\"fgtPassBack\" data_id = '1'>\n                            <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"25\" viewBox=\"0 0 24 25\" fill=\"none\">\n                                <path d=\"M9.57 19.5372C9.38 19.5372 9.19 19.4672 9.04 19.3172L2.97 13.2472C2.68 12.9572 2.68 12.4772 2.97 12.1872L9.04 6.11716C9.33 5.82716 9.81 5.82716 10.1 6.11716C10.39 6.40716 10.39 6.88716 10.1 7.17716L4.56 12.7172L10.1 18.2572C10.39 18.5472 10.39 19.0272 10.1 19.3172C9.96 19.4672 9.76 19.5372 9.57 19.5372Z\" fill=\"#2B2F35\"/>\n                                <path d=\"M20.5 13.467H3.67001C3.26001 13.467 2.92001 13.127 2.92001 12.717C2.92001 12.307 3.26001 11.967 3.67001 11.967H20.5C20.91 11.967 21.25 12.307 21.25 12.717C21.25 13.127 20.91 13.467 20.5 13.467Z\" fill=\"#2B2F35\"/>\n  "
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/casinodata",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:38 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"current_page\":1,\"data\":[{\"id\":2,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Andar Bahar\\/2.png\",\"name\":\"Andar Bahar Lobby\",\"class_name\":\"ezugi Premium casinofeatured all andhar_bahar andar_bahar andharbaharlobby ezugi andarbahar andarbahar\",\"provider\":\"ezugi\",\"link\":\"selectGame=andar_bahar\"},{\"id\":3,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Roulette\\/3.png\",\"name\":\"Roulette\",\"class_name\":\"ezugi all roulette lobby roulette\",\"provider\":\"ezugi\",\"link\":\"selectGame=roulette\"},{\"id\":4,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Poker\\/4.png\",\"name\":\"Poker\",\"class_name\":\"ezugi all poker lobby poker\",\"provider\":\"ezugi\",\"link\":\"selectGame=poker\"},{\"id\":14,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Blackjack\\/14.png\",\"name\":\"Blackjack Gold 1\",\"class_name\":\"ezugi all blackjack blackjack\",\"provider\":\"ezugi\",\"link\":\"openTable=204\"},{\"id\":18,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Blackjack\\/18.png\",\"name\":\"VIP Diamond Blackjack\",\"class_name\":\"ezugi featured all blackjack blackjack\",\"provider\":\"ezugi\",\"link\":\"openTable=225\"}],\"first_page_url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=1\",\"from\":1,\"last_page\":8,\"last_page_url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=8\",\"links\":[{\"url\":null,\"label\":\"&laquo; Previous\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=1\",\"label\":\"1\",\"active\":true},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=2\",\"label\":\"2\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=3\",\"label\":\"3\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=4\",\"label\":\"4\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=5\",\"label\":\"5\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=6\",\"label\":\"6\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=7\","
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "cache-control": "no-cache, private",
+      "access-control-allow-origin": "*",
+      "date": "Thu, 30 Jul 2026 12:38:40 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)"
+    },
+    "body": "{\"odds\":[{\"marketId\":\"1.260515653\",\"isMarketDataDelayed\":false,\"status\":\"OPEN\",\"betDelayModels\":[\"PASSIVE\"],\"betDelay\":5,\"bspReconciled\":false,\"complete\":true,\"inplay\":true,\"numberOfWinners\":1,\"numberOfRunners\":2,\"numberOfActiveRunners\":2,\"lastMatchTime\":\"2026-07-30T12:38:38.243Z\",\"totalMatched\":195779.83,\"totalAvailable\":55656.62,\"crossMatching\":true,\"runnersVoidable\":false,\"version\":7521509862,\"runners\":[{\"selectionId\":424679,\"handicap\":0,\"status\":\"ACTIVE\",\"lastPriceTraded\":3.9,\"totalMatched\":56616.06,\"ex\":{\"availableToBack\":[{\"price\":4.1,\"size\":10.01},{\"price\":3.9,\"size\":0.44},{\"price\":3.85,\"size\":23.62},{\"price\":3.75,\"size\":360.37},{\"price\":3.25,\"size\":620.66},{\"price\":3.2,\"size\":0.11},{\"price\":3.15,\"size\":23.14},{\"price\":3.1,\"size\":238.55},{\"price\":3.05,\"size\":1.99},{\"price\":3,\"size\":3.89},{\"price\":2.92,\"size\":2.03},{\"price\":2.84,\"size\":2.12},{\"price\":2.82,\"size\":1.34},{\"price\":2.78,\"size\":39.75},{\"price\":2.74,\"size\":3.38},{\"price\":2.7,\"size\":66.93},{\"price\":2.68,\"size\":2.32},{\"price\":2.64,\"size\":2.45},{\"price\":2.62,\"size\":2.4},{\"price\":2.6,\"size\":2.43},{\"price\":2.58,\"size\":3.85},{\"price\":2.52,\"size\":2.56},{\"price\":2.48,\"size\":2.63},{\"price\":2.46,\"size\":2.67},{\"price\":2.38,\"size\":2.9},{\"price\":2.28,\"size\":1.34},{\"price\":2.02,\"size\":0.01},{\"price\":1.93,\"size\":0.57},{\"price\":1.66,\"size\":229.49},{\"price\":1.62,\"size\":229.49},{\"price\":1.58,\"size\":229.49},{\"price\":1.55,\"size\":229.49},{\"price\":1.53,\"size\":1.61},{\"price\":1.5,\"size\":4.99},{\"price\":1.35,\"size\":13.39},{\"price\":1.3,\"size\":2.14},{\"price\":1.27,\"size\":2.29},{\"price\":1.18,\"size\":5949.33},{\"price\":1.16,\"size\":66.93},{\"price\":1.15,\"size\":66.93},{\"price\":1.14,\"size\":66.93},{\"price\":1.13,\"size\":66.93},{\"price\":1.12,\"size\":66.93},{\"price\":1.11,\"size\":296.72},{\"price\":1.1,\"size\":108.51},{\"price\":1.09,\"size\":69.07},{\"price\":1.08,\"size\":69.07},{\"price\":1.07,\"size\":69.07},{\"price\":1.06,\"size\":671.64},{\"price\":1.05,\"size\":671.44},{\"price\":1.04,\"size\":1340.74},{\"price\":1.03,\"size\":2679.34},{\"price\":1.02,\"size\":2679.34},{"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "cache-control": "no-cache, private",
+      "access-control-allow-origin": "*",
+      "date": "Thu, 30 Jul 2026 12:38:40 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)"
+    },
+    "body": "{\"odds\":[{\"marketId\":\"1.260515653\",\"isMarketDataDelayed\":false,\"status\":\"OPEN\",\"betDelayModels\":[\"PASSIVE\"],\"betDelay\":5,\"bspReconciled\":false,\"complete\":true,\"inplay\":true,\"numberOfWinners\":1,\"numberOfRunners\":2,\"numberOfActiveRunners\":2,\"lastMatchTime\":\"2026-07-30T12:38:38.243Z\",\"totalMatched\":195779.83,\"totalAvailable\":55656.62,\"crossMatching\":true,\"runnersVoidable\":false,\"version\":7521509862,\"runners\":[{\"selectionId\":424679,\"handicap\":0,\"status\":\"ACTIVE\",\"lastPriceTraded\":3.9,\"totalMatched\":56616.06,\"ex\":{\"availableToBack\":[{\"price\":4.1,\"size\":10.01},{\"price\":3.9,\"size\":0.44},{\"price\":3.85,\"size\":23.62},{\"price\":3.75,\"size\":360.37},{\"price\":3.25,\"size\":620.66},{\"price\":3.2,\"size\":0.11},{\"price\":3.15,\"size\":23.14},{\"price\":3.1,\"size\":238.55},{\"price\":3.05,\"size\":1.99},{\"price\":3,\"size\":3.89},{\"price\":2.92,\"size\":2.03},{\"price\":2.84,\"size\":2.12},{\"price\":2.82,\"size\":1.34},{\"price\":2.78,\"size\":39.75},{\"price\":2.74,\"size\":3.38},{\"price\":2.7,\"size\":66.93},{\"price\":2.68,\"size\":2.32},{\"price\":2.64,\"size\":2.45},{\"price\":2.62,\"size\":2.4},{\"price\":2.6,\"size\":2.43},{\"price\":2.58,\"size\":3.85},{\"price\":2.52,\"size\":2.56},{\"price\":2.48,\"size\":2.63},{\"price\":2.46,\"size\":2.67},{\"price\":2.38,\"size\":2.9},{\"price\":2.28,\"size\":1.34},{\"price\":2.02,\"size\":0.01},{\"price\":1.93,\"size\":0.57},{\"price\":1.66,\"size\":229.49},{\"price\":1.62,\"size\":229.49},{\"price\":1.58,\"size\":229.49},{\"price\":1.55,\"size\":229.49},{\"price\":1.53,\"size\":1.61},{\"price\":1.5,\"size\":4.99},{\"price\":1.35,\"size\":13.39},{\"price\":1.3,\"size\":2.14},{\"price\":1.27,\"size\":2.29},{\"price\":1.18,\"size\":5949.33},{\"price\":1.16,\"size\":66.93},{\"price\":1.15,\"size\":66.93},{\"price\":1.14,\"size\":66.93},{\"price\":1.13,\"size\":66.93},{\"price\":1.12,\"size\":66.93},{\"price\":1.11,\"size\":296.72},{\"price\":1.1,\"size\":108.51},{\"price\":1.09,\"size\":69.07},{\"price\":1.08,\"size\":69.07},{\"price\":1.07,\"size\":69.07},{\"price\":1.06,\"size\":671.64},{\"price\":1.05,\"size\":671.44},{\"price\":1.04,\"size\":1340.74},{\"price\":1.03,\"size\":2679.34},{\"price\":1.02,\"size\":2679.34},{"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/api2/v2/updateC?q=domain_switch",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/api2/v2/updateC?q=domain_switch",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:41 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"status\":200}\n"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "cache-control": "no-cache, private",
+      "access-control-allow-origin": "*",
+      "date": "Thu, 30 Jul 2026 12:38:42 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)"
+    },
+    "body": "{\"odds\":[{\"marketId\":\"1.260515653\",\"isMarketDataDelayed\":false,\"status\":\"OPEN\",\"betDelayModels\":[\"PASSIVE\"],\"betDelay\":5,\"bspReconciled\":false,\"complete\":true,\"inplay\":true,\"numberOfWinners\":1,\"numberOfRunners\":2,\"numberOfActiveRunners\":2,\"lastMatchTime\":\"2026-07-30T12:38:38.243Z\",\"totalMatched\":195779.83,\"totalAvailable\":55365.17,\"crossMatching\":true,\"runnersVoidable\":false,\"version\":7521509862,\"runners\":[{\"selectionId\":424679,\"handicap\":0,\"status\":\"ACTIVE\",\"lastPriceTraded\":3.9,\"totalMatched\":56616.06,\"ex\":{\"availableToBack\":[{\"price\":4.1,\"size\":24.23},{\"price\":3.9,\"size\":0.44},{\"price\":3.85,\"size\":23.62},{\"price\":3.75,\"size\":360.37},{\"price\":3.25,\"size\":620.66},{\"price\":3.2,\"size\":0.11},{\"price\":3.15,\"size\":23.14},{\"price\":3.1,\"size\":238.55},{\"price\":3.05,\"size\":1.99},{\"price\":3,\"size\":3.89},{\"price\":2.92,\"size\":2.03},{\"price\":2.84,\"size\":2.12},{\"price\":2.82,\"size\":1.34},{\"price\":2.78,\"size\":39.75},{\"price\":2.74,\"size\":3.38},{\"price\":2.72,\"size\":2.33},{\"price\":2.7,\"size\":66.93},{\"price\":2.68,\"size\":2.32},{\"price\":2.64,\"size\":2.45},{\"price\":2.62,\"size\":2.4},{\"price\":2.6,\"size\":2.43},{\"price\":2.58,\"size\":3.85},{\"price\":2.52,\"size\":2.56},{\"price\":2.48,\"size\":2.63},{\"price\":2.46,\"size\":5.41},{\"price\":2.38,\"size\":2.9},{\"price\":2.28,\"size\":1.34},{\"price\":2.02,\"size\":0.01},{\"price\":1.93,\"size\":0.57},{\"price\":1.66,\"size\":229.49},{\"price\":1.62,\"size\":229.49},{\"price\":1.58,\"size\":229.49},{\"price\":1.55,\"size\":229.49},{\"price\":1.53,\"size\":1.61},{\"price\":1.5,\"size\":4.99},{\"price\":1.35,\"size\":13.39},{\"price\":1.3,\"size\":2.14},{\"price\":1.27,\"size\":2.29},{\"price\":1.18,\"size\":5949.33},{\"price\":1.16,\"size\":66.93},{\"price\":1.15,\"size\":66.93},{\"price\":1.14,\"size\":66.93},{\"price\":1.13,\"size\":66.93},{\"price\":1.12,\"size\":66.93},{\"price\":1.11,\"size\":296.72},{\"price\":1.1,\"size\":108.51},{\"price\":1.09,\"size\":69.07},{\"price\":1.08,\"size\":69.07},{\"price\":1.07,\"size\":69.07},{\"price\":1.06,\"size\":671.64},{\"price\":1.05,\"size\":671.44},{\"price\":1.04,\"size\":1340.74},{\"price\":1.03,\"size\":2679.34},{\"pr"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "cache-control": "no-cache, private",
+      "access-control-allow-origin": "*",
+      "date": "Thu, 30 Jul 2026 12:38:43 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)"
+    },
+    "body": "{\"odds\":[{\"marketId\":\"1.260515653\",\"isMarketDataDelayed\":false,\"status\":\"OPEN\",\"betDelayModels\":[\"PASSIVE\"],\"betDelay\":5,\"bspReconciled\":false,\"complete\":true,\"inplay\":true,\"numberOfWinners\":1,\"numberOfRunners\":2,\"numberOfActiveRunners\":2,\"lastMatchTime\":\"2026-07-30T12:38:38.243Z\",\"totalMatched\":195779.83,\"totalAvailable\":55365.17,\"crossMatching\":true,\"runnersVoidable\":false,\"version\":7521509862,\"runners\":[{\"selectionId\":424679,\"handicap\":0,\"status\":\"ACTIVE\",\"lastPriceTraded\":3.9,\"totalMatched\":56616.06,\"ex\":{\"availableToBack\":[{\"price\":4.1,\"size\":24.23},{\"price\":3.9,\"size\":0.44},{\"price\":3.85,\"size\":23.62},{\"price\":3.75,\"size\":360.37},{\"price\":3.25,\"size\":620.66},{\"price\":3.2,\"size\":0.11},{\"price\":3.15,\"size\":23.14},{\"price\":3.1,\"size\":238.55},{\"price\":3.05,\"size\":1.99},{\"price\":3,\"size\":3.89},{\"price\":2.92,\"size\":2.03},{\"price\":2.84,\"size\":2.12},{\"price\":2.82,\"size\":1.34},{\"price\":2.78,\"size\":39.75},{\"price\":2.74,\"size\":3.38},{\"price\":2.72,\"size\":2.33},{\"price\":2.7,\"size\":66.93},{\"price\":2.68,\"size\":2.32},{\"price\":2.64,\"size\":2.45},{\"price\":2.62,\"size\":2.4},{\"price\":2.6,\"size\":2.43},{\"price\":2.58,\"size\":3.85},{\"price\":2.52,\"size\":2.56},{\"price\":2.48,\"size\":2.63},{\"price\":2.46,\"size\":5.41},{\"price\":2.38,\"size\":2.9},{\"price\":2.28,\"size\":1.34},{\"price\":2.02,\"size\":0.01},{\"price\":1.93,\"size\":0.57},{\"price\":1.66,\"size\":229.49},{\"price\":1.62,\"size\":229.49},{\"price\":1.58,\"size\":229.49},{\"price\":1.55,\"size\":229.49},{\"price\":1.53,\"size\":1.61},{\"price\":1.5,\"size\":4.99},{\"price\":1.35,\"size\":13.39},{\"price\":1.3,\"size\":2.14},{\"price\":1.27,\"size\":2.29},{\"price\":1.18,\"size\":5949.33},{\"price\":1.16,\"size\":66.93},{\"price\":1.15,\"size\":66.93},{\"price\":1.14,\"size\":66.93},{\"price\":1.13,\"size\":66.93},{\"price\":1.12,\"size\":66.93},{\"price\":1.11,\"size\":296.72},{\"price\":1.1,\"size\":108.51},{\"price\":1.09,\"size\":69.07},{\"price\":1.08,\"size\":69.07},{\"price\":1.07,\"size\":69.07},{\"price\":1.06,\"size\":671.64},{\"price\":1.05,\"size\":671.44},{\"price\":1.04,\"size\":1340.74},{\"price\":1.03,\"size\":2679.34},{\"pr"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/login",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "username=ali789&password=Vivek010%40&remember_me=1&_token=RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/login",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "x-ratelimit-remaining": "9",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:44 GMT",
+      "x-ratelimit-limit": "10",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"status\":200,\"message\":\"Login Successfully\",\"url\":\"?uid=6392204\"}\n"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "cache-control": "no-cache, private",
+      "access-control-allow-origin": "*",
+      "date": "Thu, 30 Jul 2026 12:38:45 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)"
+    },
+    "body": "{\"odds\":[{\"marketId\":\"1.260515653\",\"isMarketDataDelayed\":false,\"status\":\"OPEN\",\"betDelayModels\":[\"PASSIVE\"],\"betDelay\":5,\"bspReconciled\":false,\"complete\":true,\"inplay\":true,\"numberOfWinners\":1,\"numberOfRunners\":2,\"numberOfActiveRunners\":2,\"lastMatchTime\":\"2026-07-30T12:38:38.243Z\",\"totalMatched\":195779.83,\"totalAvailable\":55365.17,\"crossMatching\":true,\"runnersVoidable\":false,\"version\":7521509862,\"runners\":[{\"selectionId\":424679,\"handicap\":0,\"status\":\"ACTIVE\",\"lastPriceTraded\":3.9,\"totalMatched\":56616.06,\"ex\":{\"availableToBack\":[{\"price\":4.1,\"size\":24.23},{\"price\":3.9,\"size\":0.44},{\"price\":3.85,\"size\":23.62},{\"price\":3.75,\"size\":360.37},{\"price\":3.25,\"size\":620.66},{\"price\":3.2,\"size\":0.11},{\"price\":3.15,\"size\":23.14},{\"price\":3.1,\"size\":238.55},{\"price\":3.05,\"size\":1.99},{\"price\":3,\"size\":3.89},{\"price\":2.92,\"size\":2.03},{\"price\":2.84,\"size\":2.12},{\"price\":2.82,\"size\":1.34},{\"price\":2.78,\"size\":39.75},{\"price\":2.74,\"size\":3.38},{\"price\":2.72,\"size\":2.33},{\"price\":2.7,\"size\":66.93},{\"price\":2.68,\"size\":2.32},{\"price\":2.64,\"size\":2.45},{\"price\":2.62,\"size\":2.4},{\"price\":2.6,\"size\":2.43},{\"price\":2.58,\"size\":3.85},{\"price\":2.52,\"size\":2.56},{\"price\":2.48,\"size\":2.63},{\"price\":2.46,\"size\":5.41},{\"price\":2.38,\"size\":2.9},{\"price\":2.28,\"size\":1.34},{\"price\":2.02,\"size\":0.01},{\"price\":1.93,\"size\":0.57},{\"price\":1.66,\"size\":229.49},{\"price\":1.62,\"size\":229.49},{\"price\":1.58,\"size\":229.49},{\"price\":1.55,\"size\":229.49},{\"price\":1.53,\"size\":1.61},{\"price\":1.5,\"size\":4.99},{\"price\":1.35,\"size\":13.39},{\"price\":1.3,\"size\":2.14},{\"price\":1.27,\"size\":2.29},{\"price\":1.18,\"size\":5949.33},{\"price\":1.16,\"size\":66.93},{\"price\":1.15,\"size\":66.93},{\"price\":1.14,\"size\":66.93},{\"price\":1.13,\"size\":66.93},{\"price\":1.12,\"size\":66.93},{\"price\":1.11,\"size\":296.72},{\"price\":1.1,\"size\":108.51},{\"price\":1.09,\"size\":69.07},{\"price\":1.08,\"size\":69.07},{\"price\":1.07,\"size\":69.07},{\"price\":1.06,\"size\":671.64},{\"price\":1.05,\"size\":671.44},{\"price\":1.04,\"size\":1340.74},{\"price\":1.03,\"size\":2679.34},{\"pr"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.googletagmanager.com/td?id=G-18T9SZT5DF&mde=AW-17872581665;9_1;45_1;68_1~G-18T9SZT5DF;61_1&v=3&t=t&pid=517550115&gtm=45je67s1v9207472490za20gzb9203741097zd9203741097&seq=2&exp=115616986~115938465~115938469~118131810~118897920~118897930~119793972~119896803&dl=cricmatch247.com%2F&tdp=G-18T9SZT5DF;207472490;1;6;0&fin=1&z=0",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://odds4.starlingpay.co.uk/api/v1/get/getMarketBook/4?q=1.260515653&api_mode=1&eventType=4",
+    "headers": {
+      "cache-control": "no-cache, private",
+      "access-control-allow-origin": "*",
+      "date": "Thu, 30 Jul 2026 12:38:46 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)"
+    },
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.google.com/rmkt/collect/17872581665/?random=1785415127332&cv=11&fst=1785415127332&fmt=8&bg=ffffff&guid=ON&async=1&en=gtag.config&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938468~118131810~118897920~118897930~119896803~120084214&u_w=1280&u_h=720&url=https%3A%2F%2Fcricmatch247.com%2F%3Fuid%3D6392204&ref=https%3A%2F%2Fcricmatch247.com%2F&rcb=9&frm=0&tiba=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&hn=www.googleadservices.com&npa=0&pscdl=noapi&auid=1529870675.1785415112&uaa=arm&uab=64&uafvl=Chromium%3B148.0.7778.96%7CHeadlessChrome%3B148.0.7778.96%7CNot%252FA)Brand%3B99.0.0.0&uamb=0&uam=&uap=macOS&uapv=26.5.1&uaw=0&data=event%3Dgtag.config&ept=68&gcp=5",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://www.google.com/ccm/collect?rcb=9&frm=0&auid=1529870675.1785415112&dt=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&en=page_view&dl=https%3A%2F%2Fcricmatch247.com%2F&dr=cricmatch247.com&scrsrc=www.googletagmanager.com&rnd=1557883948.1785415127&navt=n&npa=0&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938468~118131810~118897920~118897930~119896803~120084214&apvc=1&tids=AW-17872581665&tid=AW-17872581665&tft=1785415127335&tfd=1611&fmt=8",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://www.google.com/ccm/collect?rcb=9&frm=0&auid=1529870675.1785415112&dt=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&en=page_view&dl=https%3A%2F%2Fcricmatch247.com%2F&dr=cricmatch247.com&scrsrc=www.googletagmanager.com&rnd=1557883948.1785415127&navt=n&npa=0&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938468~118131810~118897920~118897930~119896803~120084214&apvc=1&tids=AW-17872581665&tid=AW-17872581665&tft=1785415127335&tfd=1611&fmt=8",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://www.google.com/rmkt/collect/17872581665/?random=1785415127332&cv=11&fst=1785415127332&fmt=8&bg=ffffff&guid=ON&async=1&en=gtag.config&gtm=45je67s1v9207472490z89203741097za20gzb9203741097zd9203741097xec&gcd=13l3l3l3l1l1&dma=0&tag_exp=115616986~115938465~115938468~118131810~118897920~118897930~119896803~120084214&u_w=1280&u_h=720&url=https%3A%2F%2Fcricmatch247.com%2F%3Fuid%3D6392204&ref=https%3A%2F%2Fcricmatch247.com%2F&rcb=9&frm=0&tiba=Cricmatch%20ultimate%20thrilling%20events%20%7C%20Cricmatch247&hn=www.googleadservices.com&npa=0&pscdl=noapi&auid=1529870675.1785415112&uaa=arm&uab=64&uafvl=Chromium%3B148.0.7778.96%7CHeadlessChrome%3B148.0.7778.96%7CNot%252FA)Brand%3B99.0.0.0&uamb=0&uam=&uap=macOS&uapv=26.5.1&uaw=0&data=event%3Dgtag.config&ept=68&gcp=5",
+    "headers": {},
+    "body": "<binary or unavailable>"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/getLBdetails",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "x-csrf-token": "RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/indexRandomGame",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "_token=RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/api2/v2/getBalance",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "_token=RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x"
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/getNotification",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "*/*",
+      "content-type": "application/x-www-form-urlencoded; charset=UTF-8"
+    },
+    "post_data": "_token=RFh6qOprzm3NwrUQyTfwDH5kygX4K6K6IDWdMP6x"
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/append/searchpp",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "text/html, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "POST",
+    "url": "https://cricmatch247.com/broadcasting/auth",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "content-type": "application/x-www-form-urlencoded",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": "socket_id=85399.24887606&channel_name=private-notify.6392204"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/getNotification",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:48 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"notification\":[{\"id\":186481242,\"ref_type\":1,\"ref_id\":149978580,\"title\":\"Deposit Successful\",\"message\":\"Hi, Your deposit amount INR 2000.00, has been successfully added to your gaming account\",\"user_id\":6392204,\"status\":1,\"image\":null,\"created_by\":null,\"created_at\":\"2026-07-15T15:10:42.000000Z\",\"updated_at\":\"2026-07-15T15:10:42.000000Z\"},{\"id\":98426297,\"ref_type\":1,\"ref_id\":86110299,\"title\":\"Deposit Successful\",\"message\":\"Hi, Your deposit amount INR 260.00, has been successfully added to your gaming account\",\"user_id\":6392204,\"status\":1,\"image\":null,\"created_by\":null,\"created_at\":\"2025-11-16T14:13:30.000000Z\",\"updated_at\":\"2025-11-16T14:13:30.000000Z\"}],\"count\":2}\n"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/getLBdetails",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:48 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"status\":200,\"text\":null}\n"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/indexRandomGame",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:48 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "[{\"id\":1226,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/homebanner\\/pigaboom.png\",\"provider\":\"pigaboom\",\"link\":null,\"name\":\"pigaboom\",\"display_order\":-41,\"gt\":\"sl\"},{\"id\":979,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/aviator-1.png\",\"provider\":\"spribe\",\"link\":\"aviator\",\"name\":\"Aviator\",\"display_order\":-37,\"gt\":\"sl\"},{\"id\":4032,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/homebanner\\/jet_x.png\",\"provider\":\"smartsoft\",\"link\":\"smartsoft:JetX\",\"name\":\"JetX\",\"display_order\":-40,\"gt\":\"sw\"},{\"id\":1131,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/ishome\\/1128.png\",\"provider\":\"aviatrix\",\"link\":\"nft-aviatrix\",\"name\":\"Aviatrix\",\"display_order\":5,\"gt\":\"sl\"},{\"id\":692,\"image\":\"https:\\/\\/d2g8jl9s27zu.cloudfront.net\\/uploads\\/winmatch_royal_andhar_bahar.png\",\"provider\":\"winmatch\",\"link\":\"openTable=228003\",\"name\":\"Royal Andar Bahar\",\"display_order\":-1,\"gt\":\"cg\"},{\"id\":5153,\"image\":\"https:\\/\\/s3.eu-west-2.amazonaws.com\\/assets.beta\\/uploads\\/chicken_road.png\",\"provider\":\"inout\",\"link\":\"inout:ChikenRoad\",\"name\":\"Chicken Road\",\"display_order\":20,\"gt\":\"sw\"},{\"id\":693,\"image\":\"https:\\/\\/d2g8jl9s27zu.cloudfront.net\\/uploads\\/winmatch_teen_patti.png\",\"provider\":\"winmatch\",\"link\":\"openTable=227104\",\"name\":\"Royal Bet on Teen Patti\",\"display_order\":20,\"gt\":\"cg\"},{\"id\":691,\"image\":\"https:\\/\\/d2g8jl9s27zu.cloudfront.net\\/uploads\\/winmatch_royal_roulette.png\",\"provider\":\"winmatch\",\"link\":\"openTable=221006\",\"name\":\"Royal Roulette\",\"display_order\":2,\"gt\":\"cg\"},{\"id\":3160,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/ishome\\/vortex.png\",\"provider\":\"turbogames\",\"link\":\"turbogames:VORTEX\",\"name\":\"VORTEX\",\"display_order\":7,\"gt\":\"sw\"},{\"id\":616,\"image\":\"https:\\/\\/s3.ap-south-1.amazonaws.com\\/tokyo.assets\\/uploads\\/newuploads\\/banners\\/ez_dealer.png\",\"provider\":\"winmatch\",\"link\":\"openTable=481005\",\"name\":\"Winmatch EZ Dealer Roulette\",\"display_order\":-12,\"gt\":\"cg\"},{\"id\":112,\"image\":\"https:\\/\\"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/api2/v2/getBalance",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:48 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"status\":200,\"balance\":{\"exposure\":\"0.00\",\"pending_exposure\":0,\"pending_balance\":null,\"balance\":\"1,484.68\",\"main_balance\":\"1,484.68\",\"totalBalance\":\"1,484.68\",\"bonus\":\"0.00\",\"wager\":\"0.00\",\"wager_taget\":\"0.00\",\"wager_taget_val\":\"0\",\"wager_taget_formatted\":\"0.00\",\"bonus_formatted\":\"0.00\",\"wager_formatted\":\"0.00\",\"loyalty\":\"0.00\",\"split\":\".00\",\"next_split_cash\":\"100.00\",\"allow\":true,\"wallet\":1484.68,\"wallet_bal\":1484.68}}\n"
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/casinodata",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "application/json, text/javascript, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/append/searchpp",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "content-encoding": "gzip",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:48 GMT",
+      "content-type": "text/html; charset=UTF-8",
+      "vary": "Accept-Encoding",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "<div class=\"nw_searchRedirectPage\">\n    <svg class=\"nw_searchRedirectPageBackBtn\" xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\">\n        <path d=\"M9.57 18.82C9.38 18.82 9.19 18.75 9.04 18.6L2.97 12.53C2.68 12.24 2.68 11.76 2.97 11.47L9.04 5.4C9.33 5.11 9.81 5.11 10.1 5.4C10.39 5.69 10.39 6.17 10.1 6.46L4.56 12L10.1 17.54C10.39 17.83 10.39 18.31 10.1 18.6C9.96 18.75 9.76 18.82 9.57 18.82Z\" fill=\"white\"/>\n        <path d=\"M20.5 12.75H3.67C3.26 12.75 2.92 12.41 2.92 12C2.92 11.59 3.26 11.25 3.67 11.25H20.5C20.91 11.25 21.25 11.59 21.25 12C21.25 12.41 20.91 12.75 20.5 12.75Z\" fill=\"white\"/>\n    </svg>\n    <span>Search </span>\n</div>\n<div class=\"nw_newLeftSideSearchSection\">\n\n    <div class=\"nw_searchBox\">\n        <div class=\"SearchBar__searchContainer___1p84k\"  >\n            <div class=\"SearchBar__form___3KsGK nw_SearchBar__form___3KsGK pd_rm\" >\n                <div class=\"SearchBar__input___2JVJL focus-on-input nw_searchInputbox_bg mobile\">\n                    <svg class=\"nw_searchInputbox_bg_svg\" xmlns=\"http://www.w3.org/2000/svg\" width=\"18\" height=\"18\" viewBox=\"0 0 18 18\" fill=\"none\">\n                        <path d=\"M16.4887 15.5735L12.6807 11.6129C13.6601 10.4508 14.197 8.97978 14.1962 7.45999C14.1962 3.89801 11.2982 1 7.73624 1C4.17425 1 1.27625 3.89801 1.27625 7.45999C1.27625 11.022 4.17425 13.92 7.73624 13.92C9.07346 13.92 10.3478 13.5167 11.4373 12.751L15.2742 16.7416C15.4346 16.9082 15.6503 17 15.8814 17C16.1002 17 16.3078 16.9166 16.4654 16.7649C16.6262 16.6099 16.719 16.3974 16.7233 16.174C16.7277 15.9507 16.6433 15.7347 16.4887 15.5735ZM7.73624 2.68522C10.3691 2.68522 12.511 4.82713 12.511 7.45999C12.511 10.0929 10.3691 12.2348 7.73624 12.2348C5.10337 12.2348 2.96146 10.0929 2.96146 7.45999C2.96146 4.82713 5.10337 2.68522 7.73624 2.68522Z\" fill=\"#C2C2C2\"/>\n                    </svg>\n                    <input type=\"text\" placeholder=\"Search Team/Event names/games\" class=\"SearchBar__searchLabelImage___1Ugdb headerS"
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/append/depositpp",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "text/html, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/append/withdrawpp",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "text/html, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/broadcasting/auth",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:49 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"auth\":\"62a7e1e9728aecba7fa6:7183e8d016824725ef3ab8cb8fc7121c0d0846e2d869f35d14f44b4e47c1af20\"}\n"
+  },
+  {
+    "phase": "request",
+    "method": "GET",
+    "url": "https://cricmatch247.com/append/resetbonuspp",
+    "headers": {
+      "sec-ch-ua-platform": "\"macOS\"",
+      "referer": "https://cricmatch247.com/?uid=6392204",
+      "x-requested-with": "XMLHttpRequest",
+      "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/148.0.7778.96 Safari/537.36",
+      "accept": "text/html, */*; q=0.01",
+      "sec-ch-ua": "\"Chromium\";v=\"148\", \"HeadlessChrome\";v=\"148\", \"Not/A)Brand\";v=\"99\"",
+      "sec-ch-ua-mobile": "?0"
+    },
+    "post_data": null
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/casinodata",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:49 GMT",
+      "content-type": "application/json",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "{\"current_page\":1,\"data\":[{\"id\":2,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Andar Bahar\\/2.png\",\"name\":\"Andar Bahar Lobby\",\"class_name\":\"ezugi Premium casinofeatured all andhar_bahar andar_bahar andharbaharlobby ezugi andarbahar andarbahar\",\"provider\":\"ezugi\",\"link\":\"selectGame=andar_bahar\"},{\"id\":3,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Roulette\\/3.png\",\"name\":\"Roulette\",\"class_name\":\"ezugi all roulette lobby roulette\",\"provider\":\"ezugi\",\"link\":\"selectGame=roulette\"},{\"id\":4,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Poker\\/4.png\",\"name\":\"Poker\",\"class_name\":\"ezugi all poker lobby poker\",\"provider\":\"ezugi\",\"link\":\"selectGame=poker\"},{\"id\":14,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Blackjack\\/14.png\",\"name\":\"Blackjack Gold 1\",\"class_name\":\"ezugi all blackjack blackjack\",\"provider\":\"ezugi\",\"link\":\"openTable=204\"},{\"id\":18,\"image\":\"https:\\/\\/mlib684.s3.eu-west-2.amazonaws.com\\/uploads\\/Popular+game+type\\/Blackjack\\/18.png\",\"name\":\"VIP Diamond Blackjack\",\"class_name\":\"ezugi featured all blackjack blackjack\",\"provider\":\"ezugi\",\"link\":\"openTable=225\"}],\"first_page_url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=1\",\"from\":1,\"last_page\":8,\"last_page_url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=8\",\"links\":[{\"url\":null,\"label\":\"&laquo; Previous\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=1\",\"label\":\"1\",\"active\":true},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=2\",\"label\":\"2\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=3\",\"label\":\"3\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=4\",\"label\":\"4\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=5\",\"label\":\"5\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=6\",\"label\":\"6\",\"active\":false},{\"url\":\"https:\\/\\/cricmatch247.com\\/casinodata?page=7\","
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/append/withdrawpp",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "content-encoding": "gzip",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:49 GMT",
+      "content-type": "text/html; charset=UTF-8",
+      "vary": "Accept-Encoding",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "<div class=\"ReactModalPortal withdra_pop\" id=\"withdrawId\">\n    <div class=\"ReactModal__Overlay ReactModal__Overlay--after-open mb-modal__overlay\">\n        <div class=\"ReactModal__Content ReactModal__Content--after-open react-modal \" tabindex=\"-1\" role=\"dialog\"\n             aria-label=\"Mb Modal\" aria-modal=\"true\">\n            <div class=\"mb-modal mb-modal--deposit  undefined bank_tra_modal widtraPopup\">\n                <div class=\"mb-modal__header\">\n                    <span data-value=\"loginmatchbooktext\">Withdraw</span>\n                    <div role=\"button\" tabindex=\"0\" class=\"mb-modal__header__close withdraw_popup_close\"\n                         data-value=\"dialogboxclose\"\n                         onclick=\"withdraw_details()\">\n                        <svg class=\"mb-modal__header__icon\" width=\"14px\" height=\"14px\" viewBox=\"0 0 14 14\"\n                             version=\"1.1\">\n                            <defs></defs>\n                            <g id=\"Page-1\" stroke=\"none\" stroke-width=\"1\" fill=\"none\" fill-rule=\"evenodd\">\n                                <g id=\"Icons\" transform=\"translate(-81.000000, -971.000000)\" fill=\"#FFFFFF\">\n                                    <polygon id=\"close\"\n                                             points=\"95 972.41 93.59 971 88 976.59 82.41 971 81 972.41 86.59 978 81 983.59 82.41 985 88 979.41 93.59 985 95 983.59 89.41 978\"></polygon>\n                                </g>\n                            </g>\n                        </svg>\n                    </div>\n                </div>\n                <div class=\"mb-modal__content\">\n                    <div class=\"Cashier-module__main___1dWUJ\">\n                        <div class=\"bank_tra_container withdrawal-bank-tra bnkTransfer_par\">\n                            <div id=\"slider\" class=\"cls_w_card crds_slderPar dev_card_details_slider\" style=\"margin-top:50px\">\n                                <div class=\"dp-wrap\">\n                                    <div id=\"dp-slider\"  class=\"cls_cardde"
+  },
+  {
+    "phase": "response",
+    "status": 200,
+    "url": "https://cricmatch247.com/append/depositpp",
+    "headers": {
+      "strict-transport-security": "max-age=31536000; includeSubDomains",
+      "content-security-policy": "frame-ancestors 'none'",
+      "cache-control": "max-age=0, must-revalidate, no-cache, no-store, private",
+      "content-encoding": "gzip",
+      "pragma": "no-cache",
+      "x-content-type-options": "nosniff",
+      "expires": "Sat, 01 Jan 1990 00:00:00 GMT",
+      "date": "Thu, 30 Jul 2026 12:38:49 GMT",
+      "content-type": "text/html; charset=UTF-8",
+      "vary": "Accept-Encoding",
+      "server": "Apache/2.4.41 (Ubuntu)",
+      "x-frame-options": "DENY"
+    },
+    "body": "<style>\n    .colimg_wth_txt{\n      background-image: url('https://d2g8jl9s27zu.cloudfront.net/wmsc/mblogo2/5/deposit_success_logo.webp');\n    }\n    .rdcolimg{\n      background-image: url('https://d2g8jl9s27zu.cloudfront.net/wmsc/mblogo2/5/deposit_failed_logo.webp');\n    }\n</style>\n\n<section class=\"nw_depositSection appdepodata notLoaded\" id=\"depositId\" style=\"display:none\">\n    <div class=\"depositContainer\">\n        <div class=\"nwDepositSection\">\n            <div class=\"nwDepositHeader\">\n                <div class=\"backIcon\" id=\"backToHmDeposit\" style=\"display:none;\">\n                    <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\">\n                        <path d=\"M9.56994 18.8172C9.37994 18.8172 9.18994 18.7472 9.03994 18.5972L2.96994 12.5272C2.67994 12.2372 2.67994 11.7572 2.96994 11.4672L9.03994 5.39719C9.32994 5.10719 9.80994 5.10719 10.0999 5.39719C10.3899 5.68719 10.3899 6.16719 10.0999 6.45719L4.55994 11.9972L10.0999 17.5372C10.3899 17.8272 10.3899 18.3072 10.0999 18.5972C9.95994 18.7472 9.75994 18.8172 9.56994 18.8172Z\" fill=\"white\"/>\n                        <path d=\"M20.5 12.75H3.67004C3.26004 12.75 2.92004 12.41 2.92004 12C2.92004 11.59 3.26004 11.25 3.67004 11.25H20.5C20.91 11.25 21.25 11.59 21.25 12C21.25 12.41 20.91 12.75 20.5 12.75Z\" fill=\"white\"/>\n                    </svg>\n                </div>\n                <p class=\"nwDepositHeaderText main_header\">Deposit</p>\n                <svg class=\"depositClseBtn\" width=\"14px\" height=\"14px\" viewBox=\"0 0 14 14\" version=\"1.1\">\n                    <defs></defs>\n                    <g id=\"Page-1\" stroke=\"none\" stroke-width=\"1\" fill=\"none\" fill-rule=\"evenodd\">\n                        <g id=\"Icons\" transform=\"translate(-81.000000, -971.000000)\" fill=\"#FFFFFF\">\n                            <polygon id=\"close\" points=\"95 972.41 93.59 971 88 976.59 82.41 971 81 972.41 86.59 978 81 983.59 82.41 985 88 979.41 93.59 985 95 983.59 89.41 978\"></polygon>\n                 "
+  }
+]

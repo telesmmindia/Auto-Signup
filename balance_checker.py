@@ -33,11 +33,15 @@ Reuses --env's BOT_SITE_URL and SETTINGS_FILE (so it automatically picks up
 whatever proxy /setproxy currently has set on that bot instance), same
 convention as sheet_watcher.py.
 
-NOT YET VERIFIED LIVE: read_wallet_balance() in main.py is a best-effort
-heuristic -- no real wallet-balance selector has been inspected against a
-real account yet. Run inspect_wallet.py against one real account and confirm
-the number it finds matches the site's own header before relying on this
-for real accounts.
+Each row is checked via main.http_check_account_balance() -- two plain HTTP
+POSTs (login, then the site's own getBalance() call) via `requests`, no
+browser at all -- when the resolved site's profile sets
+supports_http_login=True (cricmatch only, confirmed live 2026-07-30, see
+CLAUDE.md's "Sheet-driven balance checking" section). This is ~10x faster
+than the old Playwright-login path (run_balance_check(), still used as the
+automatic fallback for any site that doesn't support it) and light enough
+that MAX_CONCURRENT can comfortably be higher than the browser path's -- no
+per-account browser process, just an HTTP round trip.
 """
 import json
 import os
@@ -76,8 +80,11 @@ CREDENTIALS_FILE = os.environ.get(
 # 15-30s+ each) and this site rate-limits/WAF-blocks aggressive automated
 # traffic (see CLAUDE.md) -- default to a much longer interval than
 # sheet_watcher.py's 20s queue poll.
+# Much shorter than before now that a check is 2 HTTP calls instead of a
+# full browser login+poll for supported sites -- still tuneable in case a
+# proxy provider rate-limits concurrent connections (see CLAUDE.md).
 POLL_SECONDS = int(os.environ.get("BALANCE_POLL_SECONDS", "300"))
-MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "2"))
+MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "5"))
 SITE_URL = os.environ.get("BOT_SITE_URL") or engine.SITE_URL
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
 
@@ -112,9 +119,10 @@ def get_worksheet():
 def process_row(ws, row_idx, username, password):
     print(f"[row {row_idx}] checking {username}...")
     result = {"ok": False, "balance": None, "messages": [], "shot": None}
+    prof = engine.profile_for(SITE_URL)
+    checker = engine.http_check_account_balance if prof.supports_http_login else engine.run_balance_check
     try:
-        result = engine.run_balance_check(username, password, site_url=SITE_URL,
-                                          proxy=current_proxy())
+        result = checker(username, password, site_url=SITE_URL, proxy=current_proxy())
     except Exception as e:
         traceback.print_exc()
         result["messages"] = [f"Unhandled error: {e}"]

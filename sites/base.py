@@ -79,3 +79,17 @@ class SiteProfile:
     # goes through, but called on an authenticated session instead of an
     # anonymous one.
     free_number_path: str = "/send_otp"
+
+    # Whether logging into an EXISTING account and reading its wallet balance
+    # can be done with plain `requests` (no browser) -- confirmed live for
+    # cricmatch by capturing a real Playwright login's network traffic, then
+    # replaying it with a bare requests.Session and getting byte-identical
+    # JSON. False -> balance checks fall back to the Playwright login() path.
+    supports_http_login: bool = False
+
+    # Path the login form's JS POSTs to, used only when supports_http_login.
+    http_login_path: str = "/login"
+
+    # Path that returns the logged-in account's wallet balance as JSON, used
+    # only when supports_http_login.
+    http_balance_path: str = "/api2/v2/getBalance"

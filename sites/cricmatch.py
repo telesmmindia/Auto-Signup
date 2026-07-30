@@ -34,6 +34,17 @@ PROFILE = SiteProfile(
     # real path was given directly.
     supports_free_number=True,
     free_number_path="/send_otp_touser",
+    # Confirmed live 2026-07-30 by capturing a real Playwright login's network
+    # traffic then replaying it with a bare requests.Session (see
+    # http_check_account_balance() in main.py / CLAUDE.md's "Sheet-driven
+    # balance checking" section): POST /login (username/password/remember_me
+    # + csrf _token) -> {"status":200,"message":"Login Successfully",...},
+    # then POST /api2/v2/getBalance (just the csrf _token) ->
+    # {"status":200,"balance":{"wallet":1484.68,...}}. No WAF/JS challenge on
+    # either endpoint, same as the register flow.
+    supports_http_login=True,
+    http_login_path="/login",
+    http_balance_path="/api2/v2/getBalance",
     sel={
         # ---- signup ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",
