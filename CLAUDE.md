@@ -1795,10 +1795,14 @@ each other's cells.
 Unlike the hedge sheet's queue semantics (a row runs once, STATUS then
 blocks it until cleared), there's no "already done" state here: **every**
 row with A+B filled gets re-checked on every poll cycle (default
-`BALANCE_POLL_SECONDS=300`, deliberately much longer than the hedge sheet's
-20s queue poll -- a balance check is a full login, easily 15-30s+ each, and
-this site rate-limits/WAF-blocks aggressive automated login traffic, same
-caveat as everywhere else in this file). STATUS shows the outcome of the
+`BALANCE_POLL_SECONDS=1800`, i.e. 30 minutes -- deliberately much longer than
+the hedge sheet's 20s queue poll, and raised from an original 300s default
+after a live 2026-07-30 incident: this site's `/login` rate-block turned out
+to be a ROLLING window, so retrying every 5 minutes kept re-triggering it and
+never let it clear, for over an hour straight. 30 minutes gives the block a
+real chance to expire between attempts -- see the "HTTP-fast balance checks"
+section below for the full incident and the matching `MAX_CONCURRENT=1`
+fix). STATUS shows the outcome of the
 most recent check (`✅ checked <timestamp>` or `❌ <timestamp> — <error>`);
 BALANCE holds the last **successfully** read number and is deliberately left
 alone on a failed check, so one transient login hiccup or WAF block doesn't
@@ -1862,8 +1866,8 @@ default sheet baked in, unlike `sheet_watcher.py`'s hardcoded hedge-sheet
 ID), `BALANCE_SHEET_WORKSHEET_GID` (default `"0"`), `BALANCE_SHEET_CREDENTIALS_FILE`
 (falls back to `SHEET_CREDENTIALS_FILE`, then `service_account.json` — reuse
 the same service account as the hedge sheet, just share it with this new
-sheet too), `BALANCE_POLL_SECONDS` (default 300), `BALANCE_MAX_CONCURRENT`
-(default 2, same "size to your proxy/IP diversity" caveat as
+sheet too), `BALANCE_POLL_SECONDS` (default 1800), `BALANCE_MAX_CONCURRENT`
+(default 1, same "size to your proxy/IP diversity" caveat as
 `MAX_CONCURRENT_RUNS` elsewhere).
 
 Run:
