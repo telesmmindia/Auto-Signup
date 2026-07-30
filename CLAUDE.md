@@ -1805,24 +1805,35 @@ alone on a failed check, so one transient login hiccup or WAF block doesn't
 blank out the last known-good figure.
 
 Engine (`main.py`):
-- `read_wallet_balance(page)` — scrapes the site's own header wallet
-  balance (cricmatch247 shows "MY WALLET" there), **not** the in-game
-  Evolution balance `read_game_balance()` reads elsewhere in this file (that
-  one reads a live casino table's own frame; this reads the surrounding site
-  chrome). **NOT YET VERIFIED LIVE** — no real selector has been inspected
-  against actual DOM yet (unlike `login()`'s selectors, which came from
-  `inspect_form.py`-style live inspection against `sites/cricmatch.py`).
-  Rather than guess a single class name, it scans for any short text node
-  containing "wallet" and looks for a rupee amount in that element or its
-  immediate neighbor (label/value commonly split across two nodes, same
-  pattern `read_game_balance()` relies on) — returns an int or `None`, and a
-  `None` must be read as "selector needs updating," never as "balance is 0."
-  `inspect_wallet.py` (new script, mirrors the `inspect_form.py`/
-  `probe_evo_lobby.py` precedent of "dump the DOM, then write selectors from
-  what's real") logs into one real account read-only and dumps every
-  wallet/₹-looking element plus what `read_wallet_balance()` currently
-  returns, so the heuristic can be checked/replaced with a real selector
-  once a real account is available to test against.
+- `read_wallet_balance(page, timeout_secs=30)` — reads the site's own header
+  wallet balance (cricmatch247's "My Wallet"), **not** the in-game Evolution
+  balance `read_game_balance()` reads elsewhere in this file (that one reads
+  a live casino table's own frame; this reads the surrounding site chrome).
+  **VERIFIED LIVE 2026-07-30** against a real account (`ali789`, via
+  `inspect_wallet.py`, through the cricmatch bot's residential proxy) — the
+  figure lives in `span.total_balance` (mirrored in `span.wallet_balance`
+  under "Available", same number), now `sites/cricmatch.py`'s
+  `sel["wallet_balance"]`. Two non-obvious things found live, both handled:
+  1. Both spans are **empty in the raw HTML at page-load** — the site fills
+     them in later via its own onload `getBalance()` call. Measured live:
+     ~20s on a residential proxy. `read_wallet_balance()` polls (1s interval,
+     `timeout_secs=30` default) instead of reading once right after login.
+  2. A real navigation happens shortly after login (the same kind of
+     redirect `free_phone_number()` already has to tolerate), which can
+     kill the execution context mid-poll ("Execution context was
+     destroyed"). Treated as "try again next tick," not a hard failure.
+
+  Returns a `float` (rupees, may include paise — `"₹ 1,484.68"` → `1484.68`)
+  or `None` if it never populates within the timeout; a caller must read
+  `None` as "selector/timing needs revisiting," never as "balance is 0."
+  Confirmed live end-to-end via `balance_checker.py --once` (below): read
+  `ali789`'s real balance (₹1,484.68) and wrote it into the sheet correctly.
+  `inspect_wallet.py` (mirrors the `inspect_form.py`/`probe_evo_lobby.py`
+  precedent of "dump the DOM, then write selectors from what's real") logs
+  into one real account read-only, waits for `read_wallet_balance()`, and
+  dumps every wallet/₹-looking element — kept around for re-verifying the
+  selector if the site's markup ever changes, not because the current one is
+  still a guess.
 - `check_account_balance(page, username, password, site_url=None)` — logs in
   via the existing `login()` (same requirement as `test_baccarat()`/
   `free_account_number()`: needs `supports_casino`'s login selectors,
@@ -1865,13 +1876,19 @@ Cloud service account" above) — same service account, same JSON key, just
 share the balance sheet with it too (Editor access, since BALANCE/STATUS get
 written back).
 
-**Not yet run against a live sheet or a live account** — built and
-import/wiring-verified (env resolution including the required-spreadsheet-id
-check, proxy passthrough, syntax) but no Google Sheet has been created for
-this yet and no service account JSON has been provided. The wallet-balance
-selector itself is also unverified (see `read_wallet_balance()` above) —
-run `inspect_wallet.py` against one real account before trusting any number
-this produces.
+**Verified live end-to-end 2026-07-30**: real sheet
+(`1YtyE40zgSOq3h3azT36S2Kw1nSwsCh_QMnJ4USQHRu4`, shared with the service
+account `sheet-bal-prince@prince-bal.iam.gserviceaccount.com`), real account
+(`ali789`), `balance_checker.py --once --env .env.cricmatch` read a real
+balance and wrote `BALANCE`/`STATUS` back correctly. `.env.cricmatch` now
+carries `BALANCE_SHEET_SPREADSHEET_ID`/`BALANCE_SHEET_WORKSHEET_GID` for
+this sheet so a plain `.venv/bin/python balance_checker.py --env
+.env.cricmatch` (no extra env vars needed) runs it continuously. **Not yet
+run continuously for a real stretch or against more than one account at
+once** — the one-shot (`--once`) path is confirmed; the recurring
+5-minute-poll loop and multi-row/`BALANCE_MAX_CONCURRENT` behavior are
+built the same way as `sheet_watcher.py`'s but not separately soak-tested
+yet.
 
 ## Site-specific notes
 

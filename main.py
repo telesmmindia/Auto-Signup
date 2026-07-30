@@ -924,51 +924,56 @@ def free_account_number(page, username, password, site_url=None):
     return result
 
 
-def read_wallet_balance(page):
-    """Best-effort scrape of the site's OWN wallet balance from the
-    logged-in header (cricmatch247 shows "MY WALLET" there) -- NOT the
-    in-game Evolution balance read_game_balance() reads from a live casino
-    table's own frame; this reads the site chrome around it instead.
+WALLET_BALANCE_TIMEOUT_SECS = 30
+WALLET_BALANCE_POLL_MS = 1000
 
-    NOT YET VERIFIED LIVE: no real selector for this element has been
-    inspected yet (unlike login()'s selectors, which come from
-    sites/cricmatch.py and were confirmed against real DOM). Run
-    inspect_wallet.py against one real account and compare its output to
-    what this returns before trusting these numbers for anything real.
 
-    Deliberately does not hardcode a single guessed selector -- instead it
-    scans the page for any short text node containing "wallet" and looks
-    for a rupee amount in that element or its immediate neighbors (label and
-    value are commonly split across two nodes, as they are for the in-game
-    balance read_game_balance() reads). Returns an int (rupees) or None if
-    nothing matched; a caller must treat None as "selector needs updating,"
-    never as "balance is 0.\""""
-    try:
-        raw = page.evaluate(
-            """() => {
-                const rupee = /[₹]\\s?([\\d,]+(?:\\.\\d+)?)/;
-                const nodes = Array.from(document.querySelectorAll('body *'));
-                for (const el of nodes) {
-                    const text = (el.innerText || '').trim();
-                    if (!text || text.length > 40 || !/wallet/i.test(text)) continue;
-                    const candidates = [el, el.nextElementSibling, el.parentElement]
-                        .filter(Boolean);
-                    for (const c of candidates) {
-                        const m = rupee.exec(c.innerText || '');
-                        if (m) return m[1];
-                    }
-                }
-                return null;
-            }"""
-        )
-    except Exception:
+def read_wallet_balance(page, timeout_secs=WALLET_BALANCE_TIMEOUT_SECS):
+    """Scrape the site's OWN wallet balance from the logged-in header
+    (cricmatch247's "My Wallet") -- NOT the in-game Evolution balance
+    read_game_balance() reads from a live casino table's own frame; this
+    reads the site chrome around it instead.
+
+    VERIFIED LIVE 2026-07-30 against a real account (ali789, via
+    inspect_wallet.py): the figure lives in `span.total_balance` (mirrored
+    in `span.wallet_balance` under "Available" -- same number, either works),
+    `sites/cricmatch.py`'s sel["wallet_balance"]. Two non-obvious things
+    found live, both handled here:
+    1. Both spans are EMPTY in the raw HTML at page-load -- the site fills
+       them in later via its own onload getBalance() call. In one real test
+       this took ~20s on a residential proxy, so this polls for up to
+       `timeout_secs` rather than reading once immediately after login.
+    2. A real navigation happens shortly after login (same as the redirect
+       free_phone_number() has to tolerate -- see CLAUDE.md), which can kill
+       the execution context mid-poll ("Execution context was destroyed").
+       That's treated as "try again next tick," not a hard failure.
+
+    Returns a float (rupees, may include paise, e.g. "₹ 1,484.68" -> 1484.68)
+    or None if it never populates within the timeout -- a caller must treat
+    None as "selector/timing needs revisiting," never as "balance is 0.\""""
+    prof = profile_for(page.url)
+    sel = prof.sel.get("wallet_balance")
+    if not sel:
         return None
-    if not raw:
-        return None
-    try:
-        return int(float(raw.replace(",", "")))
-    except ValueError:
-        return None
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        try:
+            vals = page.eval_on_selector_all(sel, "els => els.map(e => e.innerText)")
+        except Exception:
+            page.wait_for_timeout(WALLET_BALANCE_POLL_MS)
+            continue
+        for v in vals:
+            v = (v or "").strip()
+            if not v:
+                continue
+            m = re.search(r"[\d,]+(?:\.\d+)?", v)
+            if m:
+                try:
+                    return float(m.group(0).replace(",", ""))
+                except ValueError:
+                    pass
+        page.wait_for_timeout(WALLET_BALANCE_POLL_MS)
+    return None
 
 
 def check_account_balance(page, username, password, site_url=None):

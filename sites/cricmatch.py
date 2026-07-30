@@ -62,5 +62,11 @@ PROFILE = SiteProfile(
         # Sidebar Live Casino link with a real href (NOT the top-nav
         # href="javascript:;" tab, which no-ops under the SPRIBE overlay).
         "casino_nav": "a:has-text('Live Casino'):not([href=\"javascript:;\"])",
+        # Header "My Wallet" balance -- verified live 2026-07-30 (ali789).
+        # Both spans hold the same figure (My Wallet total / Available); the
+        # raw HTML has them EMPTY at page-load, only filled in later by the
+        # site's own onload getBalance() call (see read_wallet_balance() in
+        # main.py, which polls rather than reading once).
+        "wallet_balance": "span.total_balance, span.wallet_balance",
     },
 )
