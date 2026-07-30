@@ -52,6 +52,12 @@ typically shares one proxy IP and concurrent login POSTs from the same IP
 are what trip the site's rate-based block (see MAX_CONCURRENT's own comment
 below). The speed win shows up as a fast serialized sweep through the whole
 sheet, not as parallelism.
+
+_wait_for_turn() additionally paces every check (default
+CHECK_SPACING_SECONDS=30, see its comment) -- real 2026-07-30 sheet data
+showed serialized-but-rapid checks (~9s apart, no deliberate delay) still
+tripped the same rate block once a burst of ~20 new rows got processed in a
+few minutes, so MAX_CONCURRENT=1 alone wasn't the whole fix.
 """
 import json
 import os
@@ -103,6 +109,17 @@ POLL_SECONDS = int(os.environ.get("BALANCE_POLL_SECONDS", "20"))
 # so there's no real throughput reason to raise this unless a future proxy
 # setup gives each account its own IP.
 MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "1"))
+# Real sheet data 2026-07-30: MAX_CONCURRENT=1 (already fully serialized)
+# was NOT enough on its own -- a batch of ~20 new rows checked back-to-back
+# (~9s apart, no deliberate pacing) all succeeded, but the very next few rows
+# added right after immediately hit the same 403. That points to a VOLUME
+# limit (something like "~20 logins in a few minutes from one IP"), not a
+# concurrency one -- serialized-but-rapid is still rapid. This forces a
+# minimum gap between the START of each login attempt, spreading a burst of
+# many new rows out over minutes instead of firing them as fast as the
+# executor can. Exact safe threshold is NOT confirmed (no controlled test
+# run yet) -- 30s is a conservative starting guess, tuneable via env var.
+CHECK_SPACING_SECONDS = int(os.environ.get("BALANCE_CHECK_SPACING_SECONDS", "30"))
 SITE_URL = os.environ.get("BOT_SITE_URL") or engine.SITE_URL
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
 
@@ -110,6 +127,21 @@ COL_USERNAME, COL_PASSWORD, COL_BALANCE, COL_STATUS = range(1, 5)
 
 _lock = threading.Lock()
 _in_flight_rows = set()
+_spacing_lock = threading.Lock()
+_last_check_started = 0.0
+
+
+def _wait_for_turn():
+    """Blocks until at least CHECK_SPACING_SECONDS has passed since the last
+    check STARTED (not finished) -- called from the worker thread(s) actually
+    running process_row, so it paces logins without blocking poll_once()
+    itself from noticing new rows."""
+    global _last_check_started
+    with _spacing_lock:
+        wait = CHECK_SPACING_SECONDS - (time.time() - _last_check_started)
+        if wait > 0:
+            time.sleep(wait)
+        _last_check_started = time.time()
 
 
 def current_proxy():
@@ -135,6 +167,7 @@ def get_worksheet():
 
 
 def process_row(ws, row_idx, username, password):
+    _wait_for_turn()
     print(f"[row {row_idx}] checking {username}...")
     result = {"ok": False, "balance": None, "messages": [], "shot": None}
     prof = engine.profile_for(SITE_URL)

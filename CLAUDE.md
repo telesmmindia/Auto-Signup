@@ -2056,6 +2056,25 @@ change behavior at all for a site that isn't scrutinizing this closely.
 Verified live immediately after the change: `http_check_account_balance()`
 still round-trips correctly end-to-end against a real account.
 
+**The rate block turned out to be about VOLUME, not concurrency — found from
+real sheet data 2026-07-30, after the queue-semantics change above (checking
+only new rows) was already live.** With MAX_CONCURRENT=1 (fully serialized)
+and no deliberate pacing between checks, a burst of new rows added to the
+sheet at once got checked back-to-back roughly every ~9s (poll overhead +
+the ~3s HTTP round trip). One such burst of ~20 accounts all succeeded, but
+the next few rows added right after immediately hit the same bare `403` on
+`/login` — meaning something like "roughly 20 logins within a few minutes
+from one IP" trips the block, independent of whether those logins were
+concurrent. Fix: `balance_checker.py`'s `_wait_for_turn()` now enforces a
+minimum gap (`BALANCE_CHECK_SPACING_SECONDS`, default 30s) between the
+*start* of each login attempt, called from inside `process_row()` so it
+paces checks without blocking `poll_once()` from noticing new rows. This
+spreads a burst of many new rows out over minutes instead of firing them as
+fast as the executor can. The 30s default and the "~20 per few minutes"
+threshold are both **inferred from one incident, not a controlled test** —
+tune `BALANCE_CHECK_SPACING_SECONDS` up if 403s keep recurring, or down if
+30s turns out to be far more conservative than necessary.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an
