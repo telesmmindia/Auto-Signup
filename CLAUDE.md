@@ -2081,6 +2081,81 @@ threshold are both **inferred from one incident, not a controlled test** —
 tune `BALANCE_CHECK_SPACING_SECONDS` up if 403s keep recurring, or down if
 30s turns out to be far more conservative than necessary.
 
+## Sheet-driven password changes (`password_changer.py`)
+
+A third sheet-driven script (alongside `sheet_watcher.py`'s hedge queue and
+`balance_checker.py`'s balance polling), for the same underlying feature as
+the Telegram bot's `/cp` command (see "`/cp`: changing the password on an
+EXISTING account" above) — a sheet-based front end so a batch of password
+changes can be queued without going through the bot one at a time.
+
+Sheet layout (row 1 = header): `A: USERNAME | B: PASSWORD | C: NEW PASSWORD
+| D: STATUS`. **Deliberately its own sheet**, not reusing the balance or
+hedge sheets — different columns/purpose, and sharing a sheet across
+scripts risks the same clobbering problem the hedge/balance sheets were
+already kept separate to avoid.
+
+Same queue semantics as `balance_checker.py` (itself matching
+`sheet_watcher.py`'s hedge queue): a row with `A`+`B` filled and an empty
+`STATUS` is picked up and processed exactly once; `STATUS` is then set to a
+result, so it won't be re-picked-up on the next poll. Clear `STATUS` by hand
+to retry a row (e.g. after fixing a typo'd current password). `C` (NEW
+PASSWORD) is optional — if left blank, `process_row()` generates one via
+`main.gen_password()` (the same function `/cp` uses when its new-password
+argument is omitted) and **writes it back into column C** before attempting
+the change, so the sheet ends up holding the actual new password either
+way, not just a "was randomly generated" note.
+
+Engine: `main.run_change_account_password(username, current_password,
+new_password, site_url=None, proxy=None)` — a standalone single-call entry
+point mirroring `run_balance_check()`'s exact shape (launches its own
+throwaway Playwright browser + context via `_launch_pw_browser()`/
+`parse_proxy()`/`maybe_bridge_proxy()`, calls
+`change_account_password_via_login()`, tears everything down on every exit
+path). Added specifically so `password_changer.py` (or any other caller)
+doesn't need to hold a `page`/`context` itself, same reasoning
+`run_balance_check()` was added for `balance_checker.py`.
+
+`password_changer.py` mirrors `balance_checker.py`'s shape closely: same
+`--env <path>` / `load_dotenv(_env_file, override=True)` gotcha, same
+`current_proxy()` pattern (re-reads `--env`'s `SETTINGS_FILE` live on every
+change, so `/setproxy` on that bot instance applies automatically), same
+`--once` flag. Config: `PASSWORD_SHEET_SPREADSHEET_ID` (required),
+`PASSWORD_SHEET_WORKSHEET_GID` (default `"0"`),
+`PASSWORD_SHEET_CREDENTIALS_FILE` (falls back to `SHEET_CREDENTIALS_FILE`,
+then `service_account.json` — reuse the same service account, just share
+this new sheet with it too), `PASSWORD_SHEET_POLL_SECONDS` (default 20),
+`PASSWORD_SHEET_MAX_CONCURRENT` (default 1), and
+`PASSWORD_SHEET_CHECK_SPACING_SECONDS` (default 30s).
+
+**`MAX_CONCURRENT`/`CHECK_SPACING_SECONDS` default conservative for the same
+reason `balance_checker.py`'s do** — this script logs in via real
+Playwright just as much as that one does per row (there's no HTTP-fast path
+for the change-password endpoint; unlike `balance_checker.py`'s
+`http_check_account_balance()` shortcut, it hasn't been investigated
+whether `change_account_password()`'s request works from a bare
+`requests.Session` without the cookies a real browser session accumulates —
+the same open question `free_phone_number()`'s HTTP path has), so it's
+exposed to the identical login-volume rate block documented above. The 30s/1
+defaults are carried over from that finding, not independently confirmed
+against this specific endpoint.
+
+Run:
+```
+PASSWORD_SHEET_SPREADSHEET_ID=<sheet id> .venv/bin/python password_changer.py --env .env.password
+```
+
+Setup is identical to the hedge/balance sheets (see "Requires a Google
+Cloud service account" above) — same service account, same JSON key, just
+share this sheet with it too (Editor access, since NEW PASSWORD/STATUS get
+written back).
+
+**Not yet run against a live sheet** — built following the confirmed-working
+`balance_checker.py`/`sheet_watcher.py` pattern and the already-verified
+`change_account_password_via_login()` engine call, but no sheet has been
+created/shared with a service account for this yet, so no row has actually
+been polled or processed end-to-end.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an

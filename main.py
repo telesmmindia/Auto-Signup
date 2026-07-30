@@ -1043,6 +1043,49 @@ def change_account_password_via_login(page, username, current_password, new_pass
     return result
 
 
+def run_change_account_password(username, current_password, new_password, site_url=None, proxy=None):
+    """Standalone single-call entry point for one account's password change:
+    launches its own throwaway Playwright browser + context (same
+    _launch_pw_browser()/parse_proxy()/maybe_bridge_proxy() pattern
+    run_balance_check() uses), logs in, changes the password, and tears
+    everything down on every exit path -- same one-call convention as
+    run_balance_check(), for password_changer.py (or any other caller) that
+    isn't already holding a page/context. Returns
+    change_account_password_via_login()'s result dict."""
+    result = {"ok": False, "messages": [], "shot": None, "new_password": None}
+    try:
+        pw, browser = _launch_pw_browser()
+    except Exception as e:
+        result["messages"] = [f"Failed to launch browser: {e}"]
+        return result
+
+    bridge_proc = None
+    try:
+        proxy_conf = parse_proxy(proxy) if proxy else None
+        try:
+            proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+        except RuntimeError as e:
+            result["messages"] = [f"Proxy bridge failed to start: {e}"]
+            return result
+        context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        try:
+            page = context.new_page()
+            result = change_account_password_via_login(
+                page, username, current_password, new_password, site_url=site_url)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+    finally:
+        stop_bridge(bridge_proc)
+        try:
+            browser.close()
+        finally:
+            pw.stop()
+    return result
+
+
 WALLET_BALANCE_TIMEOUT_SECS = 30
 WALLET_BALANCE_POLL_MS = 1000
 
