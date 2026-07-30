@@ -410,7 +410,7 @@ The current production layout is cricmatch signup (`.env.cricmatch`,
 cricmatch gameplay (`.env.gameplay`, `BOT_MODE=gameplay` — the casino/hedge
 commands only), cricmatch stock market hedge (`.env.stockmarket`,
 `BOT_MODE=stockmarket`), and cricmatch password-change (`.env.password`,
-`BOT_MODE=password` — `/changepassword` only, since 2026-07-30).
+`BOT_MODE=password` — `/cp` only, since 2026-07-30).
 
 ```
 cp .env.cricmatch.example .env.cricmatch
@@ -442,10 +442,10 @@ they never advertise a command the instance doesn't have. The split:
   gameplay-mode bot has nothing to run — `/start` tells them so. URL
   commands are excluded on purpose: gameplay always targets `BOT_SITE_URL`
   directly, `/seturl` never affected it.
-- **password**: `/changepassword` only, master-only, its own exclusive mode
+- **password**: `/cp` only, master-only, its own exclusive mode
   like `stockmarket` (deliberately NOT part of `"all"`, so a plain single-bot
   setup never accidentally exposes a command that mutates a real account's
-  login credential) — see `/changepassword`'s own section above.
+  login credential) — see `/cp`'s own section above.
 - **both/all modes**: `/start` `/help`, proxy commands (`/setproxy` `/proxy`
   `/clearproxy` `/testproxy` — hedge runs route through the global proxy
   too), and admin management. The `handle_message` phone/OTP text handler is
@@ -707,16 +707,26 @@ bare-403 edge-block described above and exhausted the whole retry budget —
 prompting the widening to 15x45s (~10.5min) noted there; that widening
 itself is not yet re-confirmed against a fresh 403.
 
-### `/changepassword`: changing the password on an EXISTING account
+### `/cp`: changing the password on an EXISTING account
 
 A separate, standalone bot mode (`BOT_MODE=password`, see "Running one bot
 per site / per role" below), for the same kind of on-demand, arbitrary-
 account action as `/freenum` above, but for the login password instead of
-the phone number: `/changepassword <username> <current_password>
-[new_password]` logs into an account you already have and changes its
-password. If `new_password` is omitted, a random policy-compliant one (via
-the same `gen_password()` signup uses — 5-60 chars, upper/lower/digit/
-special) is generated and reported back in the reply.
+the phone number. Unlike every other credential-taking command in this file
+(`/freenum`, `/testbaccarat`, `/pair`), credentials are NOT passed as
+command arguments — `/cp` alone starts the flow (`cp_cmd()`, adds the chat
+to the module-level `pending_changepassword` set and prompts for input),
+then the very next plain-text message in that chat is parsed by
+`handle_cp_message()` as `<username> <current_password> [new_password]` and
+run through `change_account_password_via_login()`. This two-step shape was
+a deliberate simplicity request (typing a long `/cp user pass newpass` line
+is more error-prone than a short trigger + a follow-up message). If
+`new_password` is omitted, a random policy-compliant one (via the same
+`gen_password()` signup uses — 5-60 chars, upper/lower/digit/special) is
+generated and reported back in the reply. `handle_cp_message()` only acts if
+the chat is actually pending AND the sender is master — a stray text message
+otherwise (there's nothing else for plain text to do in password-only mode)
+is silently ignored.
 
 **Finding the mechanism was genuinely greenfield** — unlike free-number
 (which had `/send_otp_touser` from the start of that investigation), nobody
@@ -768,12 +778,14 @@ free-number's 15x45s budget) — that width was earned empirically for a
 different endpoint's rate-limit behavior; don't port it here speculatively,
 only add one if live testing surfaces the same kind of WAF/rate-limit block.
 
-Master-only (`@require_role(is_master)`), same restricted scope as
-`/freenum`/`/testbaccarat` — mutates a real account's login credential.
+`/cp` itself is `@require_role(is_master)`-gated (same restricted scope as
+`/freenum`/`/testbaccarat` — mutates a real account's login credential);
+`handle_cp_message()` re-checks `is_master()` on the follow-up message too,
+since a `MessageHandler` isn't covered by that decorator.
 `_blocking_change_password()` in `telegram_bot.py` runs it on
 `_pw_executors[0]` with a throwaway context, mirroring
 `_blocking_free_number()`'s pattern exactly. The **current/old** password
-supplied as a command argument is never echoed back in the reply (same
+typed into the follow-up message is never echoed back in the reply (same
 discipline as `/freenum`/`/testbaccarat`); the **new** password IS included
 in a successful reply's caption, matching `build_caption()`'s existing norm
 of including plaintext passwords in master-only chat captions for

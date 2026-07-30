@@ -255,6 +255,9 @@ sessions = {}
 # auto-restarts a fresh signup after each one finishes, until /done or
 # /cancel removes it from this set.
 looping_chats = set()
+# chat_ids awaiting "<username> <current_password> [new_password]" after
+# /cp -- see cp_cmd()/handle_cp_message() below.
+pending_changepassword = set()
 # Hard ceiling on /newacc <n> so a fat-fingered count can't spawn an
 # unreasonable number of Chromium contexts at once.
 MAX_PARALLEL_NEWACC = 10
@@ -435,7 +438,7 @@ if HEDGE_ENABLED:
     ]
 if PASSWORD_ENABLED:
     MASTER_COMMANDS.append(
-        BotCommand("changepassword", "Change an existing account's password"))
+        BotCommand("cp", "Change an existing account's password"))
 # Proxy commands apply to both modes (hedge runs route through the global
 # proxy too); URL/btag only affect signups (gameplay always uses BOT_SITE_URL).
 MASTER_COMMANDS += [
@@ -1629,32 +1632,48 @@ def _blocking_change_password(username, current_password, new_password):
 
 
 @require_role(is_master)
-async def changepassword_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Log into an EXISTING account with its CURRENT password and change it to
-    a new one via the confirmed POST /changePassword endpoint (see main.py's
-    change_account_password_via_login()). Master-only, same restricted scope
-    as /freenum and /testbaccarat -- takes another account's credentials as a
-    chat argument and mutates a real account's login credential.
+async def cp_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start a password-change flow: /cp alone, then the NEXT plain-text
+    message in this chat is parsed as "<username> <current_password>
+    [new_password]" and run through change_account_password_via_login() (see
+    handle_cp_message() below). Master-only, same restricted scope as
+    /freenum and /testbaccarat -- mutates a real account's login credential.
 
     NOTE (confirmed live 2026-07-30): cricmatch247 refuses this with
     "please add phone number before changing the password" for an account
     with no verified mobile number attached -- not a bug here, a real
     business rule on the site's side. The rejection message is surfaced
     verbatim in the reply."""
-    args = context.args
-    if len(args) not in (2, 3):
+    pending_changepassword.add(update.effective_chat.id)
+    await update.message.reply_text(
+        "Send: <username> <current_password> [new_password]\n\n"
+        "If new_password is omitted, a random policy-compliant one is "
+        "generated and reported back. The account needs a verified mobile "
+        "number -- the site refuses this otherwise."
+    )
+
+
+async def handle_cp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Text handler for the /cp flow. Only acts if this chat is pending (set
+    by cp_cmd) and the sender is master; otherwise ignores the message --
+    password mode has no other use for plain text, but this guard keeps a
+    stray message from a non-master chat member from doing anything."""
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id if update.effective_user else None
+    if chat_id not in pending_changepassword or not is_master(user_id):
+        return
+    pending_changepassword.discard(chat_id)
+
+    parts = (update.message.text or "").split()
+    if len(parts) not in (2, 3):
         await update.message.reply_text(
-            "Usage: /changepassword <username> <current_password> [new_password]\n\n"
-            "Logs into an EXISTING account with its current password and "
-            "changes it via the account's self-service change-password "
-            "endpoint. If new_password is omitted, a random policy-compliant "
-            "one is generated and reported back. The account needs a "
-            "verified mobile number -- the site refuses this otherwise."
+            "Couldn't parse that -- expected: <username> <current_password> "
+            "[new_password]. Send /cp to try again."
         )
         return
 
-    username, current_password = args[0], args[1]
-    new_password = args[2] if len(args) == 3 else gen_password()
+    username, current_password = parts[0], parts[1]
+    new_password = parts[2] if len(parts) == 3 else gen_password()
 
     await update.message.reply_text(f"Changing password for {username}...")
     loop = asyncio.get_running_loop()
@@ -2433,11 +2452,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if PASSWORD_ENABLED:
             sections.append(
                 "🔑 Password change\n"
-                "/changepassword <user> <current_pw> [new_pw] — log into an "
-                "existing account and change its password (random "
-                "policy-compliant one if new_pw omitted, reported back in "
-                "chat). The account needs a verified mobile number, or the "
-                "site refuses the change."
+                "/cp — then send \"<user> <current_pw> [new_pw]\" as your next "
+                "message (random policy-compliant new_pw if omitted, reported "
+                "back in chat). The account needs a verified mobile number, "
+                "or the site refuses the change."
             )
         settings_lines = ["⚙️ Settings (global)"]
         if SIGNUP_ENABLED:
@@ -2593,7 +2611,8 @@ def main():
         app.add_handler(CommandHandler("runs", runs_cmd))
         app.add_handler(CommandHandler("runlog", runlog_cmd))
     if PASSWORD_ENABLED:
-        app.add_handler(CommandHandler("changepassword", changepassword_cmd))
+        app.add_handler(CommandHandler("cp", cp_cmd))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cp_message))
     app.add_handler(CommandHandler("setproxy", setproxy))
     app.add_handler(CommandHandler("proxy", show_proxy))
     app.add_handler(CommandHandler("clearproxy", clearproxy))
