@@ -38,10 +38,13 @@ POSTs (login, then the site's own getBalance() call) via `requests`, no
 browser at all -- when the resolved site's profile sets
 supports_http_login=True (cricmatch only, confirmed live 2026-07-30, see
 CLAUDE.md's "Sheet-driven balance checking" section). This is ~10x faster
-than the old Playwright-login path (run_balance_check(), still used as the
-automatic fallback for any site that doesn't support it) and light enough
-that MAX_CONCURRENT can comfortably be higher than the browser path's -- no
-per-account browser process, just an HTTP round trip.
+per account than the old Playwright-login path (run_balance_check(), still
+used as the automatic fallback for any site that doesn't support it) -- but
+MAX_CONCURRENT still defaults to 1, not higher, since every account here
+typically shares one proxy IP and concurrent login POSTs from the same IP
+are what trip the site's rate-based block (see MAX_CONCURRENT's own comment
+below). The speed win shows up as a fast serialized sweep through the whole
+sheet, not as parallelism.
 """
 import json
 import os
@@ -80,11 +83,21 @@ CREDENTIALS_FILE = os.environ.get(
 # 15-30s+ each) and this site rate-limits/WAF-blocks aggressive automated
 # traffic (see CLAUDE.md) -- default to a much longer interval than
 # sheet_watcher.py's 20s queue poll.
-# Much shorter than before now that a check is 2 HTTP calls instead of a
-# full browser login+poll for supported sites -- still tuneable in case a
-# proxy provider rate-limits concurrent connections (see CLAUDE.md).
+# Default 1, NOT higher, even though the HTTP-fast path is cheap enough to
+# run many at once: every account here shares the SAME proxy IP (one
+# BALANCE_SHEET, one /setproxy), so N "concurrent" checks means N login POSTs
+# hitting the site from that one IP in the same instant. Confirmed live
+# 2026-07-30 that this is exactly what trips cricmatch247's edge-level rate
+# block (a bare 403 on /login, same category documented elsewhere in
+# CLAUDE.md for /register and /send_otp_touser) -- a batch of 21 accounts at
+# MAX_CONCURRENT=5 got every single row blocked, and repeating the poll made
+# it worse, not better, since each retry re-triggered the same burst. A
+# serialized run of the same 21 accounts (~3s each) still finishes in ~1
+# minute, well inside the default 300s poll window, so there's no real
+# throughput reason to raise this unless a future proxy setup gives each
+# account its own IP.
 POLL_SECONDS = int(os.environ.get("BALANCE_POLL_SECONDS", "300"))
-MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "5"))
+MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "1"))
 SITE_URL = os.environ.get("BOT_SITE_URL") or engine.SITE_URL
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
 

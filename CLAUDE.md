@@ -1883,12 +1883,54 @@ account `sheet-bal-prince@prince-bal.iam.gserviceaccount.com`), real account
 balance and wrote `BALANCE`/`STATUS` back correctly. `.env.cricmatch` now
 carries `BALANCE_SHEET_SPREADSHEET_ID`/`BALANCE_SHEET_WORKSHEET_GID` for
 this sheet so a plain `.venv/bin/python balance_checker.py --env
-.env.cricmatch` (no extra env vars needed) runs it continuously. **Not yet
-run continuously for a real stretch or against more than one account at
-once** — the one-shot (`--once`) path is confirmed; the recurring
-5-minute-poll loop and multi-row/`BALANCE_MAX_CONCURRENT` behavior are
-built the same way as `sheet_watcher.py`'s but not separately soak-tested
-yet.
+.env.cricmatch` (no extra env vars needed) runs it continuously.
+
+### HTTP-fast balance checks (no browser)
+
+`read_wallet_balance()`/`check_account_balance()`/`run_balance_check()`
+above drive a real Playwright login (~20-30s per account: page load, DOM
+wait, then the `getBalance()` poll). `http_check_account_balance()` in
+`main.py` replaces that with plain `requests` calls, the same idea as
+`--fast` signup: found live 2026-07-30 by capturing a real login's network
+traffic (`probe_login_balance.py`) and confirming with a bare
+`requests.Session` replay that got byte-identical JSON:
+
+1. `GET` the site (`http_fetch_csrf()`, already used by `--fast` signup) →
+   csrf token + session cookies.
+2. `POST /login` with `username, password, remember_me=1, _token=<csrf>` →
+   `{"status":200,"message":"Login Successfully","url":"?uid=..."}`.
+3. `POST /api2/v2/getBalance` with just `_token=<csrf>` on the now-
+   authenticated session → `{"status":200,"balance":{"wallet":1484.68,...}}`
+   (also `main_balance`/`totalBalance`, same figure formatted with commas —
+   `wallet` is used since it's already a bare float).
+
+Confirmed live against both real test accounts (`ali789`, `asha788`) —
+balances matched the browser-path readings exactly, in ~2.8s each versus
+20-30s+. `sites/base.py`'s `supports_http_login` flag (`http_login_path`,
+`http_balance_path`) gates this per site, same pattern as
+`supports_http_fast`; only `sites/cricmatch.py` sets it `True` so far.
+`balance_checker.py`'s `process_row()` picks `http_check_account_balance`
+when the resolved site supports it, falling back to `run_balance_check`
+(the Playwright path) otherwise — same fallback convention as `--fast`
+signup.
+
+**Load-bearing gotcha, found live the same day: don't raise
+`MAX_CONCURRENT` past 1 for a sheet where every account shares one proxy
+IP.** The HTTP-fast path is cheap enough that nothing stops running several
+checks at once, but a real batch of 21 accounts at `MAX_CONCURRENT=5`
+against `.env.cricmatch`'s single residential proxy got **every row**
+blocked with a bare `403 Forbidden` on `/login` — the same edge-level
+rate-block already documented above for `/register`/`/send_otp_touser`,
+just triggered by concurrent logins instead of rapid sequential ones.
+Retrying the poll made it worse, not better (each retry was itself another
+5-wide burst from the same IP re-triggering the block), whereas the plain
+`GET` for the csrf token kept succeeding throughout — only the POST-heavy
+`/login` call was blocked, confirming this is a rate/burst rule, not a
+full IP ban. `MAX_CONCURRENT` therefore defaults to **1**, not higher — a
+serialized sweep through ~20 accounts still finishes in about a minute at
+~3s/account, well inside the default 300s poll window, so there's no real
+throughput reason to raise it unless a future setup gives each account its
+own proxy IP.
 
 ## Site-specific notes
 
