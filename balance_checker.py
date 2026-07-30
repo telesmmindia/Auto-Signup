@@ -20,9 +20,16 @@ gets checked on the very next poll (POLL_SECONDS is short specifically so
 this feels close to instant). To force a re-check of an existing row,
 clear its STATUS cell by hand. BALANCE holds the last SUCCESSFULLY read
 number and is left alone on a failed check, so a transient login hiccup or
-a WAF block doesn't blank out the last known-good value -- but note STATUS
-still gets written on failure, so a failed row does NOT get retried
-automatically; clear STATUS to try again.
+a WAF block doesn't blank out the last known-good value.
+
+A REAL application result (✅ success, or a ❌ genuine rejection like wrong
+password / "Account has been Blocked") is terminal, same as above -- clear
+STATUS by hand to retry. An INFRA-level block (a bare 403/non-JSON response
+from the edge/WAF, before the site ever saw the request -- see
+main.py's infra_block flag) is NOT treated as a real result: it's written as
+a "⏳ rate-limited, auto-retrying" marker and poll_once() keeps picking that
+row back up automatically, no manual clear needed -- see _trip_circuit_breaker()
+below for why this matters at scale.
 
 Setup (one-time -- reuse the same service_account.json already made for
 sheet_watcher.py if you have one; the steps are identical):
@@ -125,10 +132,24 @@ SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
 
 COL_USERNAME, COL_PASSWORD, COL_BALANCE, COL_STATUS = range(1, 5)
 
+# Real 2026-07-31 sheet data: once cricmatch247's edge block trips, EVERY
+# attempt 403s for ~20 minutes straight no matter how paced the retries are
+# -- CHECK_SPACING_SECONDS alone doesn't stop it from tripping, and kept
+# spending a request every 30s into a dead window for the whole 20 minutes.
+# BLOCK_BACKOFF_SECONDS is a circuit breaker: the first infra-level failure
+# (bare 403/non-JSON, see main.py's infra_block flag) pauses ALL checks for
+# this long, then probes once; if still blocked, the probe extends the pause
+# by another BLOCK_BACKOFF_SECONDS rather than resuming full-speed retries.
+# This covers a real ~20min block in ~4 wasted probes instead of ~40 wasted
+# full attempts. Not a controlled-tested value -- 5 min is a starting guess.
+BLOCK_BACKOFF_SECONDS = int(os.environ.get("BALANCE_BLOCK_BACKOFF_SECONDS", "300"))
+
 _lock = threading.Lock()
 _in_flight_rows = set()
 _spacing_lock = threading.Lock()
 _last_check_started = 0.0
+_circuit_lock = threading.Lock()
+_blocked_until = 0.0
 
 
 def _wait_for_turn():
@@ -142,6 +163,20 @@ def _wait_for_turn():
         if wait > 0:
             time.sleep(wait)
         _last_check_started = time.time()
+
+
+def _still_in_backoff():
+    with _circuit_lock:
+        return time.time() < _blocked_until
+
+
+def _trip_circuit_breaker():
+    """Called on an infra_block result -- pushes the backoff window forward
+    from NOW, so repeated blocked probes keep extending the pause instead of
+    each one resuming a fresh full-speed retry loop."""
+    global _blocked_until
+    with _circuit_lock:
+        _blocked_until = time.time() + BLOCK_BACKOFF_SECONDS
 
 
 def current_proxy():
@@ -167,9 +202,18 @@ def get_worksheet():
 
 
 def process_row(ws, row_idx, username, password):
+    if _still_in_backoff():
+        # A circuit-breaker cooldown is active from an earlier infra_block --
+        # skip this attempt entirely (no network call, no spacing wait spent)
+        # and leave STATUS untouched so poll_once() picks the row up again
+        # once the cooldown clears.
+        with _lock:
+            _in_flight_rows.discard(row_idx)
+        return
+
     _wait_for_turn()
     print(f"[row {row_idx}] checking {username}...")
-    result = {"ok": False, "balance": None, "messages": [], "shot": None}
+    result = {"ok": False, "balance": None, "messages": [], "shot": None, "infra_block": False}
     prof = engine.profile_for(SITE_URL)
     checker = engine.http_check_account_balance if prof.supports_http_login else engine.run_balance_check
     try:
@@ -183,6 +227,17 @@ def process_row(ws, row_idx, username, password):
         if result["ok"]:
             ws.update_cell(row_idx, COL_BALANCE, result["balance"])
             ws.update_cell(row_idx, COL_STATUS, f"✅ checked {ts}")
+        elif result.get("infra_block"):
+            # Not a real result for this account -- the edge/WAF blocked the
+            # request before the site ever saw it. Trip the breaker so every
+            # other in-flight row backs off too, and mark this row with a
+            # RETRYABLE (not terminal) status: poll_once() picks it back up
+            # automatically once the cooldown clears, no manual STATUS clear
+            # needed.
+            _trip_circuit_breaker()
+            msg = "; ".join(result.get("messages") or ["blocked"])[:150]
+            ws.update_cell(row_idx, COL_STATUS,
+                            f"⏳ {ts} rate-limited, auto-retrying — {msg}")
         else:
             # Leave the last-known BALANCE cell alone -- a login hiccup or a
             # WAF block shouldn't blank out the last good reading.
@@ -203,8 +258,12 @@ def poll_once(ws, executor):
         username, password, status = row[0].strip(), row[1], row[3].strip()
         if not (username and password):
             continue
-        if status:
-            continue  # already checked -- clear STATUS by hand to re-check
+        # Empty STATUS (never checked) or a "⏳ rate-limited" marker (an
+        # earlier attempt hit the circuit breaker, not a real result) are
+        # both eligible for pickup. Any other non-empty STATUS (✅ or a real
+        # ❌ application result) is terminal -- clear it by hand to re-check.
+        if status and not status.startswith("⏳"):
+            continue
         with _lock:
             if i in _in_flight_rows:
                 continue  # already picked up this cycle, still running

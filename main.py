@@ -1269,7 +1269,18 @@ def http_check_account_balance(username, password, site_url=None, proxy=None):
     account (ali789) -- balance matched the browser-path reading exactly."""
     url = site_url or SITE_URL
     prof = profile_for(url)
-    result = {"ok": False, "balance": None, "messages": [], "shot": None}
+    # infra_block distinguishes "the edge/WAF blocked the request before the
+    # app ever saw it" (bare 403/non-JSON -- http_login_call/http_get_balance
+    # return status=None for exactly this case, since a real app response is
+    # always JSON with a real status) from a genuine application result
+    # (wrong password, "Account has been Blocked", success, etc, all real
+    # JSON). Callers (balance_checker.py) use this to auto-retry instead of
+    # permanently recording a result for what was never actually checked --
+    # confirmed live 2026-07-30/31 that a tripped block returns 403 on every
+    # attempt for ~20 minutes regardless of pacing, so treating each one as a
+    # terminal per-account failure was both wrong and what made ~2k-account
+    # sheets grind to a halt (blocked rows got stuck needing manual retry).
+    result = {"ok": False, "balance": None, "messages": [], "shot": None, "infra_block": False}
 
     if not prof.supports_http_login:
         result["messages"] = [f"{prof.key} does not support HTTP-fast balance checks."]
@@ -1285,16 +1296,19 @@ def http_check_account_balance(username, password, site_url=None, proxy=None):
         csrf = http_fetch_csrf(session, url)
     except (requests.RequestException, RuntimeError) as e:
         result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
+        result["infra_block"] = True
         return result
 
     login_resp = http_login_call(session, csrf, username, password, url)
     if login_resp.get("status") != 200:
         result["messages"] = [login_resp.get("message") or f"Login failed: {login_resp}"]
+        result["infra_block"] = login_resp.get("status") is None
         return result
 
     bal_resp = http_get_balance(session, csrf, url)
     if bal_resp.get("status") != 200:
         result["messages"] = [bal_resp.get("message") or f"Could not read balance: {bal_resp}"]
+        result["infra_block"] = bal_resp.get("status") is None
         return result
 
     bal = (bal_resp.get("balance") or {})

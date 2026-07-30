@@ -2081,6 +2081,73 @@ threshold are both **inferred from one incident, not a controlled test** —
 tune `BALANCE_CHECK_SPACING_SECONDS` up if 403s keep recurring, or down if
 30s turns out to be far more conservative than necessary.
 
+**Spacing alone didn't stop it from tripping, and once tripped it stays
+blocked for a long time regardless of retry pacing — found from a real ~1740-
+row / 2026-07-31 sheet timeline, after spacing above was already live.**
+The full timeline showed: once a 403 appeared, essentially *every* attempt
+afterward 403'd for a sustained ~20-minute stretch — spaced 30s apart the
+whole time, so pacing bought nothing during an active block — then it
+cleared completely on its own and a long run of checks succeeded again. Two
+consequences at scale (this surfaced first at ~2k accounts): (1) ~20 minutes
+of wasted 30s-paced attempts is a lot of dead time when there's a large
+sheet still waiting to be checked, and (2) the pre-existing behavior wrote a
+permanent `❌ ...` STATUS for every one of those blocked attempts — meaning
+each one looked like a real (if boring) failure and would never be retried
+without someone manually clearing that row's STATUS cell, which doesn't
+scale past a handful of rows.
+
+Fixed by treating an edge/WAF block as fundamentally different from a real
+per-account result, both in `main.py` and `balance_checker.py`:
+- `http_login_call()`/`http_get_balance()` already returned a synthetic
+  `{"status": None, "message": "Non-JSON response (HTTP 403): ..."}` dict
+  when the response isn't JSON (the WAF returns an HTML "403 Forbidden"
+  page, not the app's normal JSON) — `status is None` was already a clean,
+  pre-existing signal for "the app never saw this request," distinct from a
+  real application rejection (wrong password, "Account has been Blocked",
+  etc, which are always real JSON with a real status). `http_check_account_balance()`
+  now surfaces that as `result["infra_block"] = True/False` (also set on a
+  raw `RequestException` from `http_fetch_csrf()`, e.g. a proxy dying
+  mid-block) rather than callers having to re-derive it from message text.
+- `balance_checker.py`'s `process_row()`: on `infra_block=True`, does NOT
+  write a terminal `❌` — it writes `"⏳ <ts> rate-limited, auto-retrying —
+  <msg>"` instead, and `poll_once()` treats a `⏳`-prefixed STATUS the same
+  as an empty one (still eligible for pickup) while `✅`/`❌` stay terminal
+  as before. A blocked row now self-heals on a later poll with no manual
+  sheet edit needed.
+- A circuit breaker (`_trip_circuit_breaker()` / `_still_in_backoff()`,
+  `BLOCK_BACKOFF_SECONDS`, env `BALANCE_BLOCK_BACKOFF_SECONDS`, default
+  300s/5min) stops the waste during an active block: the first `infra_block`
+  result pauses **every** row (not just the one that hit it) for the backoff
+  window — `process_row()` checks this before even paying `_wait_for_turn()`'s
+  spacing wait, so a paused attempt costs nothing. If the backoff-window probe
+  is *still* blocked, it extends the pause by another full
+  `BLOCK_BACKOFF_SECONDS` from that moment rather than resuming full-speed
+  retries — covering a real ~20min block in ~4 cheap probes instead of ~40
+  full wasted attempts at the old 30s pacing. Verified via a mocked
+  `process_row()` run (fake checker returning `infra_block=True` twice then
+  succeeding): confirmed a second call during an active backoff window skips
+  the checker entirely (call count stayed flat), and the row's STATUS/BALANCE
+  only got written once a genuine result came back.
+- `BLOCK_BACKOFF_SECONDS`'s 300s default is a starting guess sized off the
+  one ~20-minute incident observed so far (5min × ~4 extensions ≈ 20min) —
+  **not a controlled test**, same caveat as `CHECK_SPACING_SECONDS`'s
+  original 30s guess. Tune it up if a block is still visibly wasting probes,
+  down if 5 minutes turns out far more conservative than the real block
+  duration needs.
+- The 57 rows already stuck with an old permanent `❌ ... 403 ...` STATUS
+  from before this fix were manually cleared back to empty in the live sheet
+  (2026-07-31) so they pick back up under the new self-healing behavior
+  instead of sitting dead forever.
+
+**This does not fix the underlying per-IP throughput ceiling** — a single
+residential proxy IP still only clears about one login every
+`CHECK_SPACING_SECONDS` (~2/min) during an unblocked window, so a sheet with
+thousands of unchecked rows is still fundamentally slow to fully sweep on one
+IP; the fix here is about not making the block *worse* or leaving rows
+*permanently* stuck, not about raising overall throughput. Raising real
+throughput at scale would need spreading logins across multiple proxy
+IPs (not yet built) rather than any change to a single IP's pacing.
+
 ## Sheet-driven password changes (`password_changer.py`)
 
 A third sheet-driven script (alongside `sheet_watcher.py`'s hedge queue and
