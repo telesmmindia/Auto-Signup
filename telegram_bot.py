@@ -1684,7 +1684,7 @@ async def handle_cp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     caption = f"Password change [{status}] for {username}\n" + "\n".join(result["messages"])
     if result.get("new_password"):
         caption += f"\nNew password: {result['new_password']}"
-    await send_result_photo(update, result.get("shot"), caption[:1024])
+    await update.message.reply_text(caption[:4096])
 
 
 @require_role(is_master)

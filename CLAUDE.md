@@ -791,6 +791,12 @@ in a successful reply's caption, matching `build_caption()`'s existing norm
 of including plaintext passwords in master-only chat captions for
 successful signups.
 
+**Text-only reply, no screenshot sent** (deliberate, by request) — unlike
+`/freenum`/`/testbaccarat`, `handle_cp_message()` replies with a plain
+`update.message.reply_text(...)`, not `send_result_photo()`. The screenshot
+is still taken and stored on disk (`change_account_password_via_login()`
+still sets `result["shot"]`), it just isn't pushed to chat here.
+
 ### `/setphone`: rotating a pool of real phone numbers across signups
 
 Pairs with free-number mode (on by default): instead of asking for a phone
