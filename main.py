@@ -1074,7 +1074,8 @@ def http_login_call(session, csrf_token, username, password, site_url):
     parts = urlsplit(site_url)
     login_url = f"{parts.scheme}://{parts.netloc}{prof.http_login_path}"
     data = {"username": username, "password": password, "remember_me": "1", "_token": csrf_token}
-    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url}
+    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url,
+               "Origin": _http_fast_origin(site_url)}
     resp = session.post(login_url, data=data, headers=headers, timeout=20)
     try:
         return resp.json()
@@ -1088,7 +1089,8 @@ def http_get_balance(session, csrf_token, site_url):
     prof = profile_for(site_url)
     parts = urlsplit(site_url)
     url = f"{parts.scheme}://{parts.netloc}{prof.http_balance_path}"
-    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url}
+    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url,
+               "Origin": _http_fast_origin(site_url)}
     resp = session.post(url, data={"_token": csrf_token}, headers=headers, timeout=20)
     try:
         return resp.json()
@@ -1267,8 +1269,35 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
 # surfacing as a missing selector.
 # ---------------------------------------------------------------------------
 
-_HTTP_FAST_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
+# Matches a real captured browser session (getBalance call intercepted
+# 2026-07-30 via a mobile HTTP-interceptor tool) rather than the earlier
+# generic Windows/Chrome-124 string -- a plain `requests` call has no TLS/
+# fingerprint to hide behind, so at least matching the header *set* a real
+# Chrome sends (client hints included) makes automated traffic look less
+# obviously scripted to a WAF than a bare User-Agent with nothing else.
+_HTTP_FAST_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                         "(KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
+_HTTP_FAST_SEC_CH_UA = '"Chromium";v="127", "Not)A;Brand";v="99", "Google Chrome";v="127"'
+
+
+def _http_fast_browser_headers():
+    """Static (non-request-specific) headers a real Chrome/macOS session
+    sends on every request -- see _HTTP_FAST_USER_AGENT's comment."""
+    return {
+        "User-Agent": _HTTP_FAST_USER_AGENT,
+        "Accept": "*/*",
+        "DNT": "1",
+        "sec-ch-ua": _HTTP_FAST_SEC_CH_UA,
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"macOS"',
+    }
+
+
+def _http_fast_origin(site_url):
+    """scheme://host with no path/query, for the Origin header a real
+    browser sends on same-origin XHR POSTs."""
+    parts = urlsplit(site_url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def http_session_for(proxy_str):
@@ -1277,7 +1306,7 @@ def http_session_for(proxy_str):
     directly (via PySocks) -- the pproxy bridge in maybe_bridge_proxy() works
     around a Chromium-specific limitation that doesn't apply here."""
     session = requests.Session()
-    session.headers.update({"User-Agent": _HTTP_FAST_USER_AGENT})
+    session.headers.update(_http_fast_browser_headers())
     if proxy_str:
         conf = parse_proxy(proxy_str)
         scheme, hostport = conf["server"].split("://", 1)
@@ -1321,6 +1350,7 @@ def http_register_call(session, csrf_token, acct, site_url, otp=""):
         "X-Requested-With": "XMLHttpRequest",
         "X-CSRF-TOKEN": csrf_token,
         "Referer": site_url,
+        "Origin": _http_fast_origin(site_url),
     }
     resp = session.post(register_url, data=data, headers=headers, timeout=20)
     try:

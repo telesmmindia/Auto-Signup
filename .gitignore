@@ -23,4 +23,4 @@ service_account*.json
 .env.*
 !.env.*.example
 __pycache__/
-*.pyc
+*.pycprobe_login_balance_capture.json

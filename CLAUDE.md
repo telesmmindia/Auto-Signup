@@ -1936,6 +1936,24 @@ serialized sweep through ~20 accounts still finishes in about a minute at
 throughput reason to raise it unless a future setup gives each account its
 own proxy IP.
 
+**Request headers were hardened 2026-07-30 to look more like a real browser**,
+after the user supplied a screenshot of a genuine `getBalance` call captured
+via a mobile HTTP-interceptor tool: `_HTTP_FAST_USER_AGENT` (`main.py`)
+switched from a generic Windows/Chrome-124 string to a real Mac/Chrome-127
+one, and every HTTP-fast POST (`http_login_call`, `http_get_balance`,
+`http_register_call`, `http_free_phone_number`) now sends `Origin` plus a
+Chrome client-hints set (`sec-ch-ua`, `sec-ch-ua-mobile`,
+`sec-ch-ua-platform`, `DNT`) via `_http_fast_browser_headers()` /
+`_http_fast_origin()`, none of which the earlier bare `requests.Session` sent
+at all. Rationale, not yet proven to actually reduce blocking: a plain
+`requests` call has no real TLS/JA3 fingerprint to hide behind, so this
+can't make it indistinguishable from a real browser -- but sending the same
+*header set* a real Chrome does is a low-cost way to avoid the more obvious
+"this client has almost no headers" tell some WAF rules key on, and doesn't
+change behavior at all for a site that isn't scrutinizing this closely.
+Verified live immediately after the change: `http_check_account_balance()`
+still round-trips correctly end-to-end against a real account.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an
