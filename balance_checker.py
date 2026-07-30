@@ -9,13 +9,20 @@ Sheet layout (row 1 = header):
 
     A: USERNAME   B: PASSWORD   C: BALANCE   D: STATUS
 
-Unlike sheet_watcher.py's hedge queue, there's no "already done, skip it"
-state here -- every row with A+B filled gets re-checked on every poll cycle,
-since a balance is only useful if it keeps refreshing. STATUS shows the
-outcome of the most recent check ("checked <timestamp>" or an error);
-BALANCE holds the last SUCCESSFULLY read number and is left alone on a
-failed check, so a transient login hiccup or a WAF block doesn't blank out
-the last known-good value.
+Same queue semantics as sheet_watcher.py's hedge sheet, NOT "re-check
+everything forever" (an earlier version did that -- see git history --
+and it turned out to be exactly what was tripping cricmatch247's login
+rate-block, since a full sheet got hit with a fresh burst of logins on
+every single poll cycle): a row with A+B filled and an EMPTY STATUS is
+picked up, checked once, and STATUS is then set to a result -- which also
+means it won't be picked up again on the next poll. Add a new row -> it
+gets checked on the very next poll (POLL_SECONDS is short specifically so
+this feels close to instant). To force a re-check of an existing row,
+clear its STATUS cell by hand. BALANCE holds the last SUCCESSFULLY read
+number and is left alone on a failed check, so a transient login hiccup or
+a WAF block doesn't blank out the last known-good value -- but note STATUS
+still gets written on failure, so a failed row does NOT get retried
+automatically; clear STATUS to try again.
 
 Setup (one-time -- reuse the same service_account.json already made for
 sheet_watcher.py if you have one; the steps are identical):
@@ -79,30 +86,22 @@ SPREADSHEET_ID = os.environ.get("BALANCE_SHEET_SPREADSHEET_ID", "")
 WORKSHEET_GID = os.environ.get("BALANCE_SHEET_WORKSHEET_GID", "0")
 CREDENTIALS_FILE = os.environ.get(
     "BALANCE_SHEET_CREDENTIALS_FILE", os.environ.get("SHEET_CREDENTIALS_FILE", "service_account.json"))
-# Default 1800s (30 min), NOT 300s -- confirmed live 2026-07-30 that this
-# site's edge-level block on /login (see MAX_CONCURRENT's comment below) is a
-# ROLLING window, not a fixed one: even at MAX_CONCURRENT=1, one login
-# attempt every 5 minutes kept re-triggering it indefinitely (a real run
-# stayed 403-blocked for over an hour of continuous 5-min-interval retries).
-# A single request every 30 minutes gives the block a real chance to expire
-# between attempts instead of continuously refreshing it -- 30 min matches
-# the cooldown window this same site has shown elsewhere for a similar
-# per-IP velocity throttle (see the hedge-account session-drop behavior).
-# Logins are also heavier than a queue poll (real page load + real login,
-# easily 15-30s+ each even on the browser fallback path) -- another reason
-# this stays a much longer interval than sheet_watcher.py's 20s queue poll.
-# Default 1, NOT higher, even though the HTTP-fast path is cheap enough to
-# run many at once: every account here shares the SAME proxy IP (one
-# BALANCE_SHEET, one /setproxy), so N "concurrent" checks means N login POSTs
-# hitting the site from that one IP in the same instant. Confirmed live
-# 2026-07-30 that this is exactly what trips cricmatch247's edge-level rate
-# block (a bare 403 on /login, same category documented elsewhere in
-# CLAUDE.md for /register and /send_otp_touser) -- a batch of 21 accounts at
-# MAX_CONCURRENT=5 got every single row blocked. A serialized run of the same
-# 21 accounts (~3s each) still finishes in ~1 minute, well inside even the
-# 30-minute poll window, so there's no real throughput reason to raise this
-# unless a future proxy setup gives each account its own IP.
-POLL_SECONDS = int(os.environ.get("BALANCE_POLL_SECONDS", "1800"))
+# Now that a poll only ever fires a real login for rows with an EMPTY
+# STATUS (see poll_once()) -- not the whole sheet every cycle -- most polls
+# do nothing but a cheap get_all_values() read, so this can go back to a
+# short interval like sheet_watcher.py's 20s without hammering the login
+# endpoint at all. A brand-new row gets checked within one poll interval of
+# being added, which is the "instant" behavior this was changed to get.
+POLL_SECONDS = int(os.environ.get("BALANCE_POLL_SECONDS", "20"))
+# Still defaults to 1, not higher: every account here typically shares one
+# proxy IP, and several NEW rows added at once would otherwise fire that
+# many concurrent login POSTs from the same IP in the same instant --
+# confirmed live 2026-07-30 that concurrent logins from one IP (not just
+# rapid sequential ones) trip cricmatch247's edge-level rate block (a bare
+# 403 on /login, same category documented in CLAUDE.md for /register and
+# /send_otp_touser). A serialized queue of new rows still clears in ~3s each,
+# so there's no real throughput reason to raise this unless a future proxy
+# setup gives each account its own IP.
 MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "1"))
 SITE_URL = os.environ.get("BOT_SITE_URL") or engine.SITE_URL
 SETTINGS_FILE = os.environ.get("SETTINGS_FILE", "bot_settings.json")
@@ -168,12 +167,14 @@ def poll_once(ws, executor):
     rows = ws.get_all_values()
     for i, row in enumerate(rows[1:], start=2):  # row 1 is the header
         row = row + [""] * (4 - len(row))
-        username, password = row[0].strip(), row[1]
+        username, password, status = row[0].strip(), row[1], row[3].strip()
         if not (username and password):
             continue
+        if status:
+            continue  # already checked -- clear STATUS by hand to re-check
         with _lock:
             if i in _in_flight_rows:
-                continue  # still being checked from a previous cycle
+                continue  # already picked up this cycle, still running
             _in_flight_rows.add(i)
         executor.submit(process_row, ws, i, username, password)
 

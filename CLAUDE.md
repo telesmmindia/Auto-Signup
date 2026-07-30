@@ -1792,21 +1792,29 @@ columns, different purpose, and reusing the hedge sheet would risk this
 script and `sheet_watcher.py` (or the Telegram bot's `/run`) writing over
 each other's cells.
 
-Unlike the hedge sheet's queue semantics (a row runs once, STATUS then
-blocks it until cleared), there's no "already done" state here: **every**
-row with A+B filled gets re-checked on every poll cycle (default
-`BALANCE_POLL_SECONDS=1800`, i.e. 30 minutes -- deliberately much longer than
-the hedge sheet's 20s queue poll, and raised from an original 300s default
-after a live 2026-07-30 incident: this site's `/login` rate-block turned out
-to be a ROLLING window, so retrying every 5 minutes kept re-triggering it and
-never let it clear, for over an hour straight. 30 minutes gives the block a
-real chance to expire between attempts -- see the "HTTP-fast balance checks"
-section below for the full incident and the matching `MAX_CONCURRENT=1`
-fix). STATUS shows the outcome of the
-most recent check (`✅ checked <timestamp>` or `❌ <timestamp> — <error>`);
-BALANCE holds the last **successfully** read number and is deliberately left
-alone on a failed check, so one transient login hiccup or WAF block doesn't
-blank out the last known-good figure.
+**Same queue semantics as the hedge sheet now (changed 2026-07-30, see git
+history for the earlier "re-check every row every cycle" version):** a row
+with A+B filled and an EMPTY STATUS gets checked once; STATUS is then set to
+a result, which also means that row is left alone on every later poll. Add a
+new row -> it gets picked up on the very next poll. Clear an existing row's
+STATUS by hand to force a re-check. STATUS shows the outcome of the check
+(`✅ checked <timestamp>` or `❌ <timestamp> — <error>`); BALANCE holds the
+last **successfully** read number and is deliberately left alone on a failed
+check, so a failed check doesn't blank out the last known-good figure --
+though note a failed row does NOT auto-retry, since its STATUS is now
+non-empty too; clear it to try again.
+
+This replaced the original "re-check everything on every poll" design after
+a live 2026-07-30 incident: at `BALANCE_POLL_SECONDS=300` it kept
+re-triggering cricmatch247's `/login` rate-block (a ROLLING window, not a
+fixed one -- see the "HTTP-fast balance checks" section below for the full
+incident) because the WHOLE sheet got hit with a fresh login burst on every
+single cycle, whether or not anything had changed. Checking only empty-STATUS
+rows means most polls do nothing but a cheap read, so `BALANCE_POLL_SECONDS`
+went back down to a short **20s** default (matching `sheet_watcher.py`'s
+queue poll) with no rate-limit risk -- the login endpoint is now only hit
+when a row is genuinely new (or manually cleared for a re-check), not on a
+fixed schedule regardless of whether there's anything to do.
 
 Engine (`main.py`):
 - `read_wallet_balance(page, timeout_secs=30)` — reads the site's own header
@@ -1866,7 +1874,7 @@ default sheet baked in, unlike `sheet_watcher.py`'s hardcoded hedge-sheet
 ID), `BALANCE_SHEET_WORKSHEET_GID` (default `"0"`), `BALANCE_SHEET_CREDENTIALS_FILE`
 (falls back to `SHEET_CREDENTIALS_FILE`, then `service_account.json` — reuse
 the same service account as the hedge sheet, just share it with this new
-sheet too), `BALANCE_POLL_SECONDS` (default 1800), `BALANCE_MAX_CONCURRENT`
+sheet too), `BALANCE_POLL_SECONDS` (default 20), `BALANCE_MAX_CONCURRENT`
 (default 1, same "size to your proxy/IP diversity" caveat as
 `MAX_CONCURRENT_RUNS` elsewhere).
 
