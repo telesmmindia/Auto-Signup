@@ -100,12 +100,18 @@ WAF-blocked by IP reputation on this site, a completely different (and
 worse) failure mode than the rate limit this feature works around. Getting
 more datacenter IPs would not fix anything here.
 
-Not yet run live with more than one proxy -- built and unit-tested with
-mocked proxies/checker (confirmed round-robin assignment and independent
-per-proxy backoff), but no real second proxy has been exercised end-to-end
-yet. Try `/testproxy` (bot) or a one-off `http_check_account_balance()` call
-against each new proxy first to confirm it actually works against this site
-before adding it to the list.
+Verified live 2026-07-31: 4 real ProxyCheap-style residential proxies (same
+Lumina broadband ISP already confirmed clean in CLAUDE.md's proxy section --
+`ip-api.com` came back `proxy:false, hosting:false` for all 4) were checked
+before use -- one full `http_check_account_balance()` call against a real
+account (ali789) succeeded end-to-end through the first proxy, and the other
+3 were confirmed to load the site cleanly (CSRF fetch, HTTP 200, no WAF
+block) via `http_session_for()`/`http_fetch_csrf()`. Round-robin assignment
+and independent per-proxy backoff were separately confirmed via a mocked
+`process_row()` run (one proxy hitting infra_block does not pause the
+others). Not yet run for a full sweep of the whole sheet at once -- start
+with `--once` against a handful of rows before pointing a 4-proxy pool at
+the entire ~2k-row backlog.
 """
 import json
 import os
