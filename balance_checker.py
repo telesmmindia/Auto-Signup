@@ -65,6 +65,47 @@ CHECK_SPACING_SECONDS=30, see its comment) -- real 2026-07-30 sheet data
 showed serialized-but-rapid checks (~9s apart, no deliberate delay) still
 tripped the same rate block once a burst of ~20 new rows got processed in a
 few minutes, so MAX_CONCURRENT=1 alone wasn't the whole fix.
+
+### Speeding this up: BALANCE_CHECK_PROXIES (multiple proxy IPs)
+
+Everything above caps throughput at roughly one check per CHECK_SPACING_SECONDS
+(~2/min) because it all goes through ONE proxy IP, and that IP is what the
+site's rate limit is actually tracking -- pacing/backoff make a single IP
+reliable, not fast. The only real way to raise throughput is to spread
+checks across multiple IPs, each staying under the same safe per-IP rate.
+
+Set BALANCE_CHECK_PROXIES to a comma- or newline-separated list of proxy
+strings (same format as --proxy/parse_proxy) to enable this:
+
+    BALANCE_CHECK_PROXIES="host1:port1:user1:pass1,host2:port2:user2:pass2" \\
+        .venv/bin/python balance_checker.py --env .env.cricmatch
+
+Each proxy in the list gets its OWN independent CHECK_SPACING_SECONDS pacing
+lane and its OWN circuit breaker -- one proxy tripping a block pauses only
+that proxy's lane, not the others, since the block is a property of that IP,
+not of this script. Rows are handed out round-robin across the pool
+(_next_proxy()) as they're picked up, and MAX_CONCURRENT auto-scales to the
+pool size (one worker per proxy) unless BALANCE_MAX_CONCURRENT overrides it.
+N proxies therefore gives close to N times the throughput of one, with no
+extra block risk per IP.
+
+When BALANCE_CHECK_PROXIES is unset, behavior is unchanged from before this
+feature: a single global proxy (from the bot's SETTINGS_FILE, i.e. whatever
+/setproxy currently has set) shared by every check under one pacing/backoff
+lane, same as always.
+
+**Prefer RESIDENTIAL proxies, same as everywhere else in this codebase** --
+CLAUDE.md's proxy section documents datacenter IPs getting outright
+WAF-blocked by IP reputation on this site, a completely different (and
+worse) failure mode than the rate limit this feature works around. Getting
+more datacenter IPs would not fix anything here.
+
+Not yet run live with more than one proxy -- built and unit-tested with
+mocked proxies/checker (confirmed round-robin assignment and independent
+per-proxy backoff), but no real second proxy has been exercised end-to-end
+yet. Try `/testproxy` (bot) or a one-off `http_check_account_balance()` call
+against each new proxy first to confirm it actually works against this site
+before adding it to the list.
 """
 import json
 import os
@@ -106,16 +147,31 @@ CREDENTIALS_FILE = os.environ.get(
 # endpoint at all. A brand-new row gets checked within one poll interval of
 # being added, which is the "instant" behavior this was changed to get.
 POLL_SECONDS = int(os.environ.get("BALANCE_POLL_SECONDS", "20"))
-# Still defaults to 1, not higher: every account here typically shares one
-# proxy IP, and several NEW rows added at once would otherwise fire that
-# many concurrent login POSTs from the same IP in the same instant --
-# confirmed live 2026-07-30 that concurrent logins from one IP (not just
-# rapid sequential ones) trip cricmatch247's edge-level rate block (a bare
-# 403 on /login, same category documented in CLAUDE.md for /register and
-# /send_otp_touser). A serialized queue of new rows still clears in ~3s each,
-# so there's no real throughput reason to raise this unless a future proxy
-# setup gives each account its own IP.
-MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", "1"))
+
+# See "Speeding this up: BALANCE_CHECK_PROXIES" in the module docstring.
+# Unset -> the single global proxy from SETTINGS_FILE, one pacing/backoff
+# lane, same as before this feature existed. Set -> a pool of proxy strings,
+# each with its OWN lane, handed out round-robin per row.
+_CHECK_PROXIES_RAW = os.environ.get("BALANCE_CHECK_PROXIES", "").strip()
+CHECK_PROXIES = ([p.strip() for p in _CHECK_PROXIES_RAW.replace("\n", ",").split(",") if p.strip()]
+                 if _CHECK_PROXIES_RAW else None)
+
+# Defaults to 1 lane's worth of concurrency (one proxy = one IP = must stay
+# serialized on that IP, per the note below) unless a proxy pool is set, in
+# which case one worker per proxy lets them all run in parallel -- still
+# only ever ONE in-flight request per individual proxy at a time, since each
+# proxy's own _wait_for_turn() lock enforces that regardless of how many
+# workers the executor has.
+MAX_CONCURRENT = int(os.environ.get("BALANCE_MAX_CONCURRENT", str(len(CHECK_PROXIES) if CHECK_PROXIES else "1")))
+# Still defaults to 1 lane, not higher, when no proxy pool is set: every
+# account then shares one proxy IP, and several NEW rows added at once would
+# otherwise fire that many concurrent login POSTs from the same IP in the
+# same instant -- confirmed live 2026-07-30 that concurrent logins from one
+# IP (not just rapid sequential ones) trip cricmatch247's edge-level rate
+# block (a bare 403 on /login, same category documented in CLAUDE.md for
+# /register and /send_otp_touser). A serialized queue of new rows still
+# clears in ~3s each, so there's no real throughput reason to raise this for
+# a single proxy -- add more proxies to BALANCE_CHECK_PROXIES instead.
 # Real sheet data 2026-07-30: MAX_CONCURRENT=1 (already fully serialized)
 # was NOT enough on its own -- a batch of ~20 new rows checked back-to-back
 # (~9s apart, no deliberate pacing) all succeeded, but the very next few rows
@@ -146,48 +202,82 @@ BLOCK_BACKOFF_SECONDS = int(os.environ.get("BALANCE_BLOCK_BACKOFF_SECONDS", "300
 
 _lock = threading.Lock()
 _in_flight_rows = set()
-_spacing_lock = threading.Lock()
-_last_check_started = 0.0
-_circuit_lock = threading.Lock()
-_blocked_until = 0.0
+
+# Per-proxy-lane pacing/circuit-breaker state, keyed by a lane id (the proxy
+# string itself when a pool is set, or the constant _DEFAULT_LANE otherwise).
+# One lane == one IP == its own independent "when did we last start a check"
+# / "are we currently backed off" state, so a block on one proxy never pauses
+# any other proxy's lane.
+_DEFAULT_LANE = "__default__"
+_lanes_lock = threading.Lock()
+_lanes = {}  # lane_id -> {"lock": Lock(), "last_check_started": 0.0, "blocked_until": 0.0}
+
+_rr_lock = threading.Lock()
+_next_proxy_idx = 0
 
 
-def _wait_for_turn():
-    """Blocks until at least CHECK_SPACING_SECONDS has passed since the last
-    check STARTED (not finished) -- called from the worker thread(s) actually
-    running process_row, so it paces logins without blocking poll_once()
-    itself from noticing new rows."""
-    global _last_check_started
-    with _spacing_lock:
-        wait = CHECK_SPACING_SECONDS - (time.time() - _last_check_started)
+def _lane_for(lane_id):
+    with _lanes_lock:
+        lane = _lanes.get(lane_id)
+        if lane is None:
+            lane = {"lock": threading.Lock(), "last_check_started": 0.0, "blocked_until": 0.0}
+            _lanes[lane_id] = lane
+        return lane
+
+
+def _wait_for_turn(lane_id):
+    """Blocks until at least CHECK_SPACING_SECONDS has passed since this
+    LANE's last check STARTED (not finished) -- called from the worker
+    thread(s) actually running process_row, so it paces logins without
+    blocking poll_once() itself from noticing new rows. Each proxy lane has
+    its own lock, so pacing on one proxy never blocks another proxy's lane."""
+    lane = _lane_for(lane_id)
+    with lane["lock"]:
+        wait = CHECK_SPACING_SECONDS - (time.time() - lane["last_check_started"])
         if wait > 0:
             time.sleep(wait)
-        _last_check_started = time.time()
+        lane["last_check_started"] = time.time()
 
 
-def _still_in_backoff():
-    with _circuit_lock:
-        return time.time() < _blocked_until
+def _still_in_backoff(lane_id):
+    return time.time() < _lane_for(lane_id)["blocked_until"]
 
 
-def _trip_circuit_breaker():
-    """Called on an infra_block result -- pushes the backoff window forward
-    from NOW, so repeated blocked probes keep extending the pause instead of
-    each one resuming a fresh full-speed retry loop."""
-    global _blocked_until
-    with _circuit_lock:
-        _blocked_until = time.time() + BLOCK_BACKOFF_SECONDS
+def _trip_circuit_breaker(lane_id):
+    """Called on an infra_block result -- pushes this LANE's backoff window
+    forward from NOW, so repeated blocked probes on the same proxy keep
+    extending the pause instead of each one resuming a fresh full-speed
+    retry loop. Other proxy lanes are unaffected."""
+    lane = _lane_for(lane_id)
+    lane["blocked_until"] = time.time() + BLOCK_BACKOFF_SECONDS
 
 
 def current_proxy():
     """Mirrors sheet_watcher.py's current_proxy() -- reads the bot's own
     SETTINGS_FILE live on each check, so /setproxy on that Telegram bot
-    applies here with no separate config."""
+    applies here with no separate config. Only used when BALANCE_CHECK_PROXIES
+    is NOT set (the single-proxy, pre-pool behavior)."""
     try:
         with open(SETTINGS_FILE) as f:
             return json.load(f).get("proxy")
     except Exception:
         return None
+
+
+def _next_proxy():
+    """Returns (proxy_string_or_None, lane_id) for the next row to check.
+    Without a pool, always the single global proxy under the one default
+    lane (unchanged behavior). With a pool set, round-robins through it --
+    each proxy string doubles as its own lane id, so lane state and proxy
+    are always the same pairing."""
+    if not CHECK_PROXIES:
+        return current_proxy(), _DEFAULT_LANE
+    global _next_proxy_idx
+    with _rr_lock:
+        idx = _next_proxy_idx % len(CHECK_PROXIES)
+        _next_proxy_idx += 1
+    proxy = CHECK_PROXIES[idx]
+    return proxy, proxy
 
 
 def get_worksheet():
@@ -201,23 +291,24 @@ def get_worksheet():
     return sh.sheet1
 
 
-def process_row(ws, row_idx, username, password):
-    if _still_in_backoff():
-        # A circuit-breaker cooldown is active from an earlier infra_block --
-        # skip this attempt entirely (no network call, no spacing wait spent)
-        # and leave STATUS untouched so poll_once() picks the row up again
-        # once the cooldown clears.
+def process_row(ws, row_idx, username, password, proxy, lane_id):
+    if _still_in_backoff(lane_id):
+        # This proxy lane is in a circuit-breaker cooldown from an earlier
+        # infra_block on THIS proxy -- skip this attempt entirely (no network
+        # call, no spacing wait spent) and leave STATUS untouched so
+        # poll_once() picks the row up again (on this or another lane) once
+        # the cooldown clears. Other lanes are unaffected.
         with _lock:
             _in_flight_rows.discard(row_idx)
         return
 
-    _wait_for_turn()
-    print(f"[row {row_idx}] checking {username}...")
+    _wait_for_turn(lane_id)
+    print(f"[row {row_idx}] checking {username} (lane={lane_id if lane_id == _DEFAULT_LANE else 'proxy'})...")
     result = {"ok": False, "balance": None, "messages": [], "shot": None, "infra_block": False}
     prof = engine.profile_for(SITE_URL)
     checker = engine.http_check_account_balance if prof.supports_http_login else engine.run_balance_check
     try:
-        result = checker(username, password, site_url=SITE_URL, proxy=current_proxy())
+        result = checker(username, password, site_url=SITE_URL, proxy=proxy)
     except Exception as e:
         traceback.print_exc()
         result["messages"] = [f"Unhandled error: {e}"]
@@ -229,12 +320,12 @@ def process_row(ws, row_idx, username, password):
             ws.update_cell(row_idx, COL_STATUS, f"✅ checked {ts}")
         elif result.get("infra_block"):
             # Not a real result for this account -- the edge/WAF blocked the
-            # request before the site ever saw it. Trip the breaker so every
-            # other in-flight row backs off too, and mark this row with a
-            # RETRYABLE (not terminal) status: poll_once() picks it back up
+            # request before the site ever saw it. Trip the breaker for THIS
+            # lane only (other proxies keep running), and mark this row with
+            # a RETRYABLE (not terminal) status: poll_once() picks it back up
             # automatically once the cooldown clears, no manual STATUS clear
             # needed.
-            _trip_circuit_breaker()
+            _trip_circuit_breaker(lane_id)
             msg = "; ".join(result.get("messages") or ["blocked"])[:150]
             ws.update_cell(row_idx, COL_STATUS,
                             f"⏳ {ts} rate-limited, auto-retrying — {msg}")
@@ -268,7 +359,8 @@ def poll_once(ws, executor):
             if i in _in_flight_rows:
                 continue  # already picked up this cycle, still running
             _in_flight_rows.add(i)
-        executor.submit(process_row, ws, i, username, password)
+        proxy, lane_id = _next_proxy()
+        executor.submit(process_row, ws, i, username, password, proxy, lane_id)
 
 
 def main():
@@ -276,8 +368,9 @@ def main():
         print("BALANCE_SHEET_SPREADSHEET_ID is not set -- nothing to poll. "
               "Set it to the sheet's id (from its URL) and try again.")
         sys.exit(1)
+    pool_desc = f"{len(CHECK_PROXIES)} proxies (pooled)" if CHECK_PROXIES else "1 (global proxy)"
     print(f"balance_checker: spreadsheet={SPREADSHEET_ID} gid={WORKSHEET_GID} "
-          f"site={SITE_URL} poll={POLL_SECONDS}s max_concurrent={MAX_CONCURRENT}")
+          f"site={SITE_URL} poll={POLL_SECONDS}s max_concurrent={MAX_CONCURRENT} proxies={pool_desc}")
     ws = get_worksheet()
     executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT)
     try:
