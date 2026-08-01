@@ -5,13 +5,20 @@ same d2g8jl9s27zu.cloudfront.net/wmsc/ CDN asset paths). Login markup
 HTML too, which is why supports_casino/login selectors below are copied
 straight from cricmatch.py rather than re-inspected from scratch.
 
-Only the login -> wallet-balance -> change-password path has been exercised
-here (balance_checker.py / password_changer.py, per the owner's request) --
-the HTTP-fast signup/free-number endpoints (supports_http_fast,
-supports_free_number) are deliberately left at their False defaults since
-they were never inspected for this site; don't flip them on without
-confirming the way cricmatch's were (see CLAUDE.md's "--fast" / "Freeing
-the signup phone number" sections for the live-verification bar to clear)."""
+The login -> wallet-balance -> change-password path was exercised first
+(balance_checker.py / password_changer.py). free_number_path is now also
+turned on (phone_freer.py) -- same "/send_otp_touser" path as cricmatch,
+INFERRED from the shared template, not yet confirmed live against a real
+khelofun account (cricmatch's was confirmed live 2026-07-22 by comparing a
+real account's Mobile Number before/after; khelofun's hasn't had that same
+before/after check yet). Run phone_freer.py --once against one real row
+first and confirm the account's mobile number actually changed before
+trusting a full sheet sweep.
+
+supports_http_fast (HTTP-only signup) is still left at its False default --
+out of scope for what's been requested so far, and signup wasn't inspected
+for this site at all; don't flip it on without doing the same live network
+capture cricmatch's went through."""
 from .base import SiteProfile
 from .cricmatch import GENERIC_RESULT_SELECTORS
 
@@ -41,6 +48,9 @@ PROFILE = SiteProfile(
     # template, not yet round-tripped against a real khelofun account.
     supports_change_password=True,
     change_password_path="/changePassword",
+    # Same caveat again -- see the module docstring's phone_freer.py note.
+    supports_free_number=True,
+    free_number_path="/send_otp_touser",
     sel={
         # ---- signup (carried over from cricmatch.py, UNVERIFIED for
         # khelofun -- re-run inspect_form.py against khelofun before relying

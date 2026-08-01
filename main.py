@@ -924,6 +924,49 @@ def free_account_number(page, username, password, site_url=None):
     return result
 
 
+def run_free_account_number(username, password, site_url=None, proxy=None):
+    """Standalone single-call entry point for freeing one EXISTING account's
+    phone number: launches its own throwaway Playwright browser + context
+    (same _launch_pw_browser()/parse_proxy()/maybe_bridge_proxy() pattern
+    run_balance_check()/run_change_account_password() use), logs in, frees
+    the number via free_account_number(), and tears everything down on every
+    exit path -- same one-call convention, for phone_freer.py (or any other
+    caller) that isn't already holding a page/context. Returns
+    free_account_number()'s result dict ({"ok", "messages", "shot",
+    "freed_phone"})."""
+    result = {"ok": False, "messages": [], "shot": None, "freed_phone": None}
+    try:
+        pw, browser = _launch_pw_browser()
+    except Exception as e:
+        result["messages"] = [f"Failed to launch browser: {e}"]
+        return result
+
+    bridge_proc = None
+    try:
+        proxy_conf = parse_proxy(proxy) if proxy else None
+        try:
+            proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
+        except RuntimeError as e:
+            result["messages"] = [f"Proxy bridge failed to start: {e}"]
+            return result
+        context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        try:
+            page = context.new_page()
+            result = free_account_number(page, username, password, site_url=site_url)
+        finally:
+            try:
+                context.close()
+            except Exception:
+                pass
+    finally:
+        stop_bridge(bridge_proc)
+        try:
+            browser.close()
+        finally:
+            pw.stop()
+    return result
+
+
 _CHANGE_PASSWORD_FETCH_JS = """async (args) => {
     const [path, oldPassword, newPassword] = args;
     const csrf = document.querySelector('meta[name=csrf-token]').content;
