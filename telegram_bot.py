@@ -157,7 +157,7 @@ from main import (
     gen_password,
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
-    open_signup_modal, parse_proxy, read_result, run_paired_hedge, stop_bridge,
+    open_signup_modal, parse_proxy, read_result, run_paired_hedge, save_screenshot, stop_bridge,
     submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
 from sites.games import BACCARAT, STOCKMARKET
@@ -671,18 +671,15 @@ def _blocking_fill_and_register(session, phone):
     page.wait_for_timeout(4000)
 
     if not open_signup_modal(page):
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        no_modal_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-no-modal.png"
-        page.screenshot(path=str(no_modal_shot))
+        no_modal_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-no-modal.png")
         return {"ok": False, "message": "Could not open the signup modal (JOIN button).",
-                "shot": str(no_modal_shot)}
+                "shot": no_modal_shot}
 
     fill_register_form(page, acct)
 
-    SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    page.screenshot(path=str(SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png"))
+    save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png")
 
     # submit_register clicks REGISTER and, if the register POST is AWS WAF
     # CAPTCHA-blocked and CAPSOLVER_API_KEY is set, solves it (via CapSolver)
@@ -696,12 +693,11 @@ def _blocking_fill_and_register(session, phone):
                                                      proxy=session.proxy)
     session.context, session.page = page.context, page
 
-    result_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-result.png"
-    page.screenshot(path=str(result_shot))
+    result_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-result.png")
 
     if outcome == "phone_taken":
         return {"ok": False, "phone_taken": True, "message": check_phone_taken(page),
-                "shot": str(result_shot)}
+                "shot": result_shot}
 
     if outcome in ("error", "timeout"):
         message = "Register rejected: " + ("; ".join(msgs) or "unknown error")
@@ -716,13 +712,13 @@ def _blocking_fill_and_register(session, phone):
         elif not msgs and outcome == "timeout":
             message += " (no register API call was made -- REGISTER click had no effect)"
         return {"ok": False, "message": message,
-                "shot": str(result_shot)}
+                "shot": result_shot}
 
     digits = page.locator(profile_for(page.url).sel["otp_digits"]).count()
     if digits == 0:
         return {"ok": False, "message": "OTP screen detected but no digit inputs found.",
-                "shot": str(result_shot)}
-    return {"ok": True, "digits": digits, "shot": str(result_shot)}
+                "shot": result_shot}
+    return {"ok": True, "digits": digits, "shot": result_shot}
 
 
 def _blocking_verify_otp(session, otp):
@@ -739,14 +735,15 @@ def _blocking_verify_otp(session, otp):
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
-    page.screenshot(path=str(otp_filled))
+    save_screenshot(page, otp_filled)
 
     if not click_first_visible(page, prof.sel["otp_verify"], timeout=6000):
-        return {"ok": False, "message": "Could not find a visible Verify button.", "shot": str(otp_filled)}
+        return {"ok": False, "message": "Could not find a visible Verify button.",
+                "shot": save_screenshot(page, otp_filled)}
     outcome = wait_for_otp_outcome(page)
 
     otp_result = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-result.png"
-    page.screenshot(path=str(otp_result))
+    shot = save_screenshot(page, otp_result)
 
     if outcome == "error":
         err = ""
@@ -757,10 +754,10 @@ def _blocking_verify_otp(session, otp):
         except Exception:
             pass
         return {"ok": False, "message": f"OTP rejected: {err}" if err else "OTP rejected.",
-                "shot": str(otp_result)}
+                "shot": shot}
     if outcome == "timeout":
         return {"ok": False, "message": "OTP screen still showing — likely wrong/expired code.",
-                "shot": str(otp_result)}
+                "shot": shot}
 
     message = "OTP verified — account registered."
     freed_phone = None
@@ -768,7 +765,7 @@ def _blocking_verify_otp(session, otp):
         ok, new_phone, fn_msg = free_phone_number(session.page, session.site_url or BOT_SITE_URL)
         freed_phone = new_phone if ok else None
         message += f" | Free-number: {fn_msg}" if ok else f" | Free-number FAILED: {fn_msg}"
-    return {"ok": True, "message": message, "shot": str(otp_result), "freed_phone": freed_phone}
+    return {"ok": True, "message": message, "shot": shot, "freed_phone": freed_phone}
 
 
 # --- HTTP-fast mode (no browser) -- see /fast and main.py's http_signup_once ---

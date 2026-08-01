@@ -148,6 +148,15 @@ EMAIL_DOMAIN = "gmail.com"
 SHOTS_DIR = Path("shots")
 
 
+def save_screenshot(target, path):
+    """Screenshot-saving is disabled globally (2026-08-01, by request) -- a
+    no-op that returns None without touching disk. Every screenshot call
+    site in both main.py and telegram_bot.py goes through this one function,
+    so it can be re-enabled from a single place instead of restoring ~20
+    individual page.screenshot() calls."""
+    return None
+
+
 def gen_password():
     """Build a password that satisfies the form policy:
     5-60 chars, >=1 digit, >=1 special, upper and lower case."""
@@ -730,17 +739,16 @@ def enter_otp(page, acct, result):
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
-    page.screenshot(path=str(otp_filled))
+    save_screenshot(page, otp_filled)
 
     if not click_first_visible(page, prof.sel["otp_verify"], timeout=6000):
         result["messages"].append("Could not find a visible Verify button.")
-        result["shot"] = str(otp_filled)
+        result["shot"] = save_screenshot(page, otp_filled)
         return result
     outcome = wait_for_otp_outcome(page)
 
     otp_result = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-result.png"
-    page.screenshot(path=str(otp_result))
-    result["shot"] = str(otp_result)
+    result["shot"] = save_screenshot(page, otp_result)
 
     # Did the site reject the OTP?
     err = ""
@@ -903,11 +911,8 @@ def free_account_number(page, username, password, site_url=None):
     outcome, msgs = login(page, username, password, site_url=site_url)
     if outcome != "ok":
         result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        shot = SHOTS_DIR / f"{username}-{stamp}-login-failed.png"
-        page.screenshot(path=str(shot))
-        result["shot"] = str(shot)
+        result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-login-failed.png")
         return result
 
     ok, new_phone, msg = free_phone_number(page, site_url=site_url)
@@ -916,11 +921,8 @@ def free_account_number(page, username, password, site_url=None):
     if ok:
         result["freed_phone"] = new_phone
 
-    SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    shot = SHOTS_DIR / f"{username}-{stamp}-free-number.png"
-    page.screenshot(path=str(shot))
-    result["shot"] = str(shot)
+    result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-free-number.png")
     return result
 
 
@@ -1065,11 +1067,8 @@ def change_account_password_via_login(page, username, current_password, new_pass
     outcome, msgs = login(page, username, current_password, site_url=site_url)
     if outcome != "ok":
         result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        shot = SHOTS_DIR / f"{username}-{stamp}-login-failed.png"
-        page.screenshot(path=str(shot))
-        result["shot"] = str(shot)
+        result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-login-failed.png")
         return result
 
     ok, msg = change_account_password(page, current_password, new_password, site_url=site_url)
@@ -1078,11 +1077,8 @@ def change_account_password_via_login(page, username, current_password, new_pass
     if ok:
         result["new_password"] = new_password
 
-    SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    shot = SHOTS_DIR / f"{username}-{stamp}-change-password.png"
-    page.screenshot(path=str(shot))
-    result["shot"] = str(shot)
+    result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-change-password.png")
     return result
 
 
@@ -1193,19 +1189,13 @@ def check_account_balance(page, username, password, site_url=None):
     outcome, msgs = login(page, username, password, site_url=site_url)
     if outcome != "ok":
         result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        shot = SHOTS_DIR / f"{username}-{stamp}-balance-login-failed.png"
-        page.screenshot(path=str(shot))
-        result["shot"] = str(shot)
+        result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-balance-login-failed.png")
         return result
 
     balance = read_wallet_balance(page)
-    SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    shot = SHOTS_DIR / f"{username}-{stamp}-balance.png"
-    page.screenshot(path=str(shot))
-    result["shot"] = str(shot)
+    result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-balance.png")
     if balance is None:
         result["messages"] = ["Logged in, but couldn't find the wallet balance on the page "
                                "(selector not yet verified live -- see inspect_wallet.py)."]
@@ -1390,13 +1380,11 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     page.wait_for_timeout(4000)
 
     if not open_signup_modal(page):
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        no_modal_shot = SHOTS_DIR / f"{acct.get('username', 'unknown')}-{stamp}-no-modal.png"
-        page.screenshot(path=str(no_modal_shot))
         result["ok"] = False
         result["messages"] = ["Could not open the signup modal (JOIN button)."]
-        result["shot"] = str(no_modal_shot)
+        result["shot"] = save_screenshot(
+            page, SHOTS_DIR / f"{acct.get('username', 'unknown')}-{stamp}-no-modal.png")
         return result
 
     # Type (not fill) so the site's live validation/keyup handlers fire; blur
@@ -1404,15 +1392,14 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     # "I'm over 18 + T&C" box is checked.
     fill_register_form(page, acct)
 
-    SHOTS_DIR.mkdir(exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
     filled_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png"
-    page.screenshot(path=str(filled_shot))
+    save_screenshot(page, filled_shot)
 
     if not submit:
         result["ok"] = True
         result["messages"] = ["--no-submit: form filled but not submitted."]
-        result["shot"] = str(filled_shot)
+        result["shot"] = save_screenshot(page, filled_shot)
         return result
 
     # submit_register may swap in a fresh page/context (see its docstring) if
@@ -1440,8 +1427,7 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
 
     msgs = msgs or read_result(page)
     result_shot = SHOTS_DIR / f"{acct['username']}-{stamp}-result.png"
-    page.screenshot(path=str(result_shot))
-    result["shot"] = str(result_shot)
+    result["shot"] = save_screenshot(page, result_shot)
 
     if outcome == "phone_taken":
         phone_err = check_phone_taken(page)
@@ -1809,15 +1795,10 @@ def _page_debug_info(page):
 
 
 def _login_debug_shot(page, username):
-    """Save a screenshot of the page at a login failure (on the server running
-    the bot), so a remote failure has visual evidence. Returns a path suffix."""
-    try:
-        SHOTS_DIR.mkdir(exist_ok=True)
-        path = SHOTS_DIR / f"login-fail-{username}-{time.strftime('%Y%m%d-%H%M%S')}.png"
-        page.screenshot(path=str(path))
-        return f" [screenshot: {path}]"
-    except Exception:
-        return ""
+    """Screenshot-saving is disabled globally -- see save_screenshot(). Kept
+    as a no-op returning "" (not a path suffix) so callers embedding this in
+    an error message don't reference a file that was never written."""
+    return ""
 
 
 def login(page, username, password, site_url=None):
@@ -2314,11 +2295,8 @@ def test_baccarat(page, username, password, amount, site_url=None, category="Bac
     outcome, msgs = login(page, username, password, site_url=site_url)
     if outcome != "ok":
         result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        shot = SHOTS_DIR / f"{username}-{stamp}-login-failed.png"
-        page.screenshot(path=str(shot))
-        result["shot"] = str(shot)
+        result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-login-failed.png")
         return result
 
     if not open_casino_lobby(page):
@@ -2340,11 +2318,8 @@ def test_baccarat(page, username, password, amount, site_url=None, category="Bac
         result["ok"] = bet_result["ok"]
         result["messages"] = bet_result["messages"]
 
-        SHOTS_DIR.mkdir(exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        shot = SHOTS_DIR / f"{username}-{stamp}-baccarat-bet.png"
-        game_page.screenshot(path=str(shot))
-        result["shot"] = str(shot)
+        result["shot"] = save_screenshot(game_page, SHOTS_DIR / f"{username}-{stamp}-baccarat-bet.png")
         return result
     finally:
         try:
@@ -2596,20 +2571,11 @@ def read_game_balance(frame):
 
 
 def _setup_fail(context, page, username, step, reason):
-    """Screenshot the page state, close the context, and raise. The hedge
-    setup's failures are intermittent and my read-only diagnostics keep landing
-    in good windows -- the bot's own failures are the only witnesses, so they
-    must capture evidence (shots/hedge-setup-*.png) before dying."""
-    shot = ""
-    try:
-        SHOTS_DIR.mkdir(exist_ok=True)
-        path = SHOTS_DIR / f"hedge-setup-{username}-{step}-{time.strftime('%Y%m%d-%H%M%S')}.png"
-        page.screenshot(path=str(path))
-        shot = f" [screenshot: {path}]"
-    except Exception:
-        pass
+    """Close the context and raise. Screenshot-saving is disabled globally
+    (see save_screenshot()), so unlike before this no longer captures
+    shots/hedge-setup-*.png evidence of an intermittent setup failure."""
     context.close()
-    raise RuntimeError(reason + shot)
+    raise RuntimeError(reason)
 
 
 def _find_provider_lobby_frame(game_page, timeout_ms=15000):
@@ -3576,21 +3542,10 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
 
 
 def _screenshot_pair(gp_b, gp_p, summary, tag, player_exec):
-    """Screenshot both game tabs into shots/ and record the paths on `summary`.
-    gp_p belongs to the Player side's own thread (see run_paired_hedge), so its
-    screenshot must be dispatched through player_exec, not called inline."""
-    SHOTS_DIR.mkdir(exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    for label, gp, exe in (("banker", gp_b, None), ("player", gp_p, player_exec)):
-        try:
-            path = SHOTS_DIR / f"hedge-{tag}-{label}-{stamp}.png"
-            if exe is not None:
-                exe.submit(gp.screenshot, path=str(path)).result()
-            else:
-                gp.screenshot(path=str(path))
-            summary["shots"].append(str(path))
-        except Exception:
-            pass
+    """Screenshot-saving is disabled globally (see save_screenshot()) -- a
+    no-op that leaves summary["shots"] empty rather than recording paths
+    nothing was ever written to."""
+    return
 
 
 def prompt_phone():
