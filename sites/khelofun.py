@@ -57,8 +57,13 @@ PROFILE = SiteProfile(
         # on these for an actual signup) ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",
                        "button.cls_reg_btn", ".join__btn"],
-        "close_popup": [".mnPopupClose", ".pgSoftClsBtn", ".support_popup_close",
-                        ".areSurecancelBtn", "button:has-text('Close')"],
+        # ".skip_right_img" dismisses the SPRIBE/Aviator walkthrough overlay
+        # that covers the whole page on load -- confirmed live 2026-08-01,
+        # same overlay documented for spin24star/cricmatch under "Multi-site
+        # support" in CLAUDE.md. Without it, login()'s LOGIN-button click was
+        # silently intercepted by the overlay and timed out every attempt.
+        "close_popup": [".skip_right_img", ".mnPopupClose", ".pgSoftClsBtn",
+                        ".support_popup_close", ".areSurecancelBtn", "button:has-text('Close')"],
         "username": "#userNameid",
         "email": "#userEmailid",
         "password": "#pass_log_id",
