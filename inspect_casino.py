@@ -1,14 +1,5 @@
-"""One-off inspector: log in, find the casino section, search "baccarat",
-open the game, and dump what's actually there (DOM fields / iframes / canvas)
-so real selectors can be written for login() / casino nav / bet placement.
 
-Nothing here is wired into main.py yet -- this is discovery only, run it
-headed and read the printed output + screenshots before writing any
-production code against a guessed selector.
 
-Usage: python inspect_casino.py <url> <username> <password> [game_query]
-  (game_query defaults to "baccarat")
-"""
 import sys
 
 from playwright.sync_api import sync_playwright
