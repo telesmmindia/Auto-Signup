@@ -407,25 +407,58 @@ single shared `_pw_executor`.
 
 The current production layout is cricmatch signup (`.env.cricmatch`,
 `BOT_MODE=signup`), spin24star signup (`.env.spin24star`, `BOT_MODE=signup`),
-cricmatch gameplay (`.env.gameplay`, `BOT_MODE=gameplay` — the casino/hedge
-commands only), cricmatch stock market hedge (`.env.stockmarket`,
+khelofun signup (`.env.khelofun.signup`, `BOT_MODE=signup` — added
+2026-08-07, see "khelofun signup bot" below), cricmatch gameplay
+(`.env.gameplay`, `BOT_MODE=gameplay` — the casino/hedge commands only),
+cricmatch stock market hedge (`.env.stockmarket`, `BOT_MODE=stockmarket`),
+khelofun stock market hedge (`.env.khelofun.stockmarket`,
 `BOT_MODE=stockmarket`), and cricmatch password-change (`.env.password`,
 `BOT_MODE=password` — `/cp` only, since 2026-07-30).
 
 ```
 cp .env.cricmatch.example .env.cricmatch
 cp .env.spin24star.example .env.spin24star
+cp .env.khelofun.signup.example .env.khelofun.signup
 cp .env.gameplay.example .env.gameplay
 cp .env.stockmarket.example .env.stockmarket
 cp .env.password.example .env.password
 # edit each: a DIFFERENT TELEGRAM_BOT_TOKEN (one @BotFather bot per process),
 # BOT_SITE_URL, BOT_MODE, and distinct ADMINS_FILE / SETTINGS_FILE paths
 .venv/bin/python telegram_bot.py --env .env.cricmatch
-.venv/bin/python telegram_bot.py --env .env.spin24star    # separate terminal/tmux pane
-.venv/bin/python telegram_bot.py --env .env.gameplay      # separate terminal/tmux pane
-.venv/bin/python telegram_bot.py --env .env.stockmarket   # separate terminal/tmux pane
-.venv/bin/python telegram_bot.py --env .env.password      # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.spin24star        # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.khelofun.signup   # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.gameplay          # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.stockmarket       # separate terminal/tmux pane
+.venv/bin/python telegram_bot.py --env .env.password          # separate terminal/tmux pane
 ```
+
+### khelofun signup bot
+
+Same feature/code path as cricmatch's signup bot — `sites/khelofun.py`'s
+`PROFILE` already carries the register-modal selectors (copied from
+cricmatch, since khelofun is the same white-label Laravel template — see
+that file's docstring). **Confirmed live 2026-08-07**: dismissing the
+SPRIBE overlay (`.skip_right_img`) then inspecting the real page showed the
+register form's fields byte-for-byte identical to cricmatch's
+(`#userNameid`/`#userEmailid`/`#pass_log_id`/`#phoneNumber`/`#remChck2`/
+`button.cls_register_new`), and a `main.py --no-submit --url
+https://khelofun.com` dry run filled the whole form end-to-end with no
+errors. OTP widget/verify selectors are still unverified (no real phone/OTP
+was exercised) — confirm those on the bot's first real signup.
+`supports_http_fast` stays `False` (register network traffic was never
+captured for khelofun, unlike cricmatch's confirmed `--fast` path).
+
+Set up like any other per-site bot instance (see above): `cp
+.env.khelofun.signup.example .env.khelofun.signup`, then fill in a fresh
+`TELEGRAM_BOT_TOKEN` from @BotFather (a `.env.khelofun.signup` already
+exists in this repo with `MASTER_ADMIN_ID` pre-filled and everything else
+set — it only needs a real token dropped in). `ADMINS_FILE` /
+`SETTINGS_FILE` / `ADMIN_PHONES_FILE` are all khelofun-signup-specific
+(`admins.khelofun.signup.json` etc.) — deliberately distinct from
+`.env.khelofun`'s `bot_settings.khelofun.json` (that file belongs to
+`balance_checker.py`/`password_changer.py`, which aren't bots and don't
+share state with this one) and from `.env.khelofun.stockmarket`'s files, so
+none of the three khelofun instances can clobber each other's settings.
 
 `BOT_MODE` (`signup` | `gameplay` | `stockmarket` | `password` | `all`,
 default `all` so a plain `.env` single-bot setup is unchanged) controls which

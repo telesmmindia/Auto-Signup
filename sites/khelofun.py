@@ -15,10 +15,19 @@ before/after check yet). Run phone_freer.py --once against one real row
 first and confirm the account's mobile number actually changed before
 trusting a full sheet sweep.
 
+Signup selectors confirmed live 2026-08-07: inspecting the real page (after
+dismissing the SPRIBE overlay via .skip_right_img, same trap documented
+above) showed the register modal's fields byte-for-byte identical to
+cricmatch's -- #userNameid / #userEmailid / #pass_log_id / #phoneNumber /
+#remChck2 / button.cls_register_new -- and a full `main.py --no-submit`
+dry run against khelofun.com filled the form end-to-end with no errors.
+OTP widget/verify selectors are still UNVERIFIED (no real phone/OTP was
+used in that check) -- re-confirm those on the first real signup.
+
 supports_http_fast (HTTP-only signup) is still left at its False default --
-out of scope for what's been requested so far, and signup wasn't inspected
-for this site at all; don't flip it on without doing the same live network
-capture cricmatch's went through."""
+out of scope for what's been requested so far, and the register network
+traffic wasn't captured for this site; don't flip it on without doing the
+same live network capture cricmatch's went through."""
 from .base import SiteProfile
 from .cricmatch import GENERIC_RESULT_SELECTORS
 
