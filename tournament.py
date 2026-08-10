@@ -189,19 +189,47 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
     return False
 
 
-def place_stake(frame, role, plan):
+def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT):
     """Click `plan`'s chips onto one bet spot. Returns the TOTAL BET after.
 
     One seat only ever bets one spot, so TOTAL BET is that seat's stake and
-    can be compared directly against the planned amount."""
-    for chip, count in group_plan(plan):
-        if not _pick_chip(frame, chip):
+    can be compared directly against the planned amount.
+
+    TOPS UP A SHORT STAKE while the window is still open, rather than clicking
+    the plan once and hoping. Confirmed necessary by the first real run
+    (2026-08-10): a 900 stake needing five clicks landed 600 on one side and
+    500 on the other, because clicks were lost part-way through. That left the
+    two sides betting DIFFERENT amounts on the same hand, which is not a hedge
+    -- the pair ended up 70 ahead by luck, and would have been down by the same
+    kind of margin had the other side won.
+
+    So after clicking, this re-reads TOTAL BET and clicks the difference,
+    up to `attempts` times, stopping early once the window closes (topping up
+    after the window shuts does nothing, and would otherwise stack onto the
+    NEXT round)."""
+    target = int(target if target is not None else sum(plan))
+    for attempt in range(max(1, attempts)):
+        placed = m._read_total_bet(frame) or 0
+        short = target - placed
+        if short <= 0:
             break
-        for _ in range(count):
-            try:
-                m._click_bet_spot(frame, role)
-            except Exception:
-                pass
+        # First pass clicks the whole plan; later passes only the shortfall.
+        todo = plan if attempt == 0 and not placed else plan_stake(short)[1]
+        if not todo:
+            break
+        for chip, count in group_plan(todo):
+            if not _pick_chip(frame, chip):
+                break
+            for _ in range(count):
+                try:
+                    m._click_bet_spot(frame, role)
+                except Exception:
+                    pass
+        try:
+            if not m._betting_open(frame, game):
+                break
+        except Exception:
+            break
     return m._read_total_bet(frame)
 
 
@@ -445,31 +473,46 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         L["tb_b"] = _resolve(fb, 60)
 
     # --- verify BEFORE the hand runs ----------------------------------
+    # Classify by WHAT IS ACTUALLY ON THE TABLE, not by whether it matches what
+    # was asked for. The first real run (2026-08-10) got this wrong in the
+    # dangerous direction: TOTAL BET read 600 and 500 against a wanted 900, and
+    # because neither equalled 900 the old check reported "no money at risk"
+    # and moved on. Both bets were real. The hand ran, Banker won, and the two
+    # accounts moved -500 and +570 while the run recorded neither. Zero is the
+    # only reading that means nothing was staked.
     staked = []
     for L in live:
         a, b, stake = L["a"], L["b"], L["stake"]
-        ok_a, ok_b = L["tb_a"] == stake, L["tb_b"] == stake
-        if ok_a and ok_b:
+        tb_a = L["tb_a"] or 0
+        tb_b = L["tb_b"] or 0
+
+        if tb_a == stake and tb_b == stake:
             staked.append(L)
             continue
-        if not ok_a and not ok_b:
+
+        if tb_a == 0 and tb_b == 0:
             results.append({"pair": (a.username, b.username), "stake": stake,
                             "winner": None, "loser": None, "status": "not_placed",
                             "message": f"neither side's stake registered "
-                                       f"(TOTAL BET {L['tb_a']!r}/{L['tb_b']!r}, "
-                                       f"wanted {stake}) — no money at risk"})
+                                       f"(TOTAL BET 0/0, wanted {stake}) — "
+                                       "nothing was bet"})
+            continue
+
+        # Something is down but it is not a matched pair of bets. Whatever the
+        # shape, this hand is live money and must be followed to settlement --
+        # returning here is what lost track of it last time.
+        if tb_a and tb_b:
+            detail = (f"both sides bet but for DIFFERENT amounts "
+                      f"({a.username} ₹{tb_a:,} vs {b.username} ₹{tb_b:,}, "
+                      f"wanted ₹{stake:,} each) — the ₹{abs(tb_a - tb_b):,} "
+                      "difference is unhedged")
         else:
-            exposed = a if ok_a else b
-            other = b if ok_a else a
-            results.append({"pair": (a.username, b.username), "stake": stake,
-                            "winner": None, "loser": None, "status": "unhedged",
-                            "message": (
-                                f"⚠️ ONLY {exposed.username} got a bet down "
-                                f"(TOTAL BET {L['tb_a']!r}/{L['tb_b']!r}, wanted "
-                                f"{stake}). {other.username} did not. That is a "
-                                f"one-sided ₹{stake:,} bet with nothing covering "
-                                "it — this pair is out of the bracket, check "
-                                "both balances by hand.")})
+            one = a if tb_a else b
+            amt = tb_a or tb_b
+            detail = (f"ONLY {one.username} got a bet down (₹{amt:,}, wanted "
+                      f"₹{stake:,} each) — that whole stake is one-sided")
+        L["mismatch"] = detail
+        staked.append(L)
 
     if not staked:
         return results
@@ -495,6 +538,21 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
             continue
         a.balance, b.balance = post_a, post_b
         d_a, d_b = post_a - L["pre_a"], post_b - L["pre_b"]
+
+        # A hand that went down mismatched is real, settled money, but the two
+        # sides were not covering each other -- so the result says nothing
+        # about who "should" advance, and both accounts leave the bracket with
+        # their true post-settlement balances recorded.
+        if L.get("mismatch"):
+            results.append({"pair": (a.username, b.username), "stake": stake,
+                            "winner": None, "loser": None, "status": "unhedged",
+                            "message": (
+                                f"⚠️ UNHEDGED HAND — {L['mismatch']}. It "
+                                f"settled: {a.username} {L['pre_a']}→{post_a} "
+                                f"({d_a:+}), {b.username} {L['pre_b']}→{post_b} "
+                                f"({d_b:+}). Both accounts leave the bracket; "
+                                "these balances are real, not estimates.")})
+            continue
 
         # A tie returns both bets, so both balances come back to where they
         # started and nobody advances. Costs a hand, no money.
