@@ -20,7 +20,10 @@ from aiogram.types import Message, TelegramObject, User
 import handlers  # noqa: F401  -- registers the platform handlers
 from config import (
     BOT_TOKEN,
+    DEFAULT_CONCURRENCY,
+    FOLLOW_REDIRECTS,
     MASTER_ADMIN_ID,
+    MAX_CONCURRENCY,
     SCHEDULE_TIMEZONE,
     SCHEDULE_TZ,
     SCHEDULES_FILE,
@@ -85,9 +88,14 @@ def _parse_user_id(command: CommandObject, message: Message) -> int | None:
 HELP = (
     "<b>Submit a job</b>\n"
     "Send one or more lines:\n"
-    "<code>&lt;link&gt; &lt;platform&gt; &lt;count&gt;</code>\n\n"
+    "<code>&lt;link&gt; &lt;platform&gt; &lt;count&gt; [delay] [mode] [parallel]</code>\n\n"
     "Example:\n"
     "<code>https://t.me/example telegram 500</code>\n\n"
+    "<b>Speed</b>\n"
+    "<code>parallel</code> is how many clicks run at the same time — this is the "
+    "speed dial, not <code>delay</code>. Default {lanes}, max {max_lanes}.\n"
+    "<code>https://t.me/example telegram 500 0 default 50</code> — 50 at once\n"
+    "Failed clicks are retried, so <code>count</code> means that many real clicks.\n\n"
     "<b>Platforms:</b> {platforms}\n\n"
     "<b>Run it daily by itself</b>\n"
     "<code>/schedule &lt;link&gt; &lt;platform&gt; &lt;min&gt;-&lt;max&gt; &lt;start&gt; &lt;end&gt; [HH:MM]</code>\n"
@@ -111,7 +119,14 @@ HELP = (
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     platforms = ", ".join(sorted(set(PLATFORMS.values())))
-    await message.answer(HELP.format(platforms=platforms, tz=SCHEDULE_TIMEZONE))
+    await message.answer(
+        HELP.format(
+            platforms=platforms,
+            tz=SCHEDULE_TIMEZONE,
+            lanes=DEFAULT_CONCURRENCY,
+            max_lanes=MAX_CONCURRENCY,
+        )
+    )
 
 
 @router.message(Command("id"))
@@ -127,6 +142,8 @@ async def cmd_status(message: Message) -> None:
     await message.answer(
         f"Queued: <b>{queue.qsize()}</b>\n"
         f"Workers: <b>{WORKER_COUNT}</b>\n"
+        f"Clicks at once (default): <b>{DEFAULT_CONCURRENCY}</b> (max {MAX_CONCURRENCY})\n"
+        f"Follow through to destination: <b>{'yes' if FOLLOW_REDIRECTS else 'no'}</b>\n"
         f"Daily schedules: <b>{len(active)}</b>"
     )
 

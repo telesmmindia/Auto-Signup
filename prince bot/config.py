@@ -26,6 +26,30 @@ MASTER_ADMIN_ID = int(os.environ.get("MASTER_ADMIN_ID", "0"))
 # How many tasks run at the same time.
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 
+# --- Click speed ---------------------------------------------------------
+# How many requests one job keeps in flight at the same time. THIS is what
+# sets the speed, not `delay`: a single request through the proxy takes
+# roughly 0.5-2 seconds, so 20 lanes is about 20x the clicks per second.
+# `delay` is only a pause inside each lane, and defaults to none.
+DEFAULT_CONCURRENCY = int(os.environ.get("CONCURRENCY", "20"))
+MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "200"))
+DEFAULT_DELAY = float(os.environ.get("DEFAULT_DELAY", "0"))
+
+# Give up on one request after this long. Lower = a dead proxy connection
+# fails fast and gets retried, instead of holding a lane for 10+ seconds.
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "12"))
+
+# Follow the redirect all the way to the destination site. bit.ly records the
+# click when it SERVES the redirect, so leaving this off is much faster, uses
+# far less proxy bandwidth, and skips the destination site's own errors.
+# Set FOLLOW_REDIRECTS=true in .env if you also need the destination loaded.
+FOLLOW_REDIRECTS = os.environ.get("FOLLOW_REDIRECTS", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
 ADMINS_FILE = BASE_DIR / "admins.json"
 SCHEDULES_FILE = BASE_DIR / "schedules.json"
 

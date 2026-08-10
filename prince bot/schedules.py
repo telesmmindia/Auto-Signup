@@ -14,9 +14,11 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Awaitable, Callable
 
+from config import DEFAULT_CONCURRENCY, DEFAULT_DELAY
 from tasks import (
     ParseError,
     Task,
+    parse_concurrency,
     parse_count,
     parse_delay,
     parse_link,
@@ -29,7 +31,7 @@ log = logging.getLogger(__name__)
 DEFAULT_RUN_TIME = time(1, 0)  # 1 AM
 POLL_SECONDS = 30
 
-USAGE = "<link> <platform> <min>-<max> <start> <end> [HH:MM] [delay] [mode]"
+USAGE = "<link> <platform> <min>-<max> <start> <end> [HH:MM] [delay] [mode] [parallel]"
 
 
 @dataclass
@@ -43,8 +45,9 @@ class Schedule:
     run_time: time
     requested_by: int
     chat_id: int
-    delay: float = 0.02
+    delay: float = DEFAULT_DELAY
     mode: str = "default"
+    concurrency: int = DEFAULT_CONCURRENCY
     id: int = 0
     last_run: str | None = None  # ISO date of the last day it fired
     runs: int = 0
@@ -88,6 +91,7 @@ class Schedule:
             requested_by=self.requested_by,
             delay=self.delay,
             mode=self.mode,
+            concurrency=self.concurrency,
         )
 
     # --- storage ---------------------------------------------------------
@@ -106,6 +110,7 @@ class Schedule:
             "chat_id": self.chat_id,
             "delay": self.delay,
             "mode": self.mode,
+            "concurrency": self.concurrency,
             "last_run": self.last_run,
             "runs": self.runs,
         }
@@ -122,8 +127,11 @@ class Schedule:
             run_time=datetime.strptime(raw["run_time"], "%H:%M").time(),
             requested_by=int(raw["requested_by"]),
             chat_id=int(raw["chat_id"]),
-            delay=float(raw.get("delay", 0.02)),
+            delay=float(raw.get("delay", DEFAULT_DELAY)),
             mode=raw.get("mode", "default"),
+            # Schedules saved before parallel clicks existed pick up the
+            # current default rather than staying one-at-a-time.
+            concurrency=int(raw.get("concurrency", DEFAULT_CONCURRENCY)),
             id=int(raw["id"]),
             last_run=raw.get("last_run"),
             runs=int(raw.get("runs", 0)),
@@ -258,15 +266,16 @@ def parse_count_range(raw: str) -> tuple[int, int]:
 
 
 def parse_schedule(text: str, requested_by: int, chat_id: int, today: date) -> Schedule:
-    """Parse `<link> <platform> <min>-<max> <start> <end> [HH:MM] [delay] [mode]`."""
+    """Parse `<link> <platform> <min>-<max> <start> <end> [HH:MM] [delay] [mode] [parallel]`."""
     parts = text.split()
-    if not 5 <= len(parts) <= 8:
+    if not 5 <= len(parts) <= 9:
         raise ParseError(f"expected: {USAGE}")
 
     link, platform_raw, count_raw, start_raw, end_raw = parts[:5]
     time_raw = parts[5] if len(parts) >= 6 else None
-    delay_raw = parts[6] if len(parts) >= 7 else "0.02"
-    mode_raw = parts[7] if len(parts) == 8 else "default"
+    delay_raw = parts[6] if len(parts) >= 7 else str(DEFAULT_DELAY)
+    mode_raw = parts[7] if len(parts) >= 8 else "default"
+    lanes_raw = parts[8] if len(parts) == 9 else str(DEFAULT_CONCURRENCY)
 
     min_count, max_count = parse_count_range(count_raw)
     start_date = parse_day(start_raw, today)
@@ -288,6 +297,7 @@ def parse_schedule(text: str, requested_by: int, chat_id: int, today: date) -> S
         chat_id=chat_id,
         delay=parse_delay(delay_raw),
         mode=parse_mode(mode_raw),
+        concurrency=parse_concurrency(lanes_raw),
     )
 
 

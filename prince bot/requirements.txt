@@ -1,4 +1,5 @@
 aiogram>=3.26
+requests>=2.31
 # Timezone database for the daily schedules. macOS/most Linux hosts already
 # ship one system-wide, but slim/Alpine containers do not -- without this,
 # SCHEDULE_TIMEZONE silently falls back to the server's clock and a 01:00

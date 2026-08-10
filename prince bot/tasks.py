@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
+from config import DEFAULT_CONCURRENCY, DEFAULT_DELAY, MAX_CONCURRENCY
+
 log = logging.getLogger(__name__)
 
 # Platform aliases -> canonical name. Add new platforms here.
@@ -102,14 +104,26 @@ def parse_mode(raw: str) -> str:
     return raw
 
 
+def parse_concurrency(raw: str) -> int:
+    """How many requests to keep in flight at once. The real speed dial."""
+    try:
+        lanes = int(raw)
+    except ValueError:
+        raise ParseError(f"'{raw}' is not a number of parallel requests") from None
+    if not 1 <= lanes <= MAX_CONCURRENCY:
+        raise ParseError(f"parallel requests must be between 1 and {MAX_CONCURRENCY}")
+    return lanes
+
+
 @dataclass
 class Task:
     link: str
     platform: str
     count: int
     requested_by: int
-    delay: float = 0.02
+    delay: float = DEFAULT_DELAY
     mode: str = "default"
+    concurrency: int = DEFAULT_CONCURRENCY
     id: int = field(default_factory=lambda: next(_counter))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "queued"
@@ -119,19 +133,23 @@ class Task:
 
 
 def parse_task(text: str, requested_by: int) -> Task:
-    """Parse one line of `<link> <platform> <count> [delay] [mode]`.
-    
+    """Parse one line of `<link> <platform> <count> [delay] [mode] [parallel]`.
+
     platform: platform name or "random" for random platform each request
-    delay: optional, seconds between each request (default: 0.02)
-    mode: optional, "random" for random referers, "default" for platform referer (default: "default")
+    delay: optional, pause inside each lane between its requests (default: none)
+    mode: optional, "random" for random referers, "default" for platform referer
+    parallel: optional, requests in flight at once -- the actual speed dial
     """
     parts = text.split()
-    if len(parts) < 3 or len(parts) > 5:
-        raise ParseError("expected 3-5 parts: <link> <platform> <count> [delay] [mode]")
+    if len(parts) < 3 or len(parts) > 6:
+        raise ParseError(
+            "expected 3-6 parts: <link> <platform> <count> [delay] [mode] [parallel]"
+        )
 
     link, platform_raw, count_raw = parts[:3]
-    delay_raw = parts[3] if len(parts) >= 4 else "0.02"
-    mode_raw = parts[4] if len(parts) == 5 else "default"
+    delay_raw = parts[3] if len(parts) >= 4 else str(DEFAULT_DELAY)
+    mode_raw = parts[4] if len(parts) >= 5 else "default"
+    lanes_raw = parts[5] if len(parts) == 6 else str(DEFAULT_CONCURRENCY)
 
     return Task(
         link=parse_link(link),
@@ -140,6 +158,7 @@ def parse_task(text: str, requested_by: int) -> Task:
         requested_by=requested_by,
         delay=parse_delay(delay_raw),
         mode=parse_mode(mode_raw),
+        concurrency=parse_concurrency(lanes_raw),
     )
 
 

@@ -2397,9 +2397,85 @@ Behavior worth knowing before changing any of it:
   cancelled on shutdown with the rest.
 
 `tasks.py`'s field validation was split into `parse_link`/`parse_platform`/
-`parse_count`/`parse_delay`/`parse_mode` so `parse_task()` (one-off lines)
-and `parse_schedule()` (recurring) can't drift on what a valid platform or
-delay is.
+`parse_count`/`parse_delay`/`parse_mode`/`parse_concurrency` so `parse_task()`
+(one-off lines) and `parse_schedule()` (recurring) can't drift on what a valid
+platform or delay is.
+
+### Click speed: `parallel`, not `delay` (rewritten 2026-08-11)
+
+`demo_job()` used to be **fully sequential** — `await bounded_send()` inside a
+`for` loop, so exactly one request was ever in flight and the
+`asyncio.Semaphore(50)` next to it was dead code. That made `delay` almost
+irrelevant: the real gate was one proxied round trip (~0.5-2s) per click, so
+even `delay 0` capped out around 1-2 clicks/sec. Don't reintroduce a
+one-at-a-time loop here.
+
+It now runs `concurrency` **lanes** concurrently, each an async task pulling
+from a shared counter:
+- `Task.concurrency` / `Schedule.concurrency`, an optional last positional
+  arg (`<link> <platform> <count> [delay] [mode] [parallel]`), defaulting to
+  `config.DEFAULT_CONCURRENCY` (env `CONCURRENCY`, default 20; ceiling
+  `MAX_CONCURRENCY`, env-overridable, default 200). Schedules saved before
+  this existed read back at the current default rather than staying at 1.
+- `delay` is now only a pause **inside** a lane, and its default dropped from
+  0.02 to 0 (`DEFAULT_DELAY`). Throughput is roughly `concurrency / (rtt +
+  delay)`.
+- Each lane gets its own thread (a per-job `ThreadPoolExecutor` sized to
+  `concurrency`, not `asyncio.to_thread`'s shared default pool, which caps
+  around 32 threads and would silently throttle a high `parallel`).
+- A thread-local `requests.Session` per lane (`_session()`) reuses the proxy
+  tunnel + TLS handshake across that lane's clicks instead of paying it every
+  time. Cookies are cleared before each request so every click still looks
+  like a new visitor — don't drop that `clear()`, persisted cookies risk
+  bit.ly deduping the clicks.
+
+**`WORKER_COUNT` multiplies this**: 3 jobs × 20 lanes = 60 concurrent
+requests through the single proxy in `config.PROXIES`. If 502s/dropped
+connections climb, lower `CONCURRENCY` — one proxy endpoint is the real
+ceiling, not the code.
+
+### A failed request is no longer counted as a click
+
+The old loop did `done += 1` regardless of outcome, so proxy errors
+(`RemoteDisconnected`, `502 Bad Gateway` from ProxyCheap) silently ate part
+of the order — asking for 500 could deliver ~430. Now `count` means that many
+**answered** requests: a lane that gets a non-2xx/3xx status or an exception
+hands the click back to the shared counter and another lane retries it.
+Guards so a genuinely broken setup can't loop forever:
+- `ATTEMPT_MULTIPLIER` (3) — total attempts are capped at `count * 3 + 20`.
+- `MAX_CONSECUTIVE_FAILURES` (40) — everything failing in a row means the
+  proxy or link is down, not a blip.
+- `DEAD_LINK_STATUSES` (404/410) — stops immediately, nothing to retry.
+- Exhausting any of these **raises**, so the bot's `done` callback renders ❌
+  with the real counts rather than a ✅ on a short delivery.
+
+`send_clicks()` returns `(status, target_or_error)` instead of a bare int,
+and `REQUEST_TIMEOUT` (env, default 12s, was a hardcoded 10) bounds one
+attempt.
+
+### `FOLLOW_REDIRECTS` is OFF by default
+
+The old code passed `allow_redirects=True`, so every click followed bit.ly
+through to cricmatch247 and downloaded that whole page. That was most of the
+time cost and the source of the proxy errors seen in production (the failing
+URLs in those logs were `cricmatch247.com/...`, not bit.ly). bit.ly records
+the click when it **serves** the redirect, so the destination fetch buys
+nothing for the click counter.
+
+`config.FOLLOW_REDIRECTS` (env, default false) turns it back on. Set
+`FOLLOW_REDIRECTS=true` in `prince bot/.env` if the destination site actually
+needs to see the traffic (e.g. affiliate `btag` attribution measured on
+cricmatch247's side rather than on bit.ly's) — that's the one reason to pay
+for it. **Not verified against a live bit.ly link** that a non-followed
+redirect still increments its counter; it follows from how bit.ly works, but
+nobody has watched a real link's stats before/after this change.
+
+**Verified 2026-08-11 against a local flaky server** (30% of requests dropped,
+0.4s latency), not against real bit.ly or the real proxy: 20 lanes ran ~10x
+faster than 1, all 30 requested clicks landed despite 11 failures, a 404 link
+stopped instantly, and a dead server stopped after the consecutive-failure
+limit instead of hanging. Parse/roundtrip/back-compat of the new `parallel`
+arg were checked for both one-off lines and schedules.
 
 **Verified without touching the live bot or bit.ly**: the parser, the
 due/next-run logic, JSON persistence across a restart, and the loop itself

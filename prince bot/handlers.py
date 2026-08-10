@@ -1,9 +1,20 @@
 import asyncio
 import random
-from config import PROXIES
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from config import (
+    DEFAULT_CONCURRENCY,
+    FOLLOW_REDIRECTS,
+    MAX_CONCURRENCY,
+    PROXIES,
+    REQUEST_TIMEOUT,
+)
 from tasks import PLATFORMS, Progress, Task, handler, PLATFORM_URLS
 
 import requests
+from requests.adapters import HTTPAdapter
 
 REFERERS = [
     "https://twitter.com/",
@@ -211,60 +222,166 @@ def realistic_headers(referer) -> dict:
     return headers
 
 
-def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> int:
+# --- One request ---------------------------------------------------------
+# Every lane runs on its own thread and keeps its own connection pool, so the
+# proxy tunnel and TLS handshake are paid once per lane instead of once per
+# click. Cookies are cleared before each request so every click still looks
+# like a brand-new visitor.
+
+_local = threading.local()
+
+
+def _session() -> requests.Session:
+    session = getattr(_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        _local.session = session
+    return session
+
+
+def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> tuple[int, str]:
+    """Fire one click. Returns (status code, where it pointed / the error).
+
+    A status of -1 means the request never reached the server at all.
+    """
+    session = _session()
+    session.cookies.clear()
+    proxies = {"http": proxy, "https": proxy} if proxy else None
     try:
-        proxies = {"http": proxy, "https": proxy} if proxy else None
-        r = requests.get(BITLY_URL, headers=headers,
-                         allow_redirects=True, timeout=10, proxies=proxies)
-        print(f"  -> {r.status_code} -> {r.url}")
-        return r.status_code
+        r = session.get(
+            BITLY_URL,
+            headers=headers,
+            allow_redirects=FOLLOW_REDIRECTS,
+            timeout=REQUEST_TIMEOUT,
+            proxies=proxies,
+        )
+        target = r.headers.get("Location") or r.url
+        print(f"  -> {r.status_code} -> {target}")
+        return r.status_code, target
     except requests.RequestException as e:
         print(f"  -> ERROR: {e}")
-        return -1
+        return -1, str(e)
+
 
 def get_proxy():
     return random.choice(PROXIES) if PROXIES else None
 
+
+# --- The job -------------------------------------------------------------
+
+# A click only counts when the server actually answered. Anything else is
+# handed back to the queue and tried again, so `count` means `count` real
+# clicks, not `count` attempts.
+RETRY_PAUSE = 0.5  # grows with each failure in a row
+MAX_RETRY_PAUSE = 5.0
+ATTEMPT_MULTIPLIER = 3  # total attempts allowed = count x this, then give up
+MAX_CONSECUTIVE_FAILURES = 40  # everything failing = proxy or link is down
+DEAD_LINK_STATUSES = {404, 410}  # never going to work, stop immediately
+PROGRESS_EVERY_SECONDS = 3.0  # Telegram rate-limits message edits
+
+
+def pick_referer(task: Task) -> str:
+    if task.platform == "random":
+        return random.choice(list(PLATFORM_URLS.values()))
+    if task.mode in ("random", "variety"):
+        return random.choice(REFERERS)
+    return PLATFORM_URLS[task.platform]
+
+
 async def demo_job(task: Task, progress: Progress) -> str:
     total = task.count
     delay = task.delay
-    mode = task.mode
-    
-    await progress(f"0/{total} on {task.platform} (delay: {delay}s, mode: {mode})")
-    
-    async def send_one():
-        # Choose referer based on platform and mode
-        if task.platform == "random":
-            referer = random.choice(list(PLATFORM_URLS.values()))
-        elif mode in ("random", "variety"):
-            referer = random.choice(REFERERS)
-        else:
-            referer = PLATFORM_URLS[task.platform]
-        
-        headers = realistic_headers(referer)
-        return await asyncio.to_thread(
-             send_clicks, headers, task.link, get_proxy()
+    lanes = max(1, min(task.concurrency or DEFAULT_CONCURRENCY, MAX_CONCURRENCY))
+    lanes = min(lanes, total)
+
+    ok = 0  # clicks the server actually answered
+    failed = 0  # attempts that errored and were retried
+    remaining = total  # clicks not yet claimed by a lane
+    attempts_left = total * ATTEMPT_MULTIPLIER + 20
+    streak = 0  # failures in a row, across all lanes
+    stopped: str | None = None
+    started = time.monotonic()
+    last_report = 0.0
+
+    await progress(f"0/{total} on {task.platform} — {lanes} at a time")
+
+    async def report(force: bool = False) -> None:
+        nonlocal last_report
+        now = time.monotonic()
+        if not force and now - last_report < PROGRESS_EVERY_SECONDS:
+            return
+        last_report = now
+        pct = int(ok / total * 100)
+        rate = ok / max(now - started, 0.001)
+        line = f"{ok}/{total} ({pct}%) on {task.platform} — {rate:.1f}/s, {lanes} at a time"
+        if failed:
+            line += f", {failed} retried"
+        await progress(line)
+
+    loop = asyncio.get_running_loop()
+    pool = ThreadPoolExecutor(max_workers=lanes, thread_name_prefix=f"click{task.id}")
+
+    async def lane() -> None:
+        nonlocal ok, failed, remaining, attempts_left, streak, stopped
+        while stopped is None and ok < total and attempts_left > 0:
+            if remaining <= 0:
+                # Other lanes are still in flight; one may hand work back.
+                await asyncio.sleep(0.1)
+                continue
+            remaining -= 1
+            attempts_left -= 1
+
+            headers = realistic_headers(pick_referer(task))
+            status, detail = await loop.run_in_executor(
+                pool, send_clicks, headers, task.link, get_proxy()
+            )
+
+            if 200 <= status < 400:
+                ok += 1
+                streak = 0
+                await report()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                continue
+
+            # Not a click. Put it back so the total is still reached.
+            failed += 1
+            remaining += 1
+            streak += 1
+            if status in DEAD_LINK_STATUSES:
+                stopped = f"the link returned {status} — there is nothing to retry"
+                return
+            if streak >= MAX_CONSECUTIVE_FAILURES:
+                stopped = (
+                    f"{streak} failures in a row — the proxy or the link looks down "
+                    f"(last: {detail[:120]})"
+                )
+                return
+            await asyncio.sleep(min(RETRY_PAUSE * streak, MAX_RETRY_PAUSE))
+
+    try:
+        await asyncio.gather(*(lane() for _ in range(lanes)))
+    finally:
+        pool.shutdown(wait=False)
+
+    await report(force=True)
+    elapsed = time.monotonic() - started
+    rate = ok / max(elapsed, 0.001)
+
+    if stopped:
+        raise RuntimeError(f"stopped at {ok}/{total} clicks — {stopped}")
+    if ok < total:
+        raise RuntimeError(
+            f"only {ok}/{total} clicks landed after {total * ATTEMPT_MULTIPLIER + 20} "
+            f"attempts ({failed} failed) — the proxy is dropping most requests"
         )
-
-    sem = asyncio.Semaphore(50)
-    async def bounded_send():
-        async with sem:
-            return await send_one()
-
-    done = 0
-    for i in range(total):
-        await bounded_send()
-        done += 1
-        
-        update_interval = 1 if total <= 20 else (5 if total <= 100 else 50)
-        if done % update_interval == 0 or done == total:
-            pct = int(done / total * 100)
-            await progress(f"{done}/{total} ({pct}%) on {task.platform} (delay: {delay}s, mode: {mode})")
-        
-        if i < total - 1 and delay > 0:
-            await asyncio.sleep(delay)
-
-    return f"demo finished: {total} items for {task.link} ({task.platform}) @ {delay}s delay, mode: {mode}"
+    return (
+        f"{total} clicks delivered for {task.link} ({task.platform}) in "
+        f"{elapsed:.0f}s — {rate:.1f}/s, {lanes} at a time, {failed} retried"
+    )
 
 
 for _platform in set(PLATFORMS.values()):
