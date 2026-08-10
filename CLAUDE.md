@@ -2486,6 +2486,37 @@ still increments its counter; it follows from how bit.ly works, but nobody
 has watched a real link's stats before/after. Irrelevant while this
 deployment runs with `FOLLOW_REDIRECTS=true`, which fetches both hops anyway.
 
+### Measured speed through the real proxy (2026-08-11)
+
+Timed live through `config.PROXIES`' ProxyCheap endpoint, read-only (no bit.ly
+short link was ever fetched, so no clicks were generated):
+
+| hop | cost |
+|---|---|
+| bit.ly redirect | 2.4s median |
+| cricmatch247 page | ~5.2s, **441 KB** |
+| one full click (both hops) | ~7.6s |
+
+That puts throughput at roughly `lanes / 7.6` per second: ~8 clicks/min at 1
+lane (the old sequential behavior), ~158/min at 20 lanes — about 6 minutes for
+1000 clicks versus ~2 hours before.
+
+**The proxy is healthy; the drops are a capacity limit.** Exit IP
+`103.84.198.218` (Gujarat Telelink) checks clean on `ip-api.com` —
+`proxy: false, hosting: false` — and cricmatch247 answers `200` through it
+(`Apache/2.4.41`), so this is **not** the AWS WAF 403 problem documented for
+the signup bots. A 10-request sequential probe went 10/10; an earlier
+rapid-fire burst went 1/5. The failure mode is bursty, and the likely cause is
+bandwidth: 20 lanes × 441 KB per click is ~1 MB/s sustained through a single
+residential line, which is what produces the `RemoteDisconnected` / `502 Bad
+Gateway` seen in production.
+
+So the retry logic contains the *damage* (no lost clicks, no inflated bit.ly
+count) but cannot fix the *cause*. Tune `CONCURRENCY` against the
+`missed the site` counter in the progress line — that number is the feedback
+signal for having pushed one proxy past its ceiling. Genuinely raising the
+ceiling needs more proxy IPs to spread across, not more lanes.
+
 **Verified 2026-08-11 against local fake servers**, not against real bit.ly or
 the real proxy:
 - Redirects off, flaky link (30% dropped, 0.4s latency): 20 lanes ran ~6-10x
