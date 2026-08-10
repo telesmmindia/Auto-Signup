@@ -7,10 +7,10 @@ gotcha, same current_proxy() pattern (re-reads the env file's SETTINGS_FILE on
 every run, so /setproxy on the matching Telegram bot applies here too), same
 service-account setup.
 
-Where it deliberately DIFFERS from those three: they are pollers, looping
-forever over a queue of independent rows. A tournament is a single event with
-a beginning and an end, so this runs ONCE and exits. There is no poll loop and
-no per-row STATUS queue semantics -- the sheet is the roster going in and the
+Where it DIFFERS from those three: they poll a queue of independent rows, each
+of which is its own small job. A tournament is one event with a beginning and
+an end, so the roster is not a queue -- the whole sheet is a single run. There
+are no per-row STATUS semantics; the sheet is the roster going in and the
 scoreboard coming out.
 
 Sheet layout (row 1 = header):
@@ -22,13 +22,25 @@ goes: BALANCE is that account's balance when it left the bracket, STAGE OUT is
 which stage knocked it out, and RESULT is `winner`, `eliminated`, or a problem
 note. Only rows with BOTH A and B filled enter.
 
+Two ways to start a run:
+
+  * one-shot -- run the command, type PLAY at the prompt. Good for testing.
+  * --watch  -- run as a service and start runs from the sheet itself, with no
+    terminal. It watches one control cell (H1 by default) for a TWO-STEP
+    ARM-then-START handshake. Two steps because a single stray paste or
+    mistyped cell must not be able to start real betting across a hundred
+    accounts; there is no undo once chips are down. The armed flag lives in
+    memory only, so a service restart between ARM and START forgets it and
+    START alone is refused -- which fails safe.
+
 Real money. Start with --dry-run, which logs every account in, opens every
 table, computes every stake and prints the bracket -- but never clicks a bet.
 
 Usage:
-    .venv/bin/python tournament_runner.py --env .env.gameplay --dry-run
-    .venv/bin/python tournament_runner.py --env .env.gameplay
-    .venv/bin/python tournament_runner.py --env .env.gameplay --csv roster.csv
+    .venv/bin/python tournament_runner.py --env .env.tournament.cricmatch --dry-run
+    .venv/bin/python tournament_runner.py --env .env.tournament.cricmatch
+    .venv/bin/python tournament_runner.py --env .env.tournament.cricmatch --watch
+    .venv/bin/python tournament_runner.py --env .env.tournament.cricmatch --csv roster.csv
 """
 import argparse
 import csv
@@ -169,10 +181,20 @@ def main_():
     ap.add_argument("--url", default=None)
     ap.add_argument("--yes", action="store_true",
                     help="skip the confirmation prompt")
+    ap.add_argument("--watch", action="store_true",
+                    help=f"run as a service, starting a tournament when "
+                         f"{CONTROL_CELL} in the sheet is set to ARM then "
+                         f"START")
     args = ap.parse_args()
 
     site_url = args.url or SITE_URL
     ws = None
+
+    if args.watch:
+        if args.csv:
+            raise SystemExit("--watch needs the sheet (that is where the "
+                             "control cell lives); drop --csv.")
+        return watch_loop(args, site_url)
 
     if args.csv:
         roster = roster_from_csv(args.csv)
@@ -181,17 +203,28 @@ def main_():
         ws = open_worksheet()
         roster = roster_from_sheet(ws)
         log(f"Roster: {len(roster)} account(s) from sheet {SPREADSHEET_ID}")
-        try:
-            if ws.row_values(1)[:1] != HEADER[:1]:
-                ws.update("A1:E1", [HEADER])
-        except Exception:
-            pass
+        ensure_header(ws)
 
     if args.limit:
         roster = roster[:args.limit]
     if len(roster) < 2:
         raise SystemExit("Need at least two accounts to run a tournament.")
 
+    if not args.dry_run and not args.yes:
+        # This concentrates every entrant's balance into one account by
+        # betting it. There is no undo.
+        preflight(roster, site_url, args)
+        reply = input("Type PLAY to start betting for real: ").strip()
+        if reply != "PLAY":
+            raise SystemExit("Aborted -- nothing was bet.")
+        summary = play(ws, roster, site_url, args)
+    else:
+        preflight(roster, site_url, args)
+        summary = play(ws, roster, site_url, args)
+    return summary
+
+
+def preflight(roster, site_url, args):
     proxies = current_proxies()
     rounds = max(1, (len(roster) - 1).bit_length())
 
@@ -208,13 +241,11 @@ def main_():
     log(f"  mode        : {'DRY RUN (no bets)' if args.dry_run else '*** REAL MONEY ***'}")
     log("")
 
-    if not args.dry_run and not args.yes:
-        # This concentrates every entrant's balance into one account by
-        # betting it. There is no undo.
-        reply = input("Type PLAY to start betting for real: ").strip()
-        if reply != "PLAY":
-            raise SystemExit("Aborted -- nothing was bet.")
 
+def play(ws, roster, site_url, args, on_stage=None):
+    """Run one tournament and write results back. Shared by the one-shot path
+    and the sheet-triggered watcher."""
+    proxies = current_proxies()
     by_user = {r["username"]: r for r in roster}
     pending = []
 
@@ -240,6 +271,8 @@ def main_():
     def progress(msg):
         log(msg)
         flush()
+        if on_stage and msg.startswith("=== STAGE"):
+            on_stage(msg.strip("= ").strip())
 
     t0 = time.time()
     summary = T.run_tournament(
@@ -276,6 +309,156 @@ def main_():
                 ws.update(f"E{row}", [["WINNER"]])
             except Exception:
                 pass
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Sheet-triggered mode
+# ---------------------------------------------------------------------------
+#
+# Runs as a service and watches one cell, so a run is started by typing in the
+# sheet rather than by opening a terminal. Deliberately a TWO-STEP handshake:
+# the cell must read ARM on one poll and START on a later one. A single
+# mistyped or pasted cell should not be able to start real betting across a
+# hundred accounts, and there is no undo once chips are down.
+#
+# The armed flag is held in memory only. If the service restarts between ARM
+# and START the arming is forgotten, which fails safe -- START alone is
+# refused and says so in the cell.
+# ---------------------------------------------------------------------------
+
+CONTROL_CELL = os.environ.get("TOURNAMENT_CONTROL_CELL", "H1")
+CONTROL_LABEL_CELL = os.environ.get("TOURNAMENT_CONTROL_LABEL_CELL", "G1")
+POLL_SECONDS = float(os.environ.get("TOURNAMENT_POLL_SECONDS", "20"))
+
+
+def ensure_header(ws):
+    try:
+        if ws.row_values(1)[:1] != HEADER[:1]:
+            ws.update("A1:E1", [HEADER])
+    except Exception:
+        pass
+
+
+def read_control(ws):
+    try:
+        return (ws.acell(CONTROL_CELL).value or "").strip()
+    except Exception as exc:
+        log(f"(could not read {CONTROL_CELL}: {exc})")
+        return None
+
+
+def write_control(ws, text):
+    try:
+        ws.update(CONTROL_CELL, [[text]])
+    except Exception as exc:
+        log(f"(could not write {CONTROL_CELL}: {exc})")
+
+
+def clear_results(ws, roster):
+    """Blank C:E for every entrant so a new run does not show stale results."""
+    if not roster:
+        return
+    rows = [r["_row"] for r in roster if r.get("_row")]
+    if not rows:
+        return
+    try:
+        ws.update(f"C{min(rows)}:E{max(rows)}",
+                  [["", "", ""] for _ in range(min(rows), max(rows) + 1)])
+    except Exception as exc:
+        log(f"(could not clear old results: {exc})")
+
+
+def watch_loop(args, site_url):
+    ws = open_worksheet()
+    ensure_header(ws)
+    try:
+        ws.update(CONTROL_LABEL_CELL, [["CONTROL"]])
+    except Exception:
+        pass
+
+    armed = False
+    log(f"Watching {CONTROL_CELL} every {POLL_SECONDS:.0f}s.")
+    log(f"  type ARM   in {CONTROL_CELL}, then")
+    log(f"  type START in {CONTROL_CELL} to play for real.")
+    current = read_control(ws)
+    if current not in ("ARM", "START"):
+        write_control(ws, "IDLE — type ARM to begin")
+
+    first = True
+    while True:
+        try:
+            # The sleep lives inside the try so Ctrl-C between polls exits
+            # cleanly instead of raising through the loop.
+            if not first:
+                time.sleep(POLL_SECONDS)
+            first = False
+            cmd = read_control(ws)
+            if cmd is None:
+                time.sleep(POLL_SECONDS)
+                continue
+            upper = cmd.upper()
+
+            if upper == "ARM":
+                armed = True
+                log("ARMED — waiting for START")
+                write_control(ws, f"ARMED — type START to play for real "
+                                  f"({time.strftime('%H:%M')})")
+
+            elif upper == "START":
+                if not armed:
+                    log("START without ARM — refused")
+                    write_control(ws, "REFUSED — type ARM first, then START")
+                    continue
+                armed = False
+                roster = roster_from_sheet(ws)
+                if args.limit:
+                    roster = roster[:args.limit]
+                if len(roster) < 2:
+                    write_control(ws, "REFUSED — need at least 2 accounts "
+                                      "with a username and password")
+                    continue
+
+                started = time.strftime("%H:%M")
+                write_control(ws, f"RUNNING since {started} — "
+                                  f"{len(roster)} entrants")
+                log(f"\n=== START: {len(roster)} entrants at {started} ===")
+                clear_results(ws, roster)
+                preflight(roster, site_url, args)
+
+                def on_stage(stage_msg):
+                    write_control(ws, f"RUNNING since {started} — {stage_msg}")
+
+                try:
+                    summary = play(ws, roster, site_url, args,
+                                   on_stage=on_stage)
+                except Exception as exc:
+                    log(f"run failed: {exc}")
+                    write_control(ws, f"FAILED {time.strftime('%H:%M')} — "
+                                      f"{str(exc)[:120]}")
+                    continue
+
+                done = time.strftime("%H:%M")
+                if summary.get("winner"):
+                    write_control(
+                        ws, f"DONE {done} — winner {summary['winner']} "
+                            f"({summary.get('winner_balance')}). "
+                            f"Type ARM to run again.")
+                else:
+                    write_control(
+                        ws, f"DONE {done} — no winner, "
+                            f"{len(summary['problems'])} problem(s), see "
+                            f"{STATE_FILE}. Type ARM to run again.")
+
+            elif upper in ("STOP", "IDLE"):
+                armed = False
+                write_control(ws, "IDLE — type ARM to begin")
+
+        except KeyboardInterrupt:
+            log("\nstopped")
+            return
+        except Exception as exc:
+            log(f"(watch loop error, continuing: {exc})")
 
 
 if __name__ == "__main__":

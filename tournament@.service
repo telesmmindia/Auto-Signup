@@ -1,0 +1,34 @@
+# Sheet-triggered tournament runner, one instance per site.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp tournament@.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tournament@cricmatch
+#   systemctl --user enable --now tournament@khelofun
+#
+# %i is the site name and picks the env file: tournament@cricmatch reads
+# .env.tournament.cricmatch. Give each instance its own sheet and its own
+# TOURNAMENT_STATE_FILE, or the two will overwrite each other's records.
+#
+#   systemctl --user status tournament@cricmatch
+#   journalctl --user -u tournament@cricmatch -f      # live progress
+#
+# Needs lingering so it survives logout:  sudo loginctl enable-linger $USER
+
+[Unit]
+Description=Knockout tournament runner (%i)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/PycharmProjects/Auto-Signup
+ExecStart=%h/PycharmProjects/Auto-Signup/.venv/bin/python \
+    tournament_runner.py --env .env.tournament.%i --watch
+Restart=on-failure
+RestartSec=30
+# A tournament can run for an hour; never kill one mid-hand on reload.
+TimeoutStopSec=900
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target
