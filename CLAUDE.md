@@ -2453,29 +2453,52 @@ Guards so a genuinely broken setup can't loop forever:
 and `REQUEST_TIMEOUT` (env, default 12s, was a hardcoded 10) bounds one
 attempt.
 
-### `FOLLOW_REDIRECTS` is OFF by default
+### `FOLLOW_REDIRECTS`: the destination is a separate, separately-retried hop
 
-The old code passed `allow_redirects=True`, so every click followed bit.ly
-through to cricmatch247 and downloaded that whole page. That was most of the
-time cost and the source of the proxy errors seen in production (the failing
-URLs in those logs were `cricmatch247.com/...`, not bit.ly). bit.ly records
-the click when it **serves** the redirect, so the destination fetch buys
-nothing for the click counter.
+The code default is `false` (bit.ly records the click when it **serves** the
+redirect, so the destination fetch buys nothing for the click counter, and
+that second hop was where the production proxy errors were coming from — the
+failing URLs in those logs were `cricmatch247.com/...`, not bit.ly).
+**`prince bot/.env` sets `FOLLOW_REDIRECTS=true`**, because this deployment
+wants the `btag` traffic landing on cricmatch247 itself, not just the bit.ly
+counter. Both paths are supported; flip the env var.
 
-`config.FOLLOW_REDIRECTS` (env, default false) turns it back on. Set
-`FOLLOW_REDIRECTS=true` in `prince bot/.env` if the destination site actually
-needs to see the traffic (e.g. affiliate `btag` attribution measured on
-cricmatch247's side rather than on bit.ly's) — that's the one reason to pay
-for it. **Not verified against a live bit.ly link** that a non-followed
-redirect still increments its counter; it follows from how bit.ly works, but
-nobody has watched a real link's stats before/after this change.
+**The two hops are deliberately separate requests, and only the second is
+retried.** `send_clicks()` fetches bit.ly with `allow_redirects=False`, then
+issues its own `GET` to the `Location` (same headers, so the site sees the
+same Referer a followed redirect would have sent), retrying just that hop
+`DESTINATION_ATTEMPTS` (3) times. Do NOT collapse this back into
+`allow_redirects=True`: a destination failure would then fail the whole
+click, the lane would retry it, and bit.ly would serve — and count — a second
+redirect. A flaky destination would silently push the bit.ly total above the
+requested count.
 
-**Verified 2026-08-11 against a local flaky server** (30% of requests dropped,
-0.4s latency), not against real bit.ly or the real proxy: 20 lanes ran ~10x
-faster than 1, all 30 requested clicks landed despite 11 failures, a 404 link
-stopped instantly, and a dead server stopped after the consecutive-failure
-limit instead of hanging. Parse/roundtrip/back-compat of the new `parallel`
-arg were checked for both one-off lines and schedules.
+Consequences kept honest in the reporting: the bit.ly hop's status is what
+decides whether the click counted, so `count` still means exactly that many
+bit.ly clicks. A click whose destination never loaded after 3 tries still
+counts, but is tallied in `missed_site` and surfaced in both the progress
+line ("N missed the site") and the final summary ("but N never reached the
+destination site"). `send_clicks()` returns a 3-tuple
+`(status, target_or_error, site_missed)` for this.
+
+**Not verified against a live bit.ly link** that a non-followed redirect
+still increments its counter; it follows from how bit.ly works, but nobody
+has watched a real link's stats before/after. Irrelevant while this
+deployment runs with `FOLLOW_REDIRECTS=true`, which fetches both hops anyway.
+
+**Verified 2026-08-11 against local fake servers**, not against real bit.ly or
+the real proxy:
+- Redirects off, flaky link (30% dropped, 0.4s latency): 20 lanes ran ~6-10x
+  faster than 1, all 30 requested clicks landed despite the failures, a 404
+  link stopped instantly, and a dead server stopped at the consecutive-failure
+  limit instead of hanging.
+- Redirects on, flaky **destination** (35% dropped): exactly 40 bit.ly hits
+  for a 40-click job — no inflation — with all 40 site visits recovered by the
+  destination-only retries, and the Referer preserved through the second hop.
+  With the destination fully dead: still exactly 40 bit.ly hits, 0 site hits,
+  and the summary said so.
+- Parse/roundtrip/back-compat of the new `parallel` arg, for both one-off
+  lines and schedules.
 
 **Verified without touching the live bot or bit.ly**: the parser, the
 due/next-run logic, JSON persistence across a restart, and the loop itself

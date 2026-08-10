@@ -3,6 +3,7 @@ import random
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urljoin
 
 from config import (
     DEFAULT_CONCURRENCY,
@@ -242,10 +243,21 @@ def _session() -> requests.Session:
     return session
 
 
-def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> tuple[int, str]:
-    """Fire one click. Returns (status code, where it pointed / the error).
+# With FOLLOW_REDIRECTS on, the destination is fetched as its OWN request and
+# retried on its own. Retrying the whole click instead would ask bit.ly for a
+# second redirect, and bit.ly counts every one it serves -- so a flaky
+# destination would quietly inflate the click total above what was asked for.
+DESTINATION_ATTEMPTS = 3
+DESTINATION_RETRY_PAUSE = 0.5
 
-    A status of -1 means the request never reached the server at all.
+
+def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> tuple[int, str, bool]:
+    """Fire one click. Returns (status code, where it pointed / the error,
+    whether the destination visit failed).
+
+    A status of -1 means the request never reached the server at all. The
+    status is the bit.ly hop only -- that is what decides whether the click
+    counted.
     """
     session = _session()
     session.cookies.clear()
@@ -254,16 +266,41 @@ def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> tuple[int, 
         r = session.get(
             BITLY_URL,
             headers=headers,
-            allow_redirects=FOLLOW_REDIRECTS,
+            allow_redirects=False,
             timeout=REQUEST_TIMEOUT,
             proxies=proxies,
         )
-        target = r.headers.get("Location") or r.url
-        print(f"  -> {r.status_code} -> {target}")
-        return r.status_code, target
     except requests.RequestException as e:
         print(f"  -> ERROR: {e}")
-        return -1, str(e)
+        return -1, str(e), False
+
+    location = r.headers.get("Location")
+    target = location or r.url
+    print(f"  -> {r.status_code} -> {target}")
+
+    if not FOLLOW_REDIRECTS or not location or not 300 <= r.status_code < 400:
+        return r.status_code, target, False
+
+    # The click is already counted. Now deliver the visit to the destination
+    # so it sees the traffic (and its btag). Same headers the redirect would
+    # have been followed with.
+    destination = urljoin(BITLY_URL, location)
+    for attempt in range(1, DESTINATION_ATTEMPTS + 1):
+        try:
+            d = session.get(
+                destination,
+                headers=headers,
+                allow_redirects=True,
+                timeout=REQUEST_TIMEOUT,
+                proxies=proxies,
+            )
+            print(f"     -> site {d.status_code} -> {d.url}")
+            return r.status_code, target, False
+        except requests.RequestException as e:
+            print(f"     -> site ERROR (try {attempt}/{DESTINATION_ATTEMPTS}): {e}")
+            if attempt < DESTINATION_ATTEMPTS:
+                time.sleep(DESTINATION_RETRY_PAUSE * attempt)
+    return r.status_code, target, True
 
 
 def get_proxy():
@@ -299,6 +336,7 @@ async def demo_job(task: Task, progress: Progress) -> str:
 
     ok = 0  # clicks the server actually answered
     failed = 0  # attempts that errored and were retried
+    missed_site = 0  # clicks that counted, but never reached the destination
     remaining = total  # clicks not yet claimed by a lane
     attempts_left = total * ATTEMPT_MULTIPLIER + 20
     streak = 0  # failures in a row, across all lanes
@@ -319,13 +357,15 @@ async def demo_job(task: Task, progress: Progress) -> str:
         line = f"{ok}/{total} ({pct}%) on {task.platform} — {rate:.1f}/s, {lanes} at a time"
         if failed:
             line += f", {failed} retried"
+        if missed_site:
+            line += f", {missed_site} missed the site"
         await progress(line)
 
     loop = asyncio.get_running_loop()
     pool = ThreadPoolExecutor(max_workers=lanes, thread_name_prefix=f"click{task.id}")
 
     async def lane() -> None:
-        nonlocal ok, failed, remaining, attempts_left, streak, stopped
+        nonlocal ok, failed, missed_site, remaining, attempts_left, streak, stopped
         while stopped is None and ok < total and attempts_left > 0:
             if remaining <= 0:
                 # Other lanes are still in flight; one may hand work back.
@@ -335,13 +375,15 @@ async def demo_job(task: Task, progress: Progress) -> str:
             attempts_left -= 1
 
             headers = realistic_headers(pick_referer(task))
-            status, detail = await loop.run_in_executor(
+            status, detail, site_missed = await loop.run_in_executor(
                 pool, send_clicks, headers, task.link, get_proxy()
             )
 
             if 200 <= status < 400:
                 ok += 1
                 streak = 0
+                if site_missed:
+                    missed_site += 1
                 await report()
                 if delay > 0:
                     await asyncio.sleep(delay)
@@ -378,10 +420,13 @@ async def demo_job(task: Task, progress: Progress) -> str:
             f"only {ok}/{total} clicks landed after {total * ATTEMPT_MULTIPLIER + 20} "
             f"attempts ({failed} failed) — the proxy is dropping most requests"
         )
-    return (
+    summary = (
         f"{total} clicks delivered for {task.link} ({task.platform}) in "
         f"{elapsed:.0f}s — {rate:.1f}/s, {lanes} at a time, {failed} retried"
     )
+    if missed_site:
+        summary += f" — but {missed_site} never reached the destination site"
+    return summary
 
 
 for _platform in set(PLATFORMS.values()):
