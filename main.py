@@ -1801,6 +1801,68 @@ def _login_debug_shot(page, username):
     return ""
 
 
+# In-page check that the browser session is ACTUALLY authenticated, not just
+# that the header "Account" link is present. Critical fix for a real bug: the
+# old logged-in signal (#acctSec) is in the page header even when logged OUT,
+# so login() returned "ok" for a rejected/throttled login. Downstream that
+# meant change_account_password() fired on a logged-out session and got the
+# site's session-less reply ("please add phone number ...") -- which looked
+# like a phone problem but was really a failed login. Worse, it could mark a
+# password change "successful" that never happened. This fetches the same
+# getBalance endpoint the site's own JS calls; a 200 with a balance body only
+# comes back for a genuinely authenticated session (a guest gets 401
+# "Unauthenticated").
+# Parses the getBalance JSON IN-PAGE and returns a clean verdict, so the full
+# (long) response body never has to be shipped back and re-parsed in Python --
+# an earlier version truncated the body to 300 chars, which corrupted the JSON
+# and made every check fail. "authed" is only true for the authenticated
+# shape {"status":200,"balance":{...}}; a guest gets 401 "Unauthenticated".
+_AUTH_CHECK_FETCH_JS = """async (path) => {
+    const meta = document.querySelector('meta[name=csrf-token]');
+    const token = meta ? meta.content : '';
+    try {
+        const resp = await fetch(path, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRF-TOKEN": token,
+            },
+            body: "_token=" + encodeURIComponent(token),
+        });
+        let authed = false;
+        try {
+            const body = await resp.json();
+            authed = body && body.status === 200 && body.balance != null;
+        } catch (e) { /* non-JSON (e.g. a block page) -> not authed */ }
+        return {status: resp.status, authed: authed};
+    } catch (e) {
+        return {status: -1, authed: false};
+    }
+}"""
+
+
+def _browser_login_authenticated(page, site_url):
+    """True only if the current browser session is really logged in, verified
+    by an in-page getBalance call (see _AUTH_CHECK_FETCH_JS). Returns None if
+    it can't tell yet (network hiccup / navigation), so the caller keeps
+    polling rather than treating an inconclusive check as a failure."""
+    prof = profile_for(site_url or page.url)
+    parts = urlsplit(site_url or page.url)
+    path = f"{parts.scheme}://{parts.netloc}{prof.http_balance_path}"
+    try:
+        result = page.evaluate(_AUTH_CHECK_FETCH_JS, path)
+    except Exception:
+        return None
+    status = result.get("status")
+    if status == 200:
+        return bool(result.get("authed"))
+    if status in (401, 419):  # Unauthenticated / CSRF-expired => not logged in
+        return False
+    return None  # -1 (fetch threw) or anything else => unknown, keep polling
+
+
 def login(page, username, password, site_url=None):
     """Log into an EXISTING account (not signup). Returns (outcome, messages)
     where outcome is "ok", "error", or "timeout"."""
@@ -1847,18 +1909,44 @@ def login(page, username, password, site_url=None):
     pass_field.press_sequentially(password, delay=30)
     page.locator(prof.sel["login_submit"]).click(timeout=5000)
 
-    deadline = time.time() + 12
+    # Wait for a DEFINITIVE outcome. Order matters: check for a site error
+    # message first (so a rejected login reports the real reason -- e.g.
+    # "Invalid Username or Password" -- instead of silently timing out), then
+    # confirm the session is genuinely authenticated. The header "Account"
+    # link (logged_in_indicator) is NOT a reliable success signal on its own:
+    # it's present when logged out too, so relying on it made login() return
+    # "ok" for failed/throttled logins (see _browser_login_authenticated).
+    can_verify_auth = prof.supports_http_login
+    # The verified-auth path needs to ride out the post-login redirect (which
+    # briefly destroys the page context) plus residential-proxy latency, so
+    # give it a longer window than the plain indicator check.
+    deadline = time.time() + (20 if can_verify_auth else 12)
     while time.time() < deadline:
-        try:
-            if page.locator(prof.sel["logged_in_indicator"]).first.is_visible():
-                _dismiss_stuck_login_modal(page)
-                return "ok", []
-        except Exception:
-            pass
         msgs = read_result(page)
         if msgs:
             return "error", msgs
-        page.wait_for_timeout(250)
+        if can_verify_auth:
+            authed = _browser_login_authenticated(page, site_url or SITE_URL)
+            if authed is True:
+                _dismiss_stuck_login_modal(page)
+                return "ok", []
+            # authed is False (definitely not logged in) or None (unknown yet)
+            # -> keep polling; a real error will surface via read_result(), or
+            # we fall through to a timeout below.
+        else:
+            # Sites without a verifiable auth endpoint fall back to the header
+            # indicator (best available signal for them).
+            try:
+                if page.locator(prof.sel["logged_in_indicator"]).first.is_visible():
+                    _dismiss_stuck_login_modal(page)
+                    return "ok", []
+            except Exception:
+                pass
+        page.wait_for_timeout(400)
+    if can_verify_auth:
+        return "timeout", ["Login did not complete (session never became "
+                           "authenticated -- credentials rejected or the login "
+                           "was throttled)."]
     return "timeout", ["Login did not complete within the timeout."]
 
 
