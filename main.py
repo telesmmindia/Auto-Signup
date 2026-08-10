@@ -59,6 +59,7 @@ from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, Error as PWError, TimeoutError as PWTimeout
 
 import db
+from chip_plan import group_plan, plan_stake
 from sites import profile_for
 from sites.games import BACCARAT, STOCKMARKET, GameProfile, game_for
 
@@ -790,6 +791,21 @@ def enter_otp(page, acct, result):
 # it again, so a retry budget that gives up early defeats that purpose.
 FREE_NUMBER_MAX_ATTEMPTS = 15
 FREE_NUMBER_RETRY_COOLDOWN_SECS = 45
+
+# How many chip clicks run_paired_hedge may spend building ONE side's stake
+# when the requested amount isn't a single chip value (see chip_plan.plan_stake
+# and _place_stake). This is a hard trade against the betting window: Stock
+# Market Live's "PLACE YOUR BETS" banner is open only ~10s, both sides click
+# concurrently but each denomination switch costs a verified select_chip_fast
+# round trip, and a window that closes mid-stake leaves the two sides staked
+# UNEQUALLY -- which is a real, unhedged difference, not just a wrong size.
+# 6 is roughly 2 chip switches + 6 spot clicks per side. tournament.py runs 8
+# inside baccarat's wider ~15s window; this is the tighter game, so it gets a
+# smaller budget. Raise it only after a live run shows real timing headroom.
+# The cost of a small budget is only which amounts are reachable (₹100,000 on
+# a rail topping out at ₹2,500 needs 40 clicks and is refused up front, before
+# any money moves), never a half-placed bet.
+HEDGE_MAX_BET_CLICKS = int(os.getenv("HEDGE_MAX_BET_CLICKS", "6"))
 
 _FREE_NUMBER_FETCH_JS = """async (args) => {
     const [path, phone] = args;
@@ -2531,6 +2547,54 @@ def select_chip(frame, amount, timeout=4000, wait_secs=75, game=None):
         time.sleep(1)
 
 
+def select_chip_fast(frame, value, timeout_secs=5):
+    """Select one chip denomination, with a SHORT deadline.
+
+    select_chip() above waits up to 75s, which is right when it runs once
+    before the round loop but far too long to sit inside a ~10s betting
+    window. Multi-chip stakes have to switch denomination mid-window (see
+    _place_stake), so they need this variant -- a failure has to give up fast
+    enough for the caller to notice a short stake and retry the round, rather
+    than eating the whole window."""
+    deadline = time.time() + timeout_secs
+    while time.time() < deadline:
+        try:
+            if read_chips(frame).get("selected") == value:
+                return True
+            loc = frame.locator(f'[data-role="chip"][data-value="{value}"]')
+            if loc.count():
+                loc.first.click(timeout=1500, force=True)
+        except Exception:
+            pass
+        time.sleep(0.25)
+    return read_chips(frame).get("selected") == value
+
+
+def _place_stake(frame, role, groups):
+    """Click one side's whole stake onto its bet spot.
+
+    `groups` is [(chip, count), ...] largest chip first (chip_plan.group_plan),
+    so a ₹1,300 stake on the ₹10/50/100/200/500/2500 rail is two ₹500 clicks,
+    one ₹200 and one ₹100 -- that's how an amount that ISN'T a single chip
+    value gets bet at all. An empty `groups` means the game has no selectable
+    rail (baccarat here), so it falls back to the original single click on
+    whatever chip the table has pre-selected.
+
+    Returns True only if every planned click was issued. False means the stake
+    landed SHORT, not that nothing landed -- the caller must still read TOTAL
+    BET and compare both sides, since a short stake on one side is real
+    exposure."""
+    if not groups:
+        return _click_bet_spot(frame, role)
+    for chip, count in groups:
+        if not select_chip_fast(frame, chip):
+            return False
+        for _ in range(count):
+            if not _click_bet_spot(frame, role):
+                return False
+    return True
+
+
 def describe_chip_rail(frame):
     """One-line summary of the rail, for failure messages -- 'rail not found'
     reads very differently from 'rail present, click ignored'."""
@@ -3137,23 +3201,61 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 "accounts are on the same table. Aborting before any bet.")
             return summary
 
-        # Pick the chip matching `amount` BEFORE any betting. Without this the
+        # Work out HOW to bet `amount` BEFORE any betting. Without this the
         # table bets its pre-selected chip (the ₹10 minimum) whatever was
         # requested, which is what tripped amount_mismatch on the first run.
+        #
+        # `amount` used to have to BE one of the rail's chip values (₹10, 50,
+        # 100, 200, 500 or 2500 on Stock Market Live) -- anything else was
+        # refused outright. It is now built from several chips where needed
+        # (₹150 = 100 + 50, ₹1,300 = 500 + 500 + 200 + 100), so any amount the
+        # rail can actually reach is bettable. The plan is computed once here
+        # and replayed identically on both sides every round, so the two
+        # stakes stay equal and the hedge holds.
+        stake_groups = []       # [(chip, count)]; empty = no rail, single click
+        _clicks_per_side = 1
         if game.selectable_chips:
             p_fut = player_exec.submit(read_chips, fr_p)
             rail_b = read_chips(fr_b)
             rail_p = p_fut.result()
             avail = sorted(set(rail_b.get("chips") or []) & set(rail_p.get("chips") or []))
-            if avail and amount not in avail:
-                summary["stop_reason"] = "amount_mismatch"
-                summary["messages"].append(
-                    f"₹{amount} isn't one of this table's chips. Available: "
-                    + ", ".join(f"₹{c}" for c in avail)
-                    + ". Re-run with one of those. (Aborted before any bet.)")
-                return summary
-            p_fut = player_exec.submit(select_chip, fr_p, amount)
-            ok_b = select_chip(fr_b, amount)
+            if avail:
+                stake, plan = plan_stake(amount, avail, table_min=min(avail),
+                                         table_max=amount,
+                                         max_clicks=HEDGE_MAX_BET_CLICKS)
+                if stake != amount:
+                    # Refuse rather than quietly betting a different size.
+                    # Two ways to get here: below the table minimum, or not
+                    # reachable within the click budget (a window is only
+                    # ~10s wide -- see HEDGE_MAX_BET_CLICKS).
+                    summary["stop_reason"] = "amount_mismatch"
+                    rail_txt = ", ".join(f"₹{c}" for c in avail)
+                    if stake == 0:
+                        detail = (f"it's below this table's minimum (₹{min(avail)})"
+                                  if amount < min(avail) else
+                                  "no combination of this table's chips reaches it")
+                    else:
+                        detail = (f"the closest this table's chips reach within "
+                                  f"{HEDGE_MAX_BET_CLICKS} clicks is ₹{stake:,}")
+                    summary["messages"].append(
+                        f"₹{amount:,} can't be staked on this table: {detail}. "
+                        f"Chips: {rail_txt}. Re-run with a reachable amount. "
+                        "(Aborted before any bet.)")
+                    return summary
+                stake_groups = group_plan(plan)
+                _clicks_per_side = sum(n for _, n in stake_groups)
+                if len(stake_groups) > 1 or stake_groups[0][1] > 1:
+                    summary["messages"].append(
+                        f"₹{amount:,}/side is built from "
+                        + " + ".join(f"₹{c:,}×{n}" for c, n in stake_groups)
+                        + f" ({sum(n for _, n in stake_groups)} clicks per side).")
+            # Pre-select the plan's largest chip so a single-chip stake needs
+            # no denomination switch inside the betting window at all (the
+            # common case); multi-chip stakes switch mid-window via
+            # select_chip_fast in _place_stake.
+            first_chip = stake_groups[0][0] if stake_groups else amount
+            p_fut = player_exec.submit(select_chip, fr_p, first_chip)
+            ok_b = select_chip(fr_b, first_chip)
             ok_p = p_fut.result()
             if not (ok_b and ok_p):
                 side = game.side_a_label if not ok_b else game.side_b_label
@@ -3162,7 +3264,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                         if bad_exec else describe_chip_rail(bad_fr))
                 summary["stop_reason"] = "chip_select_failed"
                 summary["messages"].append(
-                    f"Could not select the ₹{amount} chip on the {side} side "
+                    f"Could not select the ₹{first_chip} chip on the {side} side "
                     f"({rail}), so a bet would have been the wrong size. "
                     f"Aborted before any bet.")
                 return summary
@@ -3242,6 +3344,7 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             # the next window opened after the budget expired.
             placed = False
             unhedged = False
+            short = False       # both sides equal but under `amount` (hedged)
             drain_deadline = time.time() + game.drain_secs   # (a) let a mid-way window pass
             while time.time() < drain_deadline:
                 p_fut = player_exec.submit(_betting_open, fr_p, game)
@@ -3266,28 +3369,58 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     time.sleep(0.5)
                     continue
 
-                # Fire the Player click on its own thread first (non-blocking),
-                # then the Banker click inline -- both bets land within the same
-                # sub-second window instead of one waiting on the other.
-                p_fut = player_exec.submit(_click_bet_spot, fr_p, game.side_b_role)
-                _click_bet_spot(fr_b, game.side_a_role)
+                # Fire the Player side on its own thread first (non-blocking),
+                # then the Banker side inline -- both stakes land within the same
+                # window instead of one waiting on the other. `stake_groups` is
+                # usually a single click; a multi-chip amount replays the same
+                # plan on both sides, so they stay equal.
+                p_fut = player_exec.submit(_place_stake, fr_p, game.side_b_role,
+                                           stake_groups)
+                _place_stake(fr_b, game.side_a_role, stake_groups)
                 p_fut.result()
-                time.sleep(1.5)
-                p_fut = player_exec.submit(_read_total_bet, fr_p)
-                tb_b = _read_total_bet(fr_b)
-                tb_p = p_fut.result()
+                # Poll rather than sleeping a flat 1.5s: a multi-chip stake is
+                # several clicks per side, so TOTAL BET reaches its final value
+                # later than a single click's does, and reading too early would
+                # look like a short/unequal stake that isn't one.
+                tb_b = tb_p = None
+                read_deadline = time.time() + 5
+                while True:
+                    time.sleep(1.0)
+                    p_fut = player_exec.submit(_read_total_bet, fr_p)
+                    tb_b = _read_total_bet(fr_b)
+                    tb_p = p_fut.result()
+                    if (tb_b == amount and tb_p == amount) or time.time() >= read_deadline:
+                        break
 
                 if tb_b == amount and tb_p == amount:
                     placed = True
                     break
-                if (tb_b or 0) > 0 and (tb_p or 0) > 0 and tb_b == tb_p and tb_b != amount:
-                    # Both placed the table's default chip, which isn't `amount`.
-                    # This round IS hedged (safe), but the size is wrong -- abort
-                    # cleanly rather than repeat, and tell the caller the real size.
-                    # This branch should be rare now that select_chip() runs before
-                    # the round loop (games with selectable_chips=True) -- it's the
-                    # fallback for a game with no chip rail at all (baccarat) or an
-                    # unexpected mid-run reset, not the normal path.
+                got_b, got_p = tb_b or 0, tb_p or 0
+                if got_b == got_p and got_b > 0:
+                    # Both sides staked the SAME wrong size. Still a true hedge
+                    # (no exposure), just not the size asked for.
+                    #
+                    # Two different causes, handled differently. With a
+                    # multi-chip stake it means the betting window closed part
+                    # way through both sides' click sequence -- a timing blip,
+                    # so wait out the hand and retry the round slot, exactly
+                    # like any other missed window. With a single-click stake
+                    # there is nothing to be part-way through: the table simply
+                    # bet a chip that isn't `amount` (a game with no rail at
+                    # all, or an unexpected mid-run reset), and repeating would
+                    # just place the same wrong size again -- so stop and name
+                    # the real size.
+                    if _clicks_per_side > 1:
+                        short = True
+                        summary["messages"].append(
+                            f"Attempt {attempt}: the window closed part way through "
+                            f"the stake -- ₹{got_b} landed on each side instead of "
+                            f"₹{amount:,}. Both sides are equal, so the hand is still "
+                            "hedged and nothing is exposed. Waiting for it to settle, "
+                            "then retrying.")
+                        _screenshot_pair(gp_b, gp_p, summary,
+                                         f"short-attempt{attempt}", player_exec)
+                        break
                     summary["stop_reason"] = "amount_mismatch"
                     summary["messages"].append(
                         f"The table placed ₹{tb_b} per side (its selected chip), not the "
@@ -3295,23 +3428,33 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                         f"with amount={tb_b}.")
                     _screenshot_pair(gp_b, gp_p, summary, "mismatch", player_exec)
                     return summary
-                if bool(tb_b) != bool(tb_p):
-                    # Exactly one side landed -> real exposure for this one
-                    # hand. Baccarat hands resolve on their own (no button to
-                    # press, unlike Stock Market's live position) -- so unlike
-                    # a cash-out failure, there is nothing further waiting
-                    # makes worse. Don't count it as a hedged round; wait for
-                    # this hand to settle below, then retry the round slot.
+                if got_b != got_p:
+                    # The two sides staked DIFFERENT amounts -> the difference
+                    # is real, one-sided exposure for this one hand. Covers
+                    # both "only one side landed at all" and (new, with
+                    # multi-chip stakes) "one side got fewer chips down than
+                    # the other before the window closed".
+                    #
+                    # Baccarat hands resolve on their own (no button to press,
+                    # unlike Stock Market's live position) -- so unlike a
+                    # cash-out failure, there is nothing further waiting makes
+                    # worse. Don't count it as a hedged round; wait for this
+                    # hand to settle below, then retry the round slot.
                     unhedged = True
-                    exposed = banker_creds["username"] if tb_b else player_creds["username"]
-                    side = game.side_a_label if tb_b else game.side_b_label
+                    if got_b > got_p:
+                        exposed, side = banker_creds["username"], game.side_a_label
+                    else:
+                        exposed, side = player_creds["username"], game.side_b_label
+                    gap = abs(got_b - got_p)
+                    landed = (f"only the {side} bet landed" if min(got_b, got_p) == 0
+                              else f"the two sides landed unequally (₹{got_b} vs ₹{got_p})")
                     summary["messages"].append(
-                        f"Attempt {attempt}: only the {side} bet landed (account "
-                        f"{exposed} exposed for ₹{amount} this hand, not counted as "
-                        f"hedged). Waiting for it to settle, then retrying.")
+                        f"Attempt {attempt}: {landed} (account {exposed} exposed for "
+                        f"₹{gap} this hand, not counted as hedged). Waiting for it to "
+                        "settle, then retrying.")
                     summary.setdefault("unhedged_rounds", []).append(
                         {"attempt": attempt, "side": side, "account": exposed,
-                         "amount": amount})
+                         "amount": gap})
                     _screenshot_pair(gp_b, gp_p, summary,
                                      f"partial-attempt{attempt}", player_exec)
                     break
@@ -3321,10 +3464,12 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             if summary["stop_reason"] == "stopped_by_user":
                 break
 
-            if unhedged:
-                # Wait for the exposed hand to resolve before trying again --
-                # same settle-wait the normal end-of-round path uses below --
-                # so the retry starts on a clean board, not mid-hand.
+            if unhedged or short:
+                # Wait for the hand to resolve before trying again -- same
+                # settle-wait the normal end-of-round path uses below -- so the
+                # retry starts on a clean board, not mid-hand. `short` (both
+                # sides equal but under `amount`) carries no exposure, but the
+                # hand is still live, so it waits the same way.
                 for _ in range(game.settle_secs):
                     p_fut = player_exec.submit(_read_total_bet, fr_p)
                     b_tb = _read_total_bet(fr_b)
@@ -3333,13 +3478,27 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     time.sleep(1)
                 consecutive_failures += 1
                 if consecutive_failures >= MAX_CONSECUTIVE_ROUND_FAILURES:
-                    summary["stop_reason"] = "repeated_unhedged_exposure"
-                    summary["messages"].append(
-                        f"{consecutive_failures} unhedged exposures in a row -- "
-                        "stopping rather than risking more.")
+                    if unhedged:
+                        summary["stop_reason"] = "repeated_unhedged_exposure"
+                        summary["messages"].append(
+                            f"{consecutive_failures} unhedged exposures in a row -- "
+                            "stopping rather than risking more.")
+                    else:
+                        # Nothing was ever exposed, but the stake keeps not
+                        # fitting in the window -- that's the amount being too
+                        # many chips for this table, not a blip.
+                        summary["stop_reason"] = "short_stake"
+                        summary["messages"].append(
+                            f"{consecutive_failures} rounds in a row where the betting "
+                            f"window closed part way through the ₹{amount:,} stake "
+                            f"({_clicks_per_side} chip clicks per side). Every one of "
+                            "those hands was still hedged -- nothing was exposed. Re-run "
+                            "with an amount that needs fewer chips.")
                     break
-                progress(f"⚠️ Attempt {attempt}: unhedged exposure, retrying "
-                         f"({summary['rounds_done']}/{rounds} hedged so far)…")
+                progress(f"⚠️ Attempt {attempt}: "
+                         + ("stake landed short (still hedged)" if short
+                            else "unhedged exposure")
+                         + f", retrying ({summary['rounds_done']}/{rounds} hedged so far)…")
                 for _ in range(ROUND_RETRY_COOLDOWN_SECS):
                     if should_stop():
                         break
@@ -3579,6 +3738,17 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 if (b_tb or 0) == 0 and (p_fut.result() or 0) == 0:
                     break
                 time.sleep(1)
+            # A multi-chip stake ends the round with the SMALLEST chip selected
+            # (the plan's last group), so put the largest one back now, between
+            # rounds, where there's no window pressure -- otherwise the next
+            # round pays for that switch inside its own ~10s window. Purely an
+            # optimisation: _place_stake re-selects anyway if this doesn't take.
+            if len(stake_groups) > 1:
+                first_chip = stake_groups[0][0]
+                p_fut = player_exec.submit(select_chip_fast, fr_p, first_chip)
+                select_chip_fast(fr_b, first_chip)
+                p_fut.result()
+
             p_fut = player_exec.submit(read_game_balance, fr_p)
             bal_b = read_game_balance(fr_b)
             bal_p = p_fut.result()

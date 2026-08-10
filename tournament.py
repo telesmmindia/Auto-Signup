@@ -60,6 +60,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import main as m
+from chip_plan import group_plan, plan_stake as _plan_stake
 from sites.games import BACCARAT
 
 # Captured live off Baccarat A. Not read from the table at runtime because the
@@ -115,92 +116,16 @@ MAX_GROUP_HANDS = 60
 
 def plan_stake(target, chips=BACCARAT_CHIPS, table_min=DEFAULT_TABLE_MIN,
                table_max=DEFAULT_TABLE_MAX, max_clicks=MAX_BET_CLICKS):
-    """Largest stake reachable in <= max_clicks chip clicks, not exceeding
-    `target` or `table_max`.
+    """This module's defaults wrapped around the shared solver in chip_plan.py.
 
-    Returns (stake, [chip values, largest first]). stake is 0 (and the plan
-    empty) when `target` is below the table minimum -- that account can't bet
-    and its match has to be resolved as a walkover, not a bet.
+    The solver itself moved there so main.run_paired_hedge can build the same
+    multi-chip stakes for the Stock Market hedge; tournament.py imports main,
+    so main cannot import back. Behavior here is unchanged -- see chip_plan
+    for the notes on why it is exact rather than greedy, and on the
+    click-budget / stranded-money trade above."""
+    return _plan_stake(target, chips, table_min=table_min,
+                       table_max=table_max, max_clicks=max_clicks)
 
-    Rounds DOWN, always. The remainder simply stays in the account: overshooting
-    would either be rejected by the table or stake money the other side can't
-    match, and an unmatched stake is not a hedge.
-
-    Solved exactly rather than greedily. Greedy looks fine on small stakes but
-    wastes badly once the click budget binds -- it turned 99,900 into 92,500
-    (a 7% remainder), and because a loser keeps whatever wasn't staked, that
-    remainder is money stranded in an eliminated account. Compounded over
-    seven rounds it is the difference between the winner holding most of the
-    pot and holding a good deal less. The exact answer costs a few thousand
-    integer operations, so there is no reason to approximate.
-    """
-    budget = min(int(target), int(table_max))
-    if budget < table_min:
-        return 0, []
-
-    units = sorted({c for c in chips if c > 0})
-    if not units:
-        return 0, []
-    step = units[0]                       # smallest chip == the granularity
-    if any(c % step for c in units):
-        # Non-divisible rail: fall back to plain greedy rather than silently
-        # mis-solving. Not expected on baccarat (100/500/2500/10k/50k/100k).
-        plan, remaining = [], budget
-        for chip in sorted(units, reverse=True):
-            while remaining >= chip and len(plan) < max_clicks:
-                plan.append(chip)
-                remaining -= chip
-        stake = sum(plan)
-        return (stake, plan) if stake >= table_min else (0, [])
-
-    cap = budget // step
-    coins = [c // step for c in units]
-    # cost[v] = fewest chips summing to exactly v (in `step` units).
-    INF = max_clicks + 1
-    cost = [INF] * (cap + 1)
-    pick = [0] * (cap + 1)
-    cost[0] = 0
-    for v in range(1, cap + 1):
-        for c in coins:
-            if c <= v and cost[v - c] + 1 < cost[v]:
-                cost[v] = cost[v - c] + 1
-                pick[v] = c
-    # Largest reachable total within the click budget.
-    best = max((v for v in range(cap, -1, -1) if cost[v] <= max_clicks),
-               default=0)
-
-    plan, v = [], best
-    while v > 0:
-        plan.append(pick[v] * step)
-        v -= pick[v]
-    plan.sort(reverse=True)
-
-    stake = sum(plan)
-    if stake < table_min:
-        return 0, []
-    return stake, plan
-
-
-def group_plan(plan):
-    """Collapse a chip plan into [(chip, count), ...], largest chip first.
-
-    Selecting a chip is far slower than clicking a spot (the click has to be
-    verified against [data-role="selected-chip"]), so a plan of
-    50000+10000+10000+10000 is placed as two selections and four clicks, not
-    four selections and four clicks. Inside a ~15s window that difference
-    matters."""
-    grouped = []
-    for chip in plan:
-        if grouped and grouped[-1][0] == chip:
-            grouped[-1][1] += 1
-        else:
-            grouped.append([chip, 1])
-    return [(c, n) for c, n in grouped]
-
-
-# ---------------------------------------------------------------------------
-# Table interaction
-# ---------------------------------------------------------------------------
 
 def verify_table_chips(frame, expected=BACCARAT_CHIPS, wait_secs=120):
     """Confirm the live rail really offers `expected`, before any money moves.

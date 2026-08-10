@@ -1624,14 +1624,17 @@ site_url, progress, should_stop, browser=None)` in `main.py` reuses `login()` /
   **Not yet verified live** — needs a real second account to confirm the
   concurrent setup and the parallel round-loop reads/clicks behave the same
   as the old sequential version did; test with `/run <id> 100 1` first.
-- **v1 does NOT select a chip denomination.** It bets the table's default chip
-  (the minimum, ~₹100 on Baccarat A) and verifies the actual size via each
-  side's TOTAL BET. If `amount` doesn't match what the table placed, it stops
-  after **one** (hedged, safe) round and tells you the real size to re-run with
-  (`amount_mismatch`). Arbitrary chip selection is a future enhancement — the
-  selectable chip rail is complex SVG (the `data-role="chip"` nodes found were
-  hidden 0-value templates), so it was deliberately deferred rather than
-  guessed at with real money.
+- **Chip sizing is per-game, via `GameProfile.selectable_chips`.** On a game
+  with no usable rail (baccarat here — the `data-role="chip"` nodes found in
+  this engine's probe were hidden 0-value templates; note `tournament.py`
+  later found baccarat's rail IS real, it's just only interactive *inside* a
+  betting window, which this engine's before-the-loop selection can't use) it
+  bets the table's default chip (~₹100 on Baccarat A) and verifies the actual
+  size via each side's TOTAL BET; if `amount` doesn't match what the table
+  placed, it stops after **one** (hedged, safe) round and reports the real
+  size to re-run with (`amount_mismatch`). On a game with a rail (Stock Market
+  Live) `amount` can be **any size the chips add up to** — see "Arbitrary bet
+  amounts" under the Stock Market section below.
 - **Concurrent runs (multiple pairs at once), added 2026-07-19.** Each `/run`
   is fully self-contained — `run_paired_hedge` launches its OWN temporary
   Banker browser (via `_launch_pw_browser`, `browser=None` default) in
@@ -1838,15 +1841,77 @@ run them, read the dump, *then* write selectors.
 with `/run <pair> 10 1` (one round, ₹10/side) and check `/runlog` shows the
 two balances netting to roughly zero minus the ~1% fee before scaling.
 
-### Known gap: chip selection
+### Arbitrary bet amounts (any size the chips add up to)
 
-The chip rail here is real DOM (`chip` x6, `chip-value` x6, `selected-chip`,
-`double-button`, `undo-button`) unlike Baccarat's hidden SVG templates, and
-the selected chip reads back (observed: `10`). So lifting the
-`amount_mismatch` limitation looks feasible on this game -- but `chip-value`
-elements render their number as SVG with empty `innerText`, so the values
-aren't readable that way yet. Deliberately deferred rather than guessed at
-with real money.
+`/run <pair> <amount> <rounds>` used to require `amount` to BE one of the
+table's chip values (₹10 / 50 / 100 / 200 / 500 / 2500) -- anything else was
+refused up front with `amount_mismatch`. Since 2026-08-10 any amount those
+chips can add up to is bettable: ₹150 is placed as 100 + 50, ₹1,300 as
+500 + 500 + 200 + 100. The same plan is replayed on both sides every round, so
+the two stakes stay equal and the hedge holds.
+
+The rail itself is real DOM (`chip` x6, `chip-value` x6, `selected-chip`,
+`double-button`, `undo-button`) and the selected chip reads back via
+`[data-role="selected-chip"]`'s textContent -- `chip-value` elements render
+their number as SVG with empty `innerText`, so `read_chips()` reads
+`data-value`/`textContent`, never `innerText`.
+
+How it works (`main.py`, all inside `run_paired_hedge`):
+- `chip_plan.py` holds the solver, `plan_stake(target, chips, ...)` +
+  `group_plan(plan)`. It **moved there out of `tournament.py`**, which had
+  already written and tuned it for knockout stakes — `tournament.py` imports
+  `main`, so `main` can't import back, hence the third module. `tournament.py`
+  keeps a thin wrapper carrying its own defaults, so nothing changed there
+  (solver body verified byte-identical to the pre-move version).
+- The plan is computed **once**, before the round loop, from the chips both
+  sides' rails actually offer. If `amount` isn't exactly reachable the run
+  aborts **before any bet** and names the closest reachable size — it never
+  silently rounds down, since a stake that isn't what you asked for is worth
+  refusing rather than guessing at with real money.
+- `HEDGE_MAX_BET_CLICKS` (default 6, env-overridable) caps how many chip
+  clicks one side's stake may take. This is a hard trade against the betting
+  window: Stock Market's "PLACE YOUR BETS" banner is open only ~10s, and a
+  window that closes mid-stake leaves the two sides staked **unequally**,
+  which is real exposure. The cost of a small budget is only which amounts are
+  reachable (₹100,000 on a rail topping out at ₹2,500 needs 40 clicks and is
+  refused up front), never a half-placed bet. `tournament.py` runs 8 inside
+  baccarat's wider ~15s window; this is the tighter game, so it gets less.
+- `_place_stake(frame, role, groups)` clicks one side's whole stake, switching
+  denomination between groups via `select_chip_fast()` — a short-deadline
+  (~5s) variant of `select_chip()`, whose 75s default is right for the
+  once-before-the-loop call but would eat a whole window mid-round. Both
+  sides' stakes are fired concurrently on their two threads, same
+  `player_exec.submit(...)`-then-inline pattern as the single-click version.
+- The largest chip is pre-selected before the loop, and re-selected **between**
+  rounds after a multi-chip round (where the plan leaves the smallest chip
+  selected) — so the next window doesn't pay for that switch.
+- TOTAL BET verification after placement is a short **poll** (up to 5s), not a
+  flat 1.5s sleep: several clicks per side reach their final total later than
+  one does, and reading too early would look like a short stake that isn't one.
+
+Two new post-placement outcomes, both money-relevant:
+- **Both sides equal but under `amount`** (the window closed part way through
+  both sides' clicks): still a true hedge, nothing exposed. Waits out the
+  hand and **retries the round slot**, like any other missed window. Only after
+  `MAX_CONSECUTIVE_ROUND_FAILURES` (5) in a row does it stop, with the new
+  `short_stake` reason — meaning the amount needs too many chips for this
+  table's window, not a blip. (A single-click stake landing the wrong size
+  still means the old thing — the table bet a chip that isn't `amount` — so
+  that keeps the immediate `amount_mismatch` stop.)
+- **The two sides landed different amounts**: the *difference* is real
+  one-sided exposure for that hand. This generalizes the old "exactly one side
+  landed" check (which only compared truthiness) — `unhedged_rounds` now
+  records the gap, not the full `amount`, and names the account holding it.
+
+**Verified by a full mock of `run_paired_hedge`** (every browser call stubbed,
+no real table, no money): correct multi-chip plans reaching the requested
+amount, the short-stake retry/`short_stake` stop, the unequal-landing exposure
+report with the right account and gap, all three refusal messages (below
+minimum / unreachable / over the click budget), and a baccarat regression pass
+confirming the no-rail path still single-clicks and still stops on
+`amount_mismatch`. **Not yet run against the live table** — do one
+`/run <pair> 150 1` (a two-chip stake) before scaling, and check `/runlog`
+shows ₹150 per side.
 
 ## Sheet-driven hedge runs (`sheet_watcher.py`)
 

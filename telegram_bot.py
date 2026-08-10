@@ -1854,13 +1854,20 @@ async def run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(args) != 3:
         await update.message.reply_text(
             "Usage: /run <pair_id> <amount> <rounds>\n"
-            "Logs into the pair, joins the SAME baccarat table, and each round "
-            "bets <amount> on Banker (acc1) and <amount> on Player (acc2) on the "
-            "same hand, until <rounds> is reached or one account runs low. Real "
-            "money. v1 uses the table's default chip (~Rs.100); if <amount> "
-            "doesn't match, it stops after one hedged round and reports the real "
-            "size. Multiple pairs can run at once (up to "
-            f"{MAX_CONCURRENT_RUNS}); see /runs for what's active.")
+            "Logs into the pair, joins the SAME table, and each round bets "
+            f"<amount> on {RUN_GAME.side_a_label} (acc1) and <amount> on "
+            f"{RUN_GAME.side_b_label} (acc2) on the same round, until <rounds> is "
+            "reached or one account runs low. Real money.\n"
+            + ("<amount> can be any size the table's chips can add up to -- "
+               "Rs.150 is placed as 100 + 50, Rs.1300 as 500 + 500 + 200 + 100. "
+               "An amount the chips can't reach is refused before any bet, and "
+               "tells you the closest one that works.\n"
+               if RUN_GAME.selectable_chips else
+               "This game has no selectable chip rail, so it bets the table's "
+               "default chip (~Rs.100); if <amount> doesn't match, it stops after "
+               "one hedged round and reports the real size.\n")
+            + f"Multiple pairs can run at once (up to {MAX_CONCURRENT_RUNS}); "
+            "see /runs for what's active.")
         return
     pid, amount_s, rounds_s = args
     if pid not in pairs["pairs"]:
@@ -2014,6 +2021,7 @@ _REASON_LABEL = {
     "repeated_unhedged_exposure": "Too many one-sided landings in a row",
     "max_attempts_exceeded": "Gave up retrying before reaching the requested rounds",
     "amount_mismatch": "Chip size didn't match",
+    "short_stake": "The stake kept landing short (still hedged, nothing exposed)",
     "banker_out_of_balance": f"{RUN_GAME.side_a_label} side ran low on balance",
     "player_out_of_balance": f"{RUN_GAME.side_b_label} side ran low on balance",
     "playwright_error": "Browser error",
