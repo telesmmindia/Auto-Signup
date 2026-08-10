@@ -49,12 +49,57 @@ PLATFORM_URLS: dict[str, str] = {
 }
 MAX_COUNT = 1_000_000
 
-_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
+MODES = ("default", "random", "variety")
 _counter = itertools.count(1)
 
 
 class ParseError(ValueError):
     """Raised when a submitted line is not a valid task."""
+
+
+# --- Field parsers, shared with schedules.py -----------------------------
+
+def parse_link(raw: str) -> str:
+    if not URL_RE.match(raw):
+        raise ParseError(f"'{raw}' is not a valid http(s) link")
+    return raw
+
+
+def parse_platform(raw: str) -> str:
+    """A platform name, or "random" to pick a different one per request."""
+    if raw.lower() == "random":
+        return "random"
+    platform = PLATFORMS.get(raw.lower())
+    if platform is None:
+        raise ParseError(f"unknown platform '{raw}'")
+    return platform
+
+
+def parse_count(raw: str) -> int:
+    try:
+        count = int(raw.replace(",", "").replace("_", ""))
+    except ValueError:
+        raise ParseError(f"'{raw}' is not a number") from None
+    if not 1 <= count <= MAX_COUNT:
+        raise ParseError(f"count must be between 1 and {MAX_COUNT:,}")
+    return count
+
+
+def parse_delay(raw: str) -> float:
+    try:
+        delay = float(raw)
+    except ValueError:
+        raise ParseError(f"'{raw}' is not a valid delay (seconds)") from None
+    if not 0 <= delay <= 3600:
+        raise ParseError("delay must be between 0 and 3600 seconds")
+    return delay
+
+
+def parse_mode(raw: str) -> str:
+    if raw not in MODES:
+        raise ParseError("mode must be 'default', 'random', or 'variety'")
+    return raw
 
 
 @dataclass
@@ -88,35 +133,14 @@ def parse_task(text: str, requested_by: int) -> Task:
     delay_raw = parts[3] if len(parts) >= 4 else "0.02"
     mode_raw = parts[4] if len(parts) == 5 else "default"
 
-    if not _URL_RE.match(link):
-        raise ParseError(f"'{link}' is not a valid http(s) link")
-
-    # Handle "random" platform
-    if platform_raw.lower() == "random":
-        platform = "random"
-    else:
-        platform = PLATFORMS.get(platform_raw.lower())
-        if platform is None:
-            raise ParseError(f"unknown platform '{platform_raw}'")
-
-    try:
-        count = int(count_raw.replace(",", "").replace("_", ""))
-    except ValueError:
-        raise ParseError(f"'{count_raw}' is not a number") from None
-    if not 1 <= count <= MAX_COUNT:
-        raise ParseError(f"count must be between 1 and {MAX_COUNT:,}")
-
-    try:
-        delay = float(delay_raw)
-    except ValueError:
-        raise ParseError(f"'{delay_raw}' is not a valid delay (seconds)") from None
-    if not 0 <= delay <= 3600:
-        raise ParseError("delay must be between 0 and 3600 seconds")
-
-    if mode_raw not in ("default", "random", "variety"):
-        raise ParseError("mode must be 'default', 'random', or 'variety'")
-
-    return Task(link=link, platform=platform, count=count, requested_by=requested_by, delay=delay, mode=mode_raw)
+    return Task(
+        link=parse_link(link),
+        platform=parse_platform(platform_raw),
+        count=parse_count(count_raw),
+        requested_by=requested_by,
+        delay=parse_delay(delay_raw),
+        mode=parse_mode(mode_raw),
+    )
 
 
 def parse_batch(text: str, requested_by: int) -> tuple[list[Task], list[tuple[str, str]]]:

@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import html
 import logging
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, Router, F
@@ -17,8 +18,23 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import Message, TelegramObject, User
 
 import handlers  # noqa: F401  -- registers the platform handlers
-from config import BOT_TOKEN, MASTER_ADMIN_ID, WORKER_COUNT, admin_store
-from tasks import HANDLERS, PLATFORMS, Task, parse_batch, queue, worker
+from config import (
+    BOT_TOKEN,
+    MASTER_ADMIN_ID,
+    SCHEDULE_TIMEZONE,
+    SCHEDULE_TZ,
+    SCHEDULES_FILE,
+    WORKER_COUNT,
+    admin_store,
+)
+from schedules import (
+    USAGE as SCHEDULE_USAGE,
+    Schedule,
+    ScheduleStore,
+    parse_schedule,
+    scheduler_loop,
+)
+from tasks import HANDLERS, PLATFORMS, ParseError, Task, parse_batch, queue, worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +43,11 @@ logging.basicConfig(
 log = logging.getLogger("bot")
 
 router = Router()
+schedule_store = ScheduleStore(SCHEDULES_FILE)
+
+
+def now_local() -> datetime:
+    return datetime.now(SCHEDULE_TZ)
 
 
 class AdminOnlyMiddleware(BaseMiddleware):
@@ -68,9 +89,16 @@ HELP = (
     "Example:\n"
     "<code>https://t.me/example telegram 500</code>\n\n"
     "<b>Platforms:</b> {platforms}\n\n"
+    "<b>Run it daily by itself</b>\n"
+    "<code>/schedule &lt;link&gt; &lt;platform&gt; &lt;min&gt;-&lt;max&gt; &lt;start&gt; &lt;end&gt; [HH:MM]</code>\n"
+    "Example — a random 500-800 clicks every night at 1 AM, from today until 10 Sept:\n"
+    "<code>/schedule https://bit.ly/abc telegram 500-800 today 2026-09-10</code>\n"
+    "Time defaults to <b>01:00</b> ({tz}). Dates: YYYY-MM-DD, today, tomorrow or +N days.\n\n"
     "<b>Commands</b>\n"
     "/id — show your user id\n"
     "/status — queue status\n"
+    "/schedules — list daily schedules\n"
+    "/delschedule &lt;id&gt; — stop one\n"
     "/help — this message\n\n"
     "<b>Master only</b>\n"
     "/addadmin &lt;id&gt; (or reply to a message)\n"
@@ -83,7 +111,7 @@ HELP = (
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     platforms = ", ".join(sorted(set(PLATFORMS.values())))
-    await message.answer(HELP.format(platforms=platforms))
+    await message.answer(HELP.format(platforms=platforms, tz=SCHEDULE_TIMEZONE))
 
 
 @router.message(Command("id"))
@@ -95,9 +123,76 @@ async def cmd_id(message: Message) -> None:
 
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
+    active = schedule_store.active(now_local().date())
     await message.answer(
-        f"Queued: <b>{queue.qsize()}</b>\nWorkers: <b>{WORKER_COUNT}</b>"
+        f"Queued: <b>{queue.qsize()}</b>\n"
+        f"Workers: <b>{WORKER_COUNT}</b>\n"
+        f"Daily schedules: <b>{len(active)}</b>"
     )
+
+
+# --- Daily schedules -----------------------------------------------------
+
+def describe_schedule(sched: Schedule, now: datetime) -> str:
+    upcoming = sched.next_run(now)
+    when = f"{upcoming:%Y-%m-%d %H:%M}" if upcoming else "— finished"
+    return (
+        f"<code>#{sched.id}</code> <b>{sched.platform}</b> ×{sched.count_text()} "
+        f"daily at {sched.run_time:%H:%M}\n"
+        f"{html.escape(sched.link)}\n"
+        f"{sched.start_date} → {sched.end_date} · ran {sched.runs}× · next: {when}"
+    )
+
+
+@router.message(Command("schedule"))
+async def cmd_schedule(message: Message, command: CommandObject) -> None:
+    if not command.args:
+        await message.answer(
+            f"Usage: <code>/schedule {html.escape(SCHEDULE_USAGE)}</code>\n\n"
+            "Example:\n"
+            "<code>/schedule https://bit.ly/abc telegram 500-800 today 2026-09-10</code>\n\n"
+            f"Runs once a day at 01:00 ({SCHEDULE_TIMEZONE}) unless you give a time."
+        )
+        return
+
+    now = now_local()
+    try:
+        sched = parse_schedule(
+            command.args, message.from_user.id, message.chat.id, now.date()
+        )
+    except ParseError as exc:
+        await message.answer(f"❌ {html.escape(str(exc))}")
+        return
+
+    await schedule_store.add(sched)
+    days = (sched.end_date - max(sched.start_date, now.date())).days + 1
+    await message.answer(
+        f"✅ Scheduled — {days} run(s) left, results land in this chat.\n\n"
+        f"{describe_schedule(sched, now)}"
+    )
+
+
+@router.message(Command("schedules"))
+async def cmd_schedules(message: Message) -> None:
+    now = now_local()
+    scheds = schedule_store.all()
+    if not scheds:
+        await message.answer("No daily schedules. Set one with <code>/schedule</code>.")
+        return
+    body = "\n\n".join(describe_schedule(s, now) for s in scheds)
+    await message.answer(f"<b>Daily schedules</b> ({SCHEDULE_TIMEZONE})\n\n{body}")
+
+
+@router.message(Command("delschedule"))
+async def cmd_delschedule(message: Message, command: CommandObject) -> None:
+    arg = command.args.split()[0] if command.args else ""
+    if not arg.isdigit():
+        await message.answer("Usage: <code>/delschedule &lt;id&gt;</code> — id from /schedules")
+        return
+    if await schedule_store.remove(int(arg)):
+        await message.answer(f"Removed schedule <code>#{arg}</code>.")
+    else:
+        await message.answer(f"No schedule <code>#{arg}</code>.")
 
 
 @router.message(Command("admins"))
@@ -164,17 +259,19 @@ async def submit_jobs(message: Message) -> None:
         return
 
     for task in tasks:
-        await enqueue(task, message)
+        await enqueue(task, message.bot, message.chat.id)
 
 
-async def enqueue(task: Task, message: Message) -> None:
+async def enqueue(task: Task, bot: Bot, chat_id: int, note: str = "") -> None:
     """Queue a task and keep one status message updated as it runs."""
     if task.platform not in HANDLERS:
-        await message.answer(f"No handler implemented for <b>{task.platform}</b> yet.")
+        await bot.send_message(chat_id, f"No handler implemented for <b>{task.platform}</b> yet.")
         return
 
     header = f"<code>#{task.id}</code> {task.platform} ×{task.count}\n{html.escape(task.link)}"
-    status_msg = await message.answer(f"{header}\n\n⏳ Queued…")
+    if note:
+        header = f"{note}\n{header}"
+    status_msg = await bot.send_message(chat_id, f"{header}\n\n⏳ Queued…")
 
     async def progress(text: str) -> None:
         with contextlib.suppress(Exception):  # ignore "message is not modified" / rate limits
@@ -202,8 +299,20 @@ async def main() -> None:
     dp.callback_query.outer_middleware(AdminOnlyMiddleware())
     dp.include_router(router)
 
+    async def fire(sched: Schedule, task: Task) -> None:
+        note = f"🕐 <b>Daily schedule #{sched.id}</b> — {now_local():%Y-%m-%d %H:%M}"
+        await enqueue(task, bot, sched.chat_id, note=note)
+
     workers = [asyncio.create_task(worker(f"w{i}")) for i in range(WORKER_COUNT)]
-    log.info("started with %d workers, master admin %s", WORKER_COUNT, MASTER_ADMIN_ID)
+    workers.append(asyncio.create_task(scheduler_loop(schedule_store, fire, SCHEDULE_TZ)))
+    log.info(
+        "started with %d workers, master admin %s, %d schedule(s) on %s (now %s)",
+        WORKER_COUNT,
+        MASTER_ADMIN_ID,
+        len(schedule_store.all()),
+        SCHEDULE_TIMEZONE if SCHEDULE_TZ else "local time",
+        now_local().strftime("%Y-%m-%d %H:%M"),
+    )
     try:
         await dp.start_polling(bot)
     finally:

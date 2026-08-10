@@ -58,7 +58,7 @@ PROFILE = SiteProfile(
     supports_change_password=True,
     change_password_path="/changePassword",
     # Same caveat again -- see the module docstring's phone_freer.py note.
-    supports_free_number=True,
+    supports_free_number=False,
     free_number_path="/send_otp_touser",
     sel={
         # ---- signup (carried over from cricmatch.py, UNVERIFIED for

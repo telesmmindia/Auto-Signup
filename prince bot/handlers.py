@@ -243,7 +243,7 @@ async def demo_job(task: Task, progress: Progress) -> str:
         
         headers = realistic_headers(referer)
         return await asyncio.to_thread(
-            send_clicks, headers, task.link, get_proxy()
+             send_clicks, headers, task.link, get_proxy()
         )
 
     sem = asyncio.Semaphore(50)

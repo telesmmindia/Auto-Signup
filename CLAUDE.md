@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Communication style
+- Always respond in plain English — no code jargon, acronyms, or technical shorthand without explanation
+- Explain what you’re doing and why in everyday language
+- Avoid dumping raw stack traces or logs without a plain-language summary first
+- Keep explanations short and direct
+
 ## Purpose
 
 QA automation that drives the signup ("New Member? Register Now") flow on
@@ -2271,3 +2277,72 @@ been polled or processed end-to-end.
   digit, one special character, and both upper- and lower-case letters
   (spin24star shows the same rule set as inline indicators on its register
   form, so one generated password satisfies both sites).
+
+## bit.ly click bot (`prince bot/`) — daily schedules
+
+A separate, self-contained mini-app from everything above (its own `.env`,
+its own admin list, no Playwright, no `accounts.db`): an aiogram Telegram bot
+where an admin pastes `<link> <platform> <count> [delay] [mode]` lines and a
+pool of `WORKER_COUNT` workers fires that many HTTP GETs at the link, each
+with a randomized realistic browser header set and referer.
+
+`schedules.py` adds **recurring daily runs**: a count range plus a date range
+plus a time of day, so a job fires by itself every night instead of needing a
+pasted line.
+
+```
+/schedule <link> <platform> <min>-<max> <start> <end> [HH:MM] [delay] [mode]
+/schedule https://bit.ly/abc telegram 500-800 today 2026-09-10
+/schedules            # list, with each one's next fire time
+/delschedule <id>     # stop one
+```
+
+Each night at `run_time` (**default 01:00**) every schedule inside its date
+window queues one job with a **fresh random count** between `min` and `max`
+(`Schedule.pick_count()`), so the daily volume varies instead of being a
+constant. A single number instead of a range (`500`) means the same count
+every day. Dates accept `YYYY-MM-DD`, `DD-MM-YYYY`, `today`, `tomorrow`, or
+`+N` days.
+
+Behavior worth knowing before changing any of it:
+- **The clock is `SCHEDULE_TIMEZONE` (default `Asia/Kolkata`), not the
+  server's.** `config.py` resolves it to a `ZoneInfo` once, falling back to
+  the machine's local time if the name doesn't resolve; every `datetime.now()`
+  in the scheduler goes through `bot.now_local()`. A schedule set for 01:00
+  fires at 1 AM India time wherever this runs.
+- **A missed run still fires, same day only.** `Schedule.due()` is "today is
+  in range AND it hasn't run today AND `now >= run_time`" — so if the bot was
+  down at 1 AM and starts at 9 AM, that day's job goes out at 9 AM rather than
+  being skipped. A whole missed day is never backfilled.
+- **`mark_run()` is called BEFORE `fire()`**, deliberately: a slow or failing
+  Telegram send can then never let the same day go out twice. The cost is that
+  a failed send loses that day's run rather than retrying it — the right
+  trade for click volume, where a duplicate day is worse than a missing one.
+- Results go to `chat_id`, captured when the schedule was created — a
+  scheduled job posts a new status message into that chat (tagged `🕐 Daily
+  schedule #N`) and edits it as it runs, exactly like a pasted job does.
+- `enqueue()` takes `(task, bot, chat_id, note="")` rather than a `Message`,
+  so the scheduler (which has no incoming message to reply to) and the
+  paste-a-line path share one code path.
+- Schedules persist to `schedules.json` (gitignored, holds links and chat
+  ids), atomically via a `.tmp` + `replace()`, so they survive a restart —
+  including `last_run`, which is what stops a restart from re-firing a day
+  that already went out.
+- The scheduler is just another task in `main()`'s `workers` list, so it's
+  cancelled on shutdown with the rest.
+
+`tasks.py`'s field validation was split into `parse_link`/`parse_platform`/
+`parse_count`/`parse_delay`/`parse_mode` so `parse_task()` (one-off lines)
+and `parse_schedule()` (recurring) can't drift on what a valid platform or
+delay is.
+
+**Verified without touching the live bot or bit.ly**: the parser, the
+due/next-run logic, JSON persistence across a restart, and the loop itself
+(driven by a fake clock across two simulated days — confirmed exactly one
+fire per day, none before 01:00, counts inside the range, and that a raising
+`fire()` neither kills the loop nor re-fires the same day); plus `bot.py`
+imported for real against a stub Telegram, confirming the three commands
+register, `/schedule` stores and rejects correctly, a scheduled run reaches
+the queue addressed to the right chat, and pasted jobs still work after the
+`enqueue()` signature change. **Not yet run against real Telegram or a real
+overnight 1 AM fire.**

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 BASE_DIR = Path(__file__).parent
 
@@ -26,6 +27,16 @@ MASTER_ADMIN_ID = int(os.environ.get("MASTER_ADMIN_ID", "0"))
 WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 
 ADMINS_FILE = BASE_DIR / "admins.json"
+SCHEDULES_FILE = BASE_DIR / "schedules.json"
+
+# Which clock the daily schedules run on. A schedule set for 01:00 fires at
+# 1 AM in THIS timezone, not the server's.
+SCHEDULE_TIMEZONE = os.environ.get("SCHEDULE_TIMEZONE", "Asia/Kolkata")
+
+try:
+    SCHEDULE_TZ = ZoneInfo(SCHEDULE_TIMEZONE)
+except (ZoneInfoNotFoundError, ValueError):
+    SCHEDULE_TZ = None  # fall back to the machine's own local time
 
 
 class AdminStore:
