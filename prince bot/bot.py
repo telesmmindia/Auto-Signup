@@ -37,7 +37,18 @@ from schedules import (
     parse_schedule,
     scheduler_loop,
 )
-from tasks import HANDLERS, PLATFORMS, ParseError, Task, parse_batch, queue, worker
+from tasks import (
+    HANDLERS,
+    PLATFORMS,
+    ParseError,
+    Task,
+    live_tasks,
+    parse_batch,
+    queue,
+    request_stop,
+    track,
+    worker,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -104,9 +115,11 @@ HELP = (
     "Time defaults to <b>01:00</b> ({tz}). Dates: YYYY-MM-DD, today, tomorrow or +N days.\n\n"
     "<b>Commands</b>\n"
     "/id — show your user id\n"
-    "/status — queue status\n"
+    "/status — what is running, and the queue\n"
+    "/stopschedule — stop the run that is going on now\n"
+    "/stopschedule &lt;job id&gt; — stop just that one (id from /status)\n"
     "/schedules — list daily schedules\n"
-    "/delschedule &lt;id&gt; — stop one\n"
+    "/delschedule &lt;id&gt; — cancel a daily schedule for good\n"
     "/help — this message\n\n"
     "<b>Master only</b>\n"
     "/addadmin &lt;id&gt; (or reply to a message)\n"
@@ -136,11 +149,46 @@ async def cmd_id(message: Message) -> None:
     await message.answer(f"Your id: <code>{user.id}</code>\nRole: {role}")
 
 
+@router.message(Command("stopschedule"))
+@router.message(Command("stop"))
+async def cmd_stopschedule(message: Message, command: CommandObject) -> None:
+    """Stop a job that is already running (or one still waiting its turn)."""
+    arg = command.args.split()[0] if command.args else ""
+    if arg and not arg.lstrip("#").isdigit():
+        await message.answer(
+            "Usage: <code>/stopschedule</code> (stop everything running) or "
+            "<code>/stopschedule &lt;job id&gt;</code> — id from /status"
+        )
+        return
+
+    job_id = int(arg.lstrip("#")) if arg else None
+    stopped = request_stop(job_id)
+
+    if not stopped:
+        if job_id is None:
+            await message.answer("Nothing is running right now.")
+        else:
+            await message.answer(f"No job <code>#{job_id}</code> is running or queued.")
+        return
+
+    lines = [
+        f"🛑 Stopping <b>{len(stopped)}</b> job(s) — clicks already in flight "
+        "will finish, then each posts where it got to."
+    ]
+    lines += [f"• <code>#{t.id}</code> {t.platform} ×{t.count} ({t.status})" for t in stopped]
+    await message.answer("\n".join(lines))
+
+
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     active = schedule_store.active(now_local().date())
+    jobs = live_tasks()
+    running = "\n".join(
+        f"• <code>#{t.id}</code> {t.platform} ×{t.count} — {t.status}" for t in jobs
+    )
     await message.answer(
-        f"Queued: <b>{queue.qsize()}</b>\n"
+        (f"<b>Jobs</b>\n{running}\n\n" if jobs else "Nothing running.\n\n")
+        + f"Queued: <b>{queue.qsize()}</b>\n"
         f"Workers: <b>{WORKER_COUNT}</b>\n"
         f"Clicks at once (default): <b>{DEFAULT_CONCURRENCY}</b> (max {MAX_CONCURRENCY})\n"
         f"Follow through to destination: <b>{'yes' if FOLLOW_REDIRECTS else 'no'}</b>\n"
@@ -299,6 +347,7 @@ async def enqueue(task: Task, bot: Bot, chat_id: int, note: str = "") -> None:
         with contextlib.suppress(Exception):
             await status_msg.edit_text(f"{header}\n\n{body}")
 
+    track(task)  # so /stopschedule can reach it, queued or running
     await queue.put((task, progress, done))
 
 

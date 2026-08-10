@@ -367,6 +367,9 @@ async def demo_job(task: Task, progress: Progress) -> str:
     async def lane() -> None:
         nonlocal ok, failed, missed_site, remaining, attempts_left, streak, stopped
         while stopped is None and ok < total and attempts_left > 0:
+            if task.stopping:  # /stopschedule
+                stopped = "stopped on request"
+                return
             if remaining <= 0:
                 # Other lanes are still in flight; one may hand work back.
                 await asyncio.sleep(0.1)
@@ -413,6 +416,13 @@ async def demo_job(task: Task, progress: Progress) -> str:
     elapsed = time.monotonic() - started
     rate = ok / max(elapsed, 0.001)
 
+    if task.stopping:
+        # Asked for, not a failure -- report it as a normal outcome.
+        note = f" — {missed_site} never reached the site" if missed_site else ""
+        return (
+            f"stopped on request at {ok}/{total} clicks — {elapsed:.0f}s, "
+            f"{failed} retried{note}"
+        )
     if stopped:
         raise RuntimeError(f"stopped at {ok}/{total} clicks — {stopped}")
     if ok < total:

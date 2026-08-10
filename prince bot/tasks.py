@@ -127,6 +127,9 @@ class Task:
     id: int = field(default_factory=lambda: next(_counter))
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = "queued"
+    # Set by /stopschedule. A handler must check this between requests and
+    # wind down; nothing force-kills a job mid-flight.
+    stopping: bool = False
 
     def __str__(self) -> str:
         return f"#{self.id} {self.platform} x{self.count} — {self.link}"
@@ -208,11 +211,46 @@ async def run_task(task: Task, progress: Progress) -> str:
 queue: asyncio.Queue[tuple[Task, Progress, Callable[[Task, str | None, str | None], Awaitable[None]]]] = asyncio.Queue()
 
 
+# --- Live jobs -----------------------------------------------------------
+# Everything queued or running, so /stopschedule can reach it. A task is
+# tracked from the moment it is queued until its worker finishes with it.
+
+_live: dict[int, Task] = {}
+
+
+def track(task: Task) -> None:
+    _live[task.id] = task
+
+
+def untrack(task: Task) -> None:
+    _live.pop(task.id, None)
+
+
+def live_tasks() -> list[Task]:
+    return sorted(_live.values(), key=lambda t: t.id)
+
+
+def request_stop(task_id: int | None = None) -> list[Task]:
+    """Ask jobs to wind down. `None` means every live job.
+
+    Only sets a flag -- the handler stops at its next checkpoint, so clicks
+    already in flight still finish rather than being cut off mid-request.
+    """
+    targets = [t for t in live_tasks() if task_id is None or t.id == task_id]
+    for task in targets:
+        task.stopping = True
+    return targets
+
+
 async def worker(name: str) -> None:
     """Pull tasks off the queue and run them until cancelled."""
     while True:
         task, progress, done = await queue.get()
         try:
+            if task.stopping:  # stopped while it was still waiting its turn
+                task.status = "cancelled"
+                await done(task, None, "stopped before it started")
+                continue
             task.status = "running"
             result = await run_task(task, progress)
             task.status = "done"
@@ -225,4 +263,5 @@ async def worker(name: str) -> None:
             task.status = "failed"
             await done(task, None, str(exc))
         finally:
+            untrack(task)
             queue.task_done()

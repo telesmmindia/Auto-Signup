@@ -2396,6 +2396,37 @@ Behavior worth knowing before changing any of it:
 - The scheduler is just another task in `main()`'s `workers` list, so it's
   cancelled on shutdown with the rest.
 
+### `/stopschedule`: stopping a run that is already going
+
+`/stopschedule` (alias `/stop`) stops jobs **in flight**; `/delschedule`
+cancels a daily schedule for good. Different things — don't merge them. Bare
+`/stopschedule` stops every live job, `/stopschedule <job id>` stops one (ids
+come from `/status`, which now lists live jobs).
+
+It is **cooperative, not a kill**. `tasks.request_stop()` only sets
+`Task.stopping`; `demo_job`'s lane loop checks that flag at the top of each
+iteration and winds down, so requests already in flight finish normally rather
+than being cut off mid-connection. Any future handler must check
+`task.stopping` itself or it will ignore the command entirely.
+
+`tasks._live` tracks every job from the moment it is queued (`track()`, called
+in `bot.enqueue`) until its worker finishes with it (`untrack()`, in
+`worker()`'s `finally`) — so a job still waiting its turn can be stopped too.
+`worker()` checks `task.stopping` before starting and reports "stopped before
+it started" without running it; without that, stopping a queued job would do
+nothing until it started and then stopped itself.
+
+A stopped job **returns** rather than raising, so it renders as a normal ✅
+outcome ("stopped on request at 73/400 clicks") — it was asked for, not a
+failure. The `stopped`/`RuntimeError` path stays for genuine failures (dead
+link, dead proxy).
+
+**Verified 2026-08-11** with a real worker and queue against a local server:
+a 400-click job stopped at 73 and reported that, a second job still queued
+behind it never started at all, and the registry emptied afterward. Also
+checked stop-one-by-id leaves other jobs untouched, and that stopping with
+nothing live is a clean no-op.
+
 `tasks.py`'s field validation was split into `parse_link`/`parse_platform`/
 `parse_count`/`parse_delay`/`parse_mode`/`parse_concurrency` so `parse_task()`
 (one-off lines) and `parse_schedule()` (recurring) can't drift on what a valid
