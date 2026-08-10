@@ -23,4 +23,11 @@ service_account*.json
 .env.*
 !.env.*.example
 __pycache__/
-*.pycprobe_login_balance_capture.json
+*.pyc
+probe_login_balance_capture.json
+
+# knockout tournament
+.env.tournament
+tournament_state.json
+tournament_state.*.json
+roster*.csv
