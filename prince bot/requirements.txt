@@ -1,1 +1,6 @@
 aiogram>=3.26
+# Timezone database for the daily schedules. macOS/most Linux hosts already
+# ship one system-wide, but slim/Alpine containers do not -- without this,
+# SCHEDULE_TIMEZONE silently falls back to the server's clock and a 01:00
+# schedule fires at 1 AM UTC, not 1 AM India time.
+tzdata
