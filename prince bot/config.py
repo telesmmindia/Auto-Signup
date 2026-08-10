@@ -94,4 +94,4 @@ admin_store = AdminStore()
 
 
 #PROXIES = ["http://twosPUg5QBK19Lq:EaMpYBwaTX11aAG@thehub.proxy-cheap.com:8080",]
-PROXIES = ["http://twosPUg5QBK19Lq:EaMpYBwaTX11aAG@thehub.proxy-cheap.com:8080",]
+PROXIES = ["http://twosPUg5QBK19Lq:EaMpYBwaTX11aAG_country-IN@thehub.proxy-cheap.com:8080",]
