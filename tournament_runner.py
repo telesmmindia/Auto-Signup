@@ -26,12 +26,14 @@ Two ways to start a run:
 
   * one-shot -- run the command, type PLAY at the prompt. Good for testing.
   * --watch  -- run as a service and start runs from the sheet itself, with no
-    terminal. It watches one control cell (H1 by default) for a TWO-STEP
-    ARM-then-START handshake. Two steps because a single stray paste or
-    mistyped cell must not be able to start real betting across a hundred
-    accounts; there is no undo once chips are down. The armed flag lives in
-    memory only, so a service restart between ARM and START forgets it and
-    START alone is refused -- which fails safe.
+    terminal. It watches one control cell (H1 by default): type START there and
+    it plays. The cell doubles as the status readout, so the sheet is the whole
+    interface.
+
+    NOTE this fires real betting across the whole roster the moment the cell
+    reads START, with no second confirmation -- an earlier ARM-then-START
+    handshake was removed as too fiddly. Guard it by restricting who can edit
+    the sheet, not by relying on a prompt.
 
 Real money. Start with --dry-run, which logs every account in, opens every
 table, computes every stake and prints the bracket -- but never clicks a bet.
@@ -182,9 +184,8 @@ def main_():
     ap.add_argument("--yes", action="store_true",
                     help="skip the confirmation prompt")
     ap.add_argument("--watch", action="store_true",
-                    help=f"run as a service, starting a tournament when "
-                         f"{CONTROL_CELL} in the sheet is set to ARM then "
-                         f"START")
+                    help=f"run as a service, starting a tournament whenever "
+                         f"{CONTROL_CELL} in the sheet is set to START")
     args = ap.parse_args()
 
     site_url = args.url or SITE_URL
@@ -317,14 +318,15 @@ def play(ws, roster, site_url, args, on_stage=None):
 # ---------------------------------------------------------------------------
 #
 # Runs as a service and watches one cell, so a run is started by typing in the
-# sheet rather than by opening a terminal. Deliberately a TWO-STEP handshake:
-# the cell must read ARM on one poll and START on a later one. A single
-# mistyped or pasted cell should not be able to start real betting across a
-# hundred accounts, and there is no undo once chips are down.
+# sheet rather than by opening a terminal.
 #
-# The armed flag is held in memory only. If the service restarts between ARM
-# and START the arming is forgotten, which fails safe -- START alone is
-# refused and says so in the cell.
+# A single word starts it: typing START begins real betting across the whole
+# roster immediately, with no confirmation step. This was originally a
+# two-step ARM-then-START handshake, removed on request as too confusing in
+# daily use. The trade is real -- a stray paste into the control cell now
+# starts a tournament -- so the protection is sheet edit permissions, not the
+# script. Keep the roster sheet restricted to people who should be able to
+# spend the balances in it.
 # ---------------------------------------------------------------------------
 
 CONTROL_CELL = os.environ.get("TOURNAMENT_CONTROL_CELL", "H1")
@@ -377,13 +379,10 @@ def watch_loop(args, site_url):
     except Exception:
         pass
 
-    armed = False
     log(f"Watching {CONTROL_CELL} every {POLL_SECONDS:.0f}s.")
-    log(f"  type ARM   in {CONTROL_CELL}, then")
     log(f"  type START in {CONTROL_CELL} to play for real.")
-    current = read_control(ws)
-    if current not in ("ARM", "START"):
-        write_control(ws, "IDLE — type ARM to begin")
+    if (read_control(ws) or "").upper() != "START":
+        write_control(ws, "IDLE — type START to begin")
 
     first = True
     while True:
@@ -399,18 +398,7 @@ def watch_loop(args, site_url):
                 continue
             upper = cmd.upper()
 
-            if upper == "ARM":
-                armed = True
-                log("ARMED — waiting for START")
-                write_control(ws, f"ARMED — type START to play for real "
-                                  f"({time.strftime('%H:%M')})")
-
-            elif upper == "START":
-                if not armed:
-                    log("START without ARM — refused")
-                    write_control(ws, "REFUSED — type ARM first, then START")
-                    continue
-                armed = False
+            if upper == "START":
                 roster = roster_from_sheet(ws)
                 if args.limit:
                     roster = roster[:args.limit]
@@ -443,16 +431,15 @@ def watch_loop(args, site_url):
                     write_control(
                         ws, f"DONE {done} — winner {summary['winner']} "
                             f"({summary.get('winner_balance')}). "
-                            f"Type ARM to run again.")
+                            f"Type START to run again.")
                 else:
                     write_control(
                         ws, f"DONE {done} — no winner, "
                             f"{len(summary['problems'])} problem(s), see "
-                            f"{STATE_FILE}. Type ARM to run again.")
+                            f"{STATE_FILE}. Type START to run again.")
 
             elif upper in ("STOP", "IDLE"):
-                armed = False
-                write_control(ws, "IDLE — type ARM to begin")
+                write_control(ws, "IDLE — type START to begin")
 
         except KeyboardInterrupt:
             log("\nstopped")
