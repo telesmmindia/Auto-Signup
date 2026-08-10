@@ -33,3 +33,4 @@ probe_login_balance_capture.json
 tournament_state.json
 tournament_state.*.json
 roster*.csv
+.DS_Store
