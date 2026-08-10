@@ -88,11 +88,21 @@ DEFAULT_TABLE_MAX = 200_000
 #    10 clicks -> up to 1.4%
 #    16 clicks -> ~0%
 #
-# 8 is roughly 3 chip selections + 8 spot clicks, about 5s per seat. 10+ starts
-# to crowd a 15s window once ten seats are clicking at once on one machine and
-# competing for CPU. Raise it after a live run shows real timing headroom, not
-# before. (The floor is the ~100 sub-chip remainder, which no budget fixes.)
+# 8 is roughly 3 chip selections + 8 spot clicks. Measured at ~2.3s per seat
+# against a table that drops fast repeat clicks (see CLICK_SPACING_SECS below),
+# which leaves real margin in a ~15s window. Raise it only after a live run
+# shows that margin holds with every seat clicking at once on one machine.
+# (The floor is the ~100 sub-chip remainder, which no click budget fixes.)
 MAX_BET_CLICKS = 8
+
+# Each chip click is confirmed against TOTAL BET before the next is sent.
+# Firing them blind does not work: live on 2026-08-10 a 400 stake (four clicks
+# of the 100 chip) landed as 100 on one side and 200 on the other. Repeated
+# clicks at the same coordinates arrive as double-clicks, which the game drops.
+CLICK_SPACING_SECS = 0.3      # minimum gap between two clicks on one spot
+CLICK_CONFIRM_SECS = 1.6      # how long to wait for one chip to show up
+CLICK_POLL_SECS = 0.15
+CLICK_RETRIES = 3             # consecutive dropped clicks before giving up
 
 WINDOW_POLL_SECS = 0.4
 # How long to wait for a fresh betting window to OPEN. The live cycle measured
@@ -208,8 +218,14 @@ def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT):
     after the window shuts does nothing, and would otherwise stack onto the
     NEXT round)."""
     target = int(target if target is not None else sum(plan))
+
+    def total():
+        return m._read_total_bet(frame) or 0
+
+    last_click = [0.0]
+
     for attempt in range(max(1, attempts)):
-        placed = m._read_total_bet(frame) or 0
+        placed = total()
         short = target - placed
         if short <= 0:
             break
@@ -217,20 +233,57 @@ def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT):
         todo = plan if attempt == 0 and not placed else plan_stake(short)[1]
         if not todo:
             break
+
         for chip, count in group_plan(todo):
             if not _pick_chip(frame, chip):
                 break
-            for _ in range(count):
+            landed = 0
+            misses = 0
+            while landed < count and misses < CLICK_RETRIES:
+                before = total()
+                # Space the clicks so the game does not see a double-click in
+                # the first place. Waiting to DETECT a dropped click instead
+                # costs a full CLICK_CONFIRM_SECS each time, which pushed an
+                # 8-chip stake to ~13s against a ~15s window; spacing up front
+                # keeps the same stake around 4s.
+                gap = CLICK_SPACING_SECS - (time.time() - last_click[0])
+                if gap > 0:
+                    time.sleep(gap)
                 try:
                     m._click_bet_spot(frame, role)
                 except Exception:
                     pass
+                last_click[0] = time.time()
+                # Confirm THIS click moved the counter before firing the next.
+                # Clicking blind is what failed live on 2026-08-10: four rapid
+                # identical clicks for a 400 stake landed as one on one side and
+                # two on the other. Repeated clicks at the same coordinates
+                # arrive as double-clicks and the game drops them, so each chip
+                # has to be seen to register before the next is sent.
+                moved = False
+                deadline = time.time() + CLICK_CONFIRM_SECS
+                while time.time() < deadline:
+                    time.sleep(CLICK_POLL_SECS)
+                    if total() > before:
+                        moved = True
+                        break
+                if moved:
+                    landed += 1
+                    misses = 0
+                else:
+                    misses += 1
+                try:
+                    if not m._betting_open(frame, game):
+                        return total()
+                except Exception:
+                    return total()
+
         try:
             if not m._betting_open(frame, game):
                 break
         except Exception:
             break
-    return m._read_total_bet(frame)
+    return total()
 
 
 def wait_for_settle(frame, max_secs=SETTLE_MAX_SECS):
