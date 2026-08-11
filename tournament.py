@@ -119,6 +119,25 @@ SETTLE_POLL_SECS = 2
 # on something real, not unlucky.
 MAX_GROUP_HANDS = 60
 
+# A hand that settles nothing -- a tie, a betting window that never opened, a
+# stake that would not go down -- is REPLAYED, never treated as an elimination.
+# Waiting first is the point: every one of those causes is transient (the table
+# sitting between rounds, a dropped click, a frame that has not caught up), and
+# retrying instantly tends to miss the very same window again.
+RETRY_WAIT_SECS = 20
+
+# Consecutive hands that knock NOBODY out before a group is called genuinely
+# stuck. A baccarat tie is ~9.5% per hand, so a few in a row is ordinary luck;
+# this many in a row means something real is wrong (a dead frame, two seats on
+# different tables) and more waiting will not fix it.
+MAX_STALLED_HANDS = 10
+
+# Stages in a row that eliminate nobody before the whole tournament gives up.
+# A stage replay re-seats every account in a fresh browser with a fresh login,
+# so it fixes things an in-group replay cannot -- worth doing more than once
+# before declaring the bracket unfinishable.
+MAX_STALLED_STAGES = 3
+
 
 # ---------------------------------------------------------------------------
 # Stake sizing
@@ -670,7 +689,24 @@ def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
 
     Every seat is at the same table, so each hand covers every pair in the
     group at once -- five pairs is one hand, not five. Returns
-    (winner_seat_or_None, [result dicts, in play order]).
+    (winner_seat_or_None, [result dicts, in play order], [seats still alive]).
+
+    A GROUP ONLY ENDS WHEN ONE ACCOUNT HOLDS THE POT. The only thing that
+    removes an account is being drained below the table minimum. Every other
+    outcome -- a tie, a window that never opened, a stake that would not
+    register, a balance that could not be read -- replays the pair after a
+    short wait instead of dropping it.
+
+    That distinction was worth the whole pot in a real run (2026-08-11): the
+    last hand of a five-account group came back "not_placed -- no betting
+    window opened in time, no money was staked", both finalists were dropped,
+    and the group ended with no winner and 4,850 stranded across two live
+    accounts. Nothing had gone wrong with the money; the code simply treated
+    "nothing happened" the same as "something broke". If you are tempted to
+    drop an account on a non-`ok` status again, that is the run to re-read.
+
+    The third return value is the seats still holding money, so a group that
+    stops early hands them back to the bracket rather than writing them off.
 
     KNOCKED OUT MEANS DRAINED, not "lost a hand". Losing a hand does not
     eliminate an account; dropping below the table minimum does. The
@@ -690,12 +726,15 @@ def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     alive = list(seats)
     history = []
     hand_no = 0
+    stalled = 0
+    stuck = None
 
     while len(alive) > 1:
         hand_no += 1
         if hand_no > MAX_GROUP_HANDS:
-            progress(f"   XX {MAX_GROUP_HANDS} hands in this group without a "
-                     "single winner -- stopping it")
+            stuck = (f"{MAX_GROUP_HANDS} hands played without one account "
+                     "holding the pot")
+            progress(f"   XX {stuck} -- stopping this group")
             break
 
         pairs, bye = pair_up(alive)
@@ -710,39 +749,70 @@ def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         if dry_run:
             # Nothing was staked, so nothing can advance -- report the shape
             # of the bracket and stop rather than inventing winners.
-            return None, history
+            return None, history, alive
 
+        by_name = {s.username: s for s in alive}
         survivors = [bye] if bye else []
+        knocked_out = 0
+        replays = 0
+
         for res in results:
             win, lose = res.get("winner"), res.get("loser")
-            if res["status"] == "tie":
-                # Both bets returned. Nobody moved; both play on.
-                survivors.extend(s for s in alive if s.username in res["pair"])
-                progress(f"   .. {res['message']}")
-            elif win is not None and lose is not None:
+
+            if win is not None and lose is not None:
+                # A settled hand: the stake moved. The loser is only out once
+                # it genuinely cannot cover the table minimum -- losing a hand
+                # is not elimination (see the docstring above).
                 survivors.append(win)
                 if (lose.balance or 0) >= table_min:
-                    # Still has money to bet -- not out yet.
                     survivors.append(lose)
                     progress(f"   OK {res['message']} "
                              f"({lose.username} still in on {lose.balance})")
                 else:
+                    knocked_out += 1
                     progress(f"   OK {res['message']} "
                              f"-- {lose.username} is out ({lose.balance})")
-            else:
-                # unhedged / not_placed / error: both accounts leave the
-                # group. Their balances are no longer trustworthy inputs.
-                progress(f"   XX {res['message']}")
+                continue
+
+            # tie / not_placed / unhedged / error -- nothing was decided, so
+            # both accounts stay in and the pair is played again. Balances are
+            # re-read from the live table at the top of every hand, so even an
+            # unhedged or unreadable one self-corrects on the replay.
+            survivors.extend(by_name[u] for u in res["pair"] if u in by_name)
+            replays += 1
+            progress(f"   .. {res['message']} -- replaying this pair")
 
         if not survivors:
-            progress("   XX nobody survived this group")
-            return None, history
-        if len(survivors) == len(alive) and hand_no > 1:
-            # Every pair tied or replayed. Harmless, but worth seeing.
-            progress("   .. no eliminations this hand")
+            # Only reachable if a hand returned no results at all.
+            stuck = "no accounts came back from that hand"
+            progress(f"   XX {stuck}")
+            break
+
         alive = survivors
 
-    return (alive[0] if alive else None), history
+        if knocked_out:
+            stalled = 0
+        else:
+            stalled += 1
+            if stalled >= MAX_STALLED_HANDS:
+                stuck = (f"{stalled} hands in a row knocked nobody out -- "
+                         "the group is stuck on something real, not unlucky")
+                progress(f"   XX {stuck}")
+                break
+            progress(f"   .. no eliminations this hand "
+                     f"({stalled}/{MAX_STALLED_HANDS} before giving up)")
+
+        if replays and len(alive) > 1:
+            progress(f"   .. waiting {RETRY_WAIT_SECS}s before replaying")
+            time.sleep(RETRY_WAIT_SECS)
+
+    if len(alive) == 1 and not stuck:
+        return alive[0], history, alive
+    # Nobody holds the pot. Do NOT name the first survivor as winner just to
+    # have one -- that would report a winner who does not actually hold the
+    # money. The caller carries these seats (with their real balances) into the
+    # next stage instead.
+    return None, history, alive
 
 
 def chunk(items, size):
@@ -788,6 +858,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
 
     contenders = [dict(r) for r in roster]
     stage = 0
+    stalled_stages = 0
 
     while len(contenders) > 1:
         stage += 1
@@ -858,7 +929,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                     next_round.extend(group)
                     continue
 
-                winner, history = play_group(
+                winner, history, still_alive = play_group(
                     ready, table_min=table_min, table_max=table_max,
                     progress=progress, dry_run=dry_run)
 
@@ -873,25 +944,50 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                             {"stage": stage, "group": gi,
                              "pair": list(h["pair"]), "problem": h["message"]})
 
+                # A group that stopped without a winner has NOT eliminated the
+                # accounts still holding money -- they carry into the next
+                # stage with their real balances and keep playing. Writing them
+                # off here is what ended a real run with the pot split across
+                # two live accounts and "winner: null" (see play_group).
+                advancing = [winner] if winner else [
+                    s for s in still_alive if (s.balance or 0) >= table_min]
+                if not winner and advancing:
+                    summary["problems"].append(
+                        {"stage": stage, "group": gi,
+                         "problem": "group ended without a single winner; "
+                                    + ", ".join(f"{s.username} holds "
+                                                f"{s.balance}"
+                                                for s in advancing)
+                                    + " -- carried into the next stage"})
+
                 for s in ready:
-                    is_win = bool(winner) and s is winner
+                    keeps_playing = s in advancing
+                    result = ("winner" if (winner and s is winner)
+                              else "playing on" if keeps_playing
+                              else "eliminated")
                     if on_account:
-                        on_account(s.username, s.balance,
-                                   "winner" if is_win else "eliminated", stage)
-                    if not is_win:
+                        on_account(s.username, s.balance, result, stage)
+                    if not keeps_playing:
                         summary["eliminated"].append(
                             {"account": s.username, "stage": stage,
                              "balance": s.balance})
 
-                if winner:
+                for s in advancing:
                     row = dict(next(a for a in group
-                                    if a["username"] == winner.username))
-                    row["balance"] = winner.balance
+                                    if a["username"] == s.username))
+                    row["balance"] = s.balance
                     next_round.append(row)
+
+                if winner:
                     stage_rec["winners"].append(
                         {"account": winner.username, "balance": winner.balance})
                     progress(f"   ** group {gi} winner: {winner.username} "
                              f"(bal {winner.balance})")
+                elif advancing:
+                    progress(f"   .. group {gi} unresolved -- "
+                             + ", ".join(f"{s.username} ({s.balance})"
+                                         for s in advancing)
+                             + " play on next stage")
             finally:
                 for s in seats:
                     s.close()
@@ -907,17 +1003,47 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
         if not next_round:
             progress("\nXX no accounts survived this stage")
             break
-        if len(next_round) >= len(contenders):
-            progress("\nXX no progress made this stage -- stopping rather "
-                     "than looping forever")
-            break
+
+        # A stage that eliminated nobody is retried rather than ending the
+        # tournament: replaying a stage re-seats every account in a FRESH
+        # browser with a fresh login, which is the strongest retry available
+        # here and fixes the one thing play_group's in-group replays cannot
+        # (a dead frame or a seat stuck on the wrong table). Only give up once
+        # even that has changed nothing several times over.
+        progressed = len(next_round) < len(contenders)
         contenders = next_round
+        if progressed:
+            stalled_stages = 0
+            continue
+        stalled_stages += 1
+        if stalled_stages >= MAX_STALLED_STAGES:
+            progress(f"\nXX {stalled_stages} stages in a row without a single "
+                     "elimination -- stopping rather than looping forever")
+            break
+        progress(f"\n.. nobody was eliminated this stage -- re-seating every "
+                 f"account and playing it again "
+                 f"({stalled_stages}/{MAX_STALLED_STAGES})")
 
     if len(contenders) == 1 and not dry_run:
         summary["winner"] = contenders[0]["username"]
         summary["winner_balance"] = contenders[0].get("balance")
         progress(f"\n*** TOURNAMENT WINNER: {contenders[0]['username']} "
                  f"(bal {contenders[0].get('balance')}) ***")
+    elif not dry_run:
+        # No single account holds the pot. Say exactly who is still holding
+        # what, so it can be finished by hand -- this is the state that
+        # previously showed up only as a bare "winner": null.
+        summary["unfinished"] = [
+            {"account": c["username"], "balance": c.get("balance")}
+            for c in contenders]
+        summary["problems"].append(
+            {"problem": "tournament ended with no single winner; money is "
+                        "still split across "
+                        + ", ".join(f"{c['username']} ({c.get('balance')})"
+                                    for c in contenders)})
+        progress("\nXX NO WINNER -- the pot is still split across "
+                 + ", ".join(f"{c['username']} ({c.get('balance')})"
+                             for c in contenders))
     summary["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()
     return summary

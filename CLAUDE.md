@@ -710,6 +710,103 @@ The rail is real DOM (`chip` ×6, `chip-value` ×6, `selected-chip`, `double-but
 
 Not yet run live: do one `/run <pair> 150 1` and check `/runlog` shows ₹150/side.
 
+## Knockout tournament (`tournament.py`, `tournament_runner.py`)
+
+Many accounts play baccarat down to **one winner holding the whole pot** — the
+opposite goal from `run_paired_hedge`, which exists to keep a pair's combined
+balance flat. Each pair stakes `min(both balances)` on one hand.
+
+**Game choice is not configurable and the reason matters.** A knockout needs the
+loser's entire stake to move. Baccarat costs ~1.2%/round (5% commission on the
+~46% of Banker wins) and a tie just returns both bets. Roulette's zero and dragon
+tiger's tie *destroy* money rather than move it. **Stock Market is unusable** —
+payout is proportional to how far the chart travelled, so the loser keeps most of
+their stake and nobody is ever knocked out.
+
+**Baccarat's chip rail IS real** (`data-role="chip"`, values 100/500/2500/10000/
+50000/100000) — contradicting `sites/games.py`'s `selectable_chips=False`. It's
+only interactive **during** the betting window: between rounds exactly one chip
+node renders at 32×32 with `cursor:auto` (a display, not a control), which is why
+an earlier probe concluded it was fake. So chip selection must happen **inside**
+the window, alongside the bet clicks — not before the loop the way
+`run_paired_hedge` does for Stock Market. `verify_table_chips()` re-checks the
+rail against a live seat and refuses to bet on a mismatch.
+
+**Groups, not a flat bracket.** A flat bracket re-pairs every survivor globally
+each round, so with ~10 browsers that means logging everyone back in — ~200
+logins for 100 accounts, well past the ~20-logins-in-a-few-minutes 403 block.
+Playing a group of ~10 all the way down to one winner keeps pairings inside the
+group: ~110 logins and ~50 hands instead of ~200 and ~99. Same end state.
+
+`Seat` = one account, one browser, one OS thread (Playwright thread affinity —
+every touch goes through `.call()`).
+
+### Rules that were each worth real money
+
+- **Knocked out means DRAINED, not "lost a hand."** A stake is only
+  `min(both balances)`, so a richer account that loses keeps the difference.
+  Eliminating it there stranded that money: a mock 100-account run ended with the
+  winner holding 36.6% of the pot and one account knocked out of the final still
+  holding 30,009. Replaying until the loser can't cover the table minimum drains
+  each loser to under ~100.
+- **The bye goes to the SMALLEST balance** — a short stack otherwise drags its
+  opponent's stake down and strands money in the winner.
+- **Classify a placed bet by what's ACTUALLY on the table, not by whether it
+  matches what was asked.** A real run read TOTAL BET 600 and 500 against a wanted
+  900; because neither equalled 900 the old check reported "no money at risk" and
+  moved on. Both bets were real, the hand ran, and the accounts moved −500/+570
+  with the run recording neither. **Zero is the only reading that means nothing
+  was staked.**
+- **Each chip click is confirmed against TOTAL BET before the next is sent.**
+  Firing blind, a 400 stake (four 100-chip clicks) landed as 100 on one side and
+  200 on the other — repeated clicks at the same coordinates arrive as
+  double-clicks and the game drops them. `CLICK_SPACING_SECS` spaces them up
+  front, which is cheaper than detecting each drop.
+- `place_stake()` **tops up a short stake** while the window is still open, and
+  stops the moment it closes (topping up after would stack onto the next round).
+- `MAX_BET_CLICKS = 8` trades stranded money against the ~15s window: 6 clicks
+  strands up to 7.4%, 8 → 2.4%, 10 → 1.4%. The ~100 sub-chip remainder is a floor
+  no budget fixes.
+- `DEFAULT_TABLE_MAX = 200_000` is the conservative one of the two caps the BET
+  LIMITS panel showed; betting over the real cap is silently rejected, which
+  leaves a side unhedged. Raise it only after reading the expanded panel.
+
+### A group only ends when one account holds the pot
+
+**The only thing that removes an account is being drained below the table
+minimum.** Every other outcome — `tie`, `not_placed`, `unhedged`, `error` —
+**replays the pair** after `RETRY_WAIT_SECS` (20s), because all of those causes
+are transient and retrying instantly just misses the same window again. Balances
+are re-read from the live table at the top of every hand, so even an unhedged or
+unreadable one self-corrects on the replay.
+
+**This was worth the whole pot (2026-08-11).** The last hand of a five-account
+group came back `not_placed` — "no betting window opened in time, no money was
+staked" — and the old code dropped *both* finalists, emptying `survivors` and
+ending the group with `winner: null` and ₹4,850 stranded across two live
+accounts. Nothing had gone wrong with the money; the code treated "nothing
+happened" the same as "something broke". **Don't drop an account on a non-`ok`
+status again.**
+
+Give-up ladder, widest to narrowest — each layer only fires when the one below
+has genuinely stopped helping:
+- `MAX_STALLED_HANDS` (10) consecutive hands knocking nobody out ends the group.
+- `MAX_GROUP_HANDS` (60) total hands ends it regardless.
+- A group that ends without a winner returns its still-funded seats, and
+  `run_tournament` **carries them into the next stage with their real balances**
+  rather than marking them eliminated.
+- `MAX_STALLED_STAGES` (3) stages with zero eliminations ends the tournament. A
+  stage replay re-seats everyone in a fresh browser with a fresh login, which
+  fixes what an in-group replay can't (a dead frame, a seat on the wrong table),
+  so it's worth doing more than once.
+- `play_group` **never names the first survivor as winner just to have one** —
+  that would report a winner who doesn't hold the money. A run that can't finish
+  sets `summary["unfinished"]` and a problem naming exactly who holds what.
+
+`run_tournament` writes `summary` to `state_path` after every group, so a crash
+still leaves a record of who held what. `login_spacing` staggers the seat opens —
+~10 simultaneous logins from one IP is exactly what trips the 403 block.
+
 ### Discovery scripts (all read-only, none place a bet)
 
 Run them, read the dump, *then* write selectors — same precedent as
