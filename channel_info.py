@@ -12,9 +12,13 @@ Sheet layout (row 1 = header, written automatically if row 1 is empty):
     A: CHANNEL        the input -- @name, t.me/name, https://t.me/name,
                       a private invite link (t.me/+hash, t.me/joinchat/hash),
                       or a numeric id (-1001234567890)
-    B: TITLE          C: USERNAME     D: ID          E: TYPE
-    F: MEMBERS        G: DESCRIPTION  H: CREATED     I: LAST POST
-    J: FLAGS          K: LINK         L: STATUS
+    B: TITLE          C: USERNAME     D: ID           E: TYPE
+    F: MEMBERS        G: POSTS        H: DESCRIPTION  I: CREATED
+    J: LAST POST      K: FLAGS        L: LINK         M: STATUS
+
+POSTS is the channel's whole message history count, read from the same
+request that reads LAST POST (see _history_stats). It's blank for anything
+whose history we can't see -- a private invite preview, or a restricted chat.
 
 Queue semantics, same as balance_checker.py / sheet_watcher.py: a row with A
 filled and an EMPTY STATUS is picked up, fetched once, and STATUS is then set
@@ -110,11 +114,12 @@ SPACING_SECONDS = float(os.environ.get("CHANNEL_SPACING_SECONDS", "3"))
 # this is purely so a huge "about" doesn't make the sheet unreadable.
 DESCRIPTION_LIMIT = int(os.environ.get("CHANNEL_DESCRIPTION_LIMIT", "1000"))
 
-COL_CHANNEL, COL_TITLE, COL_USERNAME, COL_ID, COL_TYPE, COL_MEMBERS = range(1, 7)
-COL_DESCRIPTION, COL_CREATED, COL_LAST_POST, COL_FLAGS, COL_LINK, COL_STATUS = range(7, 13)
+COL_CHANNEL, COL_TITLE, COL_USERNAME, COL_ID, COL_TYPE, COL_MEMBERS, COL_POSTS = range(1, 8)
+COL_DESCRIPTION, COL_CREATED, COL_LAST_POST, COL_FLAGS, COL_LINK, COL_STATUS = range(8, 14)
 
-HEADER = ["CHANNEL", "TITLE", "USERNAME", "ID", "TYPE", "MEMBERS",
+HEADER = ["CHANNEL", "TITLE", "USERNAME", "ID", "TYPE", "MEMBERS", "POSTS",
           "DESCRIPTION", "CREATED", "LAST POST", "FLAGS", "LINK", "STATUS"]
+LAST_COL = "M"  # the STATUS column -- keep in step with HEADER's length
 
 # Set while a FloodWait is in force -- every row is skipped (no Telegram call
 # at all, not even a paced one) until it passes, since a flood wait applies to
@@ -174,18 +179,23 @@ def _flags_for(entity):
     return ", ".join(flags)
 
 
-async def _last_post_date(client, entity):
-    """Date of the most recent message. Best-effort: a channel we can't read
-    (private, or restricted) just leaves this blank rather than failing the
-    whole row."""
+async def _history_stats(client, entity):
+    """Returns (total_posts, last_post_date) from ONE request: Telethon's
+    get_messages() hands back a TotalList, whose .total is the full history
+    count regardless of how many messages were actually fetched -- so asking
+    for the single latest message answers both questions at once.
+
+    Best-effort: a chat we can't read (private, restricted) leaves both blank
+    rather than failing the whole row."""
     try:
-        async for msg in client.iter_messages(entity, limit=1):
-            return _fmt_date(msg.date)
+        msgs = await client.get_messages(entity, limit=1)
     except FloodWaitError:
         raise
     except Exception:
-        pass
-    return ""
+        return "", ""
+    total = getattr(msgs, "total", None)
+    last = _fmt_date(msgs[0].date) if msgs else ""
+    return ("" if total is None else total), last
 
 
 async def fetch_details(client, raw):
@@ -231,15 +241,17 @@ async def _details_for_entity(client, entity):
             kind_label = "supergroup"
         link = (f"https://t.me/{entity.username}" if entity.username
                 else getattr(getattr(fc, "exported_invite", None), "link", "") or "")
+        posts, last_post = await _history_stats(client, entity)
         return {
             "title": entity.title or "",
             "username": f"@{entity.username}" if entity.username else "",
             "id": entity.id,
             "type": kind_label,
             "members": fc.participants_count if fc.participants_count is not None else "",
+            "posts": posts,
             "description": (fc.about or "")[:DESCRIPTION_LIMIT],
             "created": _fmt_date(entity.date),
-            "last_post": await _last_post_date(client, entity),
+            "last_post": last_post,
             "flags": _flags_for(entity),
             "link": link,
         }
@@ -248,15 +260,17 @@ async def _details_for_entity(client, entity):
         # A plain old (non-super) group.
         full = await client(GetFullChatRequest(entity.id))
         fc = full.full_chat
+        posts, last_post = await _history_stats(client, entity)
         return {
             "title": entity.title or "",
             "username": "",
             "id": entity.id,
             "type": "group",
             "members": getattr(entity, "participants_count", "") or "",
+            "posts": posts,
             "description": (getattr(fc, "about", "") or "")[:DESCRIPTION_LIMIT],
             "created": _fmt_date(entity.date),
-            "last_post": await _last_post_date(client, entity),
+            "last_post": last_post,
             "flags": _flags_for(entity),
             "link": getattr(getattr(fc, "exported_invite", None), "link", "") or "",
         }
@@ -270,6 +284,7 @@ async def _details_for_entity(client, entity):
             "id": entity.id,
             "type": "bot" if entity.bot else "user",
             "members": "",
+            "posts": "",
             "description": (getattr(full.full_user, "about", "") or "")[:DESCRIPTION_LIMIT],
             "created": "",
             "last_post": "",
@@ -302,6 +317,9 @@ async def _fetch_invite(client, invite_hash):
         "id": "",
         "type": "channel (invite preview)" if getattr(inv, "broadcast", False) else "group (invite preview)",
         "members": getattr(inv, "participants_count", "") or "",
+        # An invite preview exposes no message history at all -- we're not in
+        # the chat, so there's nothing to count.
+        "posts": "",
         "description": (getattr(inv, "about", "") or "")[:DESCRIPTION_LIMIT],
         "created": "",
         "last_post": "",
@@ -328,27 +346,28 @@ def ensure_header(ws, rows):
     at all in row 1 is left exactly as it is."""
     if rows and any(str(c).strip() for c in rows[0]):
         return rows
-    ws.update(values=[HEADER], range_name="A1:L1")
+    ws.update(values=[HEADER], range_name=f"A1:{LAST_COL}1")
     print("wrote the header row into the empty sheet")
     return [HEADER] + rows[1:]
 
 
 def write_row(ws, row_idx, details, status):
-    """One API call per row: B..L in a single update (12 separate update_cell
-    calls per row would burn Google's per-minute write quota fast on a big
-    sheet)."""
+    """One API call per row: B..M in a single update (a dozen separate
+    update_cell calls per row would burn Google's per-minute write quota fast
+    on a big sheet)."""
     ws.update(values=[[
         details["title"], details["username"], details["id"], details["type"],
-        details["members"], details["description"], details["created"],
-        details["last_post"], details["flags"], details["link"], status,
-    ]], range_name=f"B{row_idx}:L{row_idx}")
+        details["members"], details["posts"], details["description"],
+        details["created"], details["last_post"], details["flags"],
+        details["link"], status,
+    ]], range_name=f"B{row_idx}:{LAST_COL}{row_idx}")
 
 
 def write_status(ws, row_idx, status):
     """Failure path: touch ONLY the status cell, so a row that was filled in
     successfully on an earlier pass doesn't get blanked out by a later error
     -- same reasoning as balance_checker.py leaving BALANCE alone on failure."""
-    ws.update(values=[[status]], range_name=f"L{row_idx}")
+    ws.update(values=[[status]], range_name=f"{LAST_COL}{row_idx}")
 
 
 async def process_row(client, ws, row_idx, raw):
@@ -387,8 +406,8 @@ async def poll_once(client, ws):
     rows = ws.get_all_values()
     rows = ensure_header(ws, rows)
     for i, row in enumerate(rows[1:], start=2):  # row 1 is the header
-        row = list(row) + [""] * (12 - len(row))
-        raw, status = row[0].strip(), row[11].strip()
+        row = list(row) + [""] * (len(HEADER) - len(row))
+        raw, status = row[0].strip(), row[COL_STATUS - 1].strip()
         if not raw:
             continue
         # Empty STATUS (never fetched) or a "⏳ flood-wait" marker (not a real

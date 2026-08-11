@@ -2333,14 +2333,26 @@ A fourth sheet-driven script, and the only one with nothing to do with the
 signup sites: it keeps a Google Sheet of Telegram channels filled in with each
 one's details, fetched via **Telethon** (MTProto). Add a username or link to
 column A -> the next poll resolves it and writes the title, id, member count,
-description, creation date, last post date, badges and canonical link across
-that row.
+total post count, description, creation date, last post date, badges and
+canonical link across that row.
 
 Sheet layout (row 1 = header, **written automatically if the sheet is
 completely empty** — the other sheet scripts require a hand-made header):
 
 `A: CHANNEL | B: TITLE | C: USERNAME | D: ID | E: TYPE | F: MEMBERS |
-G: DESCRIPTION | H: CREATED | I: LAST POST | J: FLAGS | K: LINK | L: STATUS`
+G: POSTS | H: DESCRIPTION | I: CREATED | J: LAST POST | K: FLAGS | L: LINK |
+M: STATUS`
+
+**POSTS** (the channel's whole message-history count) and **LAST POST** come
+from a single request, not two: `_history_stats()` calls `get_messages(...,
+limit=1)`, and Telethon's `TotalList` return carries `.total` — the full
+history count regardless of how many messages were actually fetched — so
+asking for the latest message answers both. Both are blank for anything whose
+history isn't readable (an invite preview, a restricted chat), never zero.
+`HEADER`/`LAST_COL` are the single source of truth for the column layout —
+`write_row()`, `write_status()`, `ensure_header()` and `poll_once()` all
+derive their ranges from them, so adding another column means editing those
+two constants and the details dict, not hunting for hardcoded `L`s.
 
 Column A accepts `@name`, `name`, `t.me/name`, `https://t.me/name`,
 `t.me/s/name` (the web-preview form), `telegram.me`/`telegram.dog` hosts, a
@@ -2378,7 +2390,7 @@ anything. If the account already happens to be in that chat, Telegram returns
 the real chat object and the row gets full detail; if not, it's a preview
 (title, member count, description only, no id or creation date).
 
-`write_row()` updates `B..L` in **one** `ws.update()` call rather than 12
+`write_row()` updates `B..M` in **one** `ws.update()` call rather than a dozen
 `update_cell()` calls, since Google's per-minute write quota is the real
 ceiling on a large sheet. A failed fetch writes **only** the STATUS cell, so a
 row filled in successfully earlier isn't blanked by a later error — same
@@ -2405,7 +2417,7 @@ gotcha documented above.
 
 **Verified by a full mock of `poll_once()`** (fake Telethon client, fake
 worksheet — no real Telegram account, no real sheet): a public channel wrote
-all 11 fields correctly in one `B2:L2` update, an already-`✅` row was skipped
+all 12 fields correctly in one `B2:M2` update, an already-`✅` row was skipped
 without any write, a bad username touched only the STATUS cell, a FloodWait
 wrote the retryable `⏳` marker and stopped the rest of that poll, an
 unresolvable bare id produced the friendly "give me its @username or link"
