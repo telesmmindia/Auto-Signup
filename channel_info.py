@@ -331,9 +331,36 @@ async def _fetch_invite(client, invite_hash):
 
 def get_worksheet():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    try:
+        creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
+    except FileNotFoundError:
+        print(f"\nCan't find the Google service account key file "
+              f"'{CREDENTIALS_FILE}'.\nIt's the same one the other sheet "
+              f"scripts use -- copy it into this folder, or point "
+              f"CHANNEL_SHEET_CREDENTIALS_FILE at wherever it lives.")
+        sys.exit(1)
     client = gspread.authorize(creds)
-    sh = client.open_by_key(SPREADSHEET_ID)
+    try:
+        sh = client.open_by_key(SPREADSHEET_ID)
+    except (PermissionError, gspread.exceptions.APIError) as e:
+        # By far the most common first-run stumble: the sheet exists but was
+        # never shared with the service account, which surfaces as a bare
+        # 403/PermissionError several frames deep in gspread. Say what to do
+        # instead of dumping that traceback.
+        email = getattr(creds, "service_account_email", "(unknown)")
+        print(f"\nGoogle refused access to that spreadsheet ({type(e).__name__}).\n"
+              f"\nThe sheet has to be SHARED with the service account, the same "
+              f"way you'd share it with a person:\n"
+              f"  1. Open https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}\n"
+              f"  2. Share -> paste this address -> give it Editor access:\n\n"
+              f"       {email}\n\n"
+              f"  3. Run this again.\n"
+              f"\nEditor (not Viewer) is needed because the script writes the "
+              f"details and STATUS back into the sheet.\n"
+              f"If you meant a different sheet, check "
+              f"CHANNEL_SHEET_SPREADSHEET_ID in your env file -- it's the long "
+              f"code in the sheet's URL, between /d/ and /edit.")
+        sys.exit(1)
     for ws in sh.worksheets():
         if str(ws.id) == str(WORKSHEET_GID):
             return ws
