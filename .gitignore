@@ -34,3 +34,7 @@ tournament_state.json
 tournament_state.*.json
 roster*.csv
 .DS_Store
+
+# telegram channel info (channel_info.py)
+*.session
+*.session-journal

@@ -2327,6 +2327,92 @@ written back).
 created/shared with a service account for this yet, so no row has actually
 been polled or processed end-to-end.
 
+## Sheet-driven Telegram channel details (`channel_info.py`)
+
+A fourth sheet-driven script, and the only one with nothing to do with the
+signup sites: it keeps a Google Sheet of Telegram channels filled in with each
+one's details, fetched via **Telethon** (MTProto). Add a username or link to
+column A -> the next poll resolves it and writes the title, id, member count,
+description, creation date, last post date, badges and canonical link across
+that row.
+
+Sheet layout (row 1 = header, **written automatically if the sheet is
+completely empty** — the other sheet scripts require a hand-made header):
+
+`A: CHANNEL | B: TITLE | C: USERNAME | D: ID | E: TYPE | F: MEMBERS |
+G: DESCRIPTION | H: CREATED | I: LAST POST | J: FLAGS | K: LINK | L: STATUS`
+
+Column A accepts `@name`, `name`, `t.me/name`, `https://t.me/name`,
+`t.me/s/name` (the web-preview form), `telegram.me`/`telegram.dog` hosts, a
+private invite link (`t.me/+hash`, `t.me/joinchat/hash`), or a bare numeric id
+— all normalized by `normalize_target()`, which returns
+`("public"|"invite"|"id", value)`.
+
+Queue semantics are identical to `balance_checker.py`/`password_changer.py`: a
+row with A filled and an EMPTY STATUS is fetched exactly once, STATUS is set,
+and the row is then left alone. Clear STATUS by hand to refresh a row (member
+counts move, so refreshing is a normal thing to want). A **FloodWait is not a
+terminal result** — it writes a `⏳ ... flood-wait, auto-retrying` marker that
+`poll_once()` treats as eligible, the same real-result-vs-infra-block
+distinction `balance_checker.py` draws for WAF 403s.
+
+Two things deliberately differ from the other sheet scripts:
+- **A real Telegram user account is required, not a bot token.** Bots can't
+  resolve arbitrary public usernames they've never interacted with, and can't
+  read a private invite link's info at all — which is most of what this does.
+  `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` come from https://my.telegram.org (API
+  development tools), and the first run signs in interactively (phone -> code
+  -> 2FA password), saving the session to `CHANNEL_SESSION` (default
+  `channel_info.session`, gitignored via `*.session`). Later runs are
+  unattended.
+- **No concurrency, and don't add any.** `balance_checker.py`'s proxy pool
+  works because the site's rate limit is per-IP; Telegram's is per-ACCOUNT, so
+  extra parallelism buys nothing and risks a multi-hour flood-wait on a real
+  account. Rows are processed one at a time with `CHANNEL_SPACING_SECONDS`
+  (default 3s) between them, and a FloodWait pauses **every** row (module-level
+  `_blocked_until`), not just the one that tripped it.
+
+Private invite links go through `CheckChatInviteRequest`, which reads a link's
+info **without joining** — this script never joins, posts, or messages
+anything. If the account already happens to be in that chat, Telegram returns
+the real chat object and the row gets full detail; if not, it's a preview
+(title, member count, description only, no id or creation date).
+
+`write_row()` updates `B..L` in **one** `ws.update()` call rather than 12
+`update_cell()` calls, since Google's per-minute write quota is the real
+ceiling on a large sheet. A failed fetch writes **only** the STATUS cell, so a
+row filled in successfully earlier isn't blanked by a later error — same
+reasoning as `balance_checker.py` leaving BALANCE alone on failure.
+
+Config (all env, `--env <path>` selects the file same as every other script
+here; `--once` runs a single pass): `CHANNEL_SHEET_SPREADSHEET_ID` (required),
+`CHANNEL_SHEET_WORKSHEET_GID` (default `"0"`),
+`CHANNEL_SHEET_CREDENTIALS_FILE` (falls back to `SHEET_CREDENTIALS_FILE`, then
+`service_account.json` — reuse the same service account, just share this sheet
+with it too, Editor access), `CHANNEL_POLL_SECONDS` (20),
+`CHANNEL_SPACING_SECONDS` (3), `CHANNEL_DESCRIPTION_LIMIT` (1000).
+
+```
+cp .env.channels.example .env.channels     # fill in API id/hash + sheet id
+.venv/bin/pip install -r requirements.txt  # telethon==1.44.0 added for this
+.venv/bin/python channel_info.py --env .env.channels
+```
+
+Unlike the other sheet scripts this one does **not** `import main` — nothing
+here touches Playwright or the signup engine, so there's no bare
+`load_dotenv()` already having run and none of the `override=True` ordering
+gotcha documented above.
+
+**Verified by a full mock of `poll_once()`** (fake Telethon client, fake
+worksheet — no real Telegram account, no real sheet): a public channel wrote
+all 11 fields correctly in one `B2:L2` update, an already-`✅` row was skipped
+without any write, a bad username touched only the STATUS cell, a FloodWait
+wrote the retryable `⏳` marker and stopped the rest of that poll, an
+unresolvable bare id produced the friendly "give me its @username or link"
+message, and an empty sheet got its header written. **Not yet run against a
+real Telegram account or a real sheet** — no API id/hash has been created
+yet, so no channel has actually been resolved end-to-end.
+
 ## Site-specific notes
 
 - `SITE_URL` in `main.py` points to `https://cricmatch247.com?btag=211079` (an
