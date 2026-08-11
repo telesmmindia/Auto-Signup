@@ -263,9 +263,9 @@ def play(ws, roster, site_url, args, on_stage=None):
             if not row:
                 continue
             try:
-                ws.update(f"C{row}:E{row}",
-                          [[balance if balance is not None else "",
-                            stage, result]])
+                ws.update(range_name=f"C{row}:E{row}",
+                          values=[[balance if balance is not None else "",
+                                   stage, result]])
             except Exception as exc:
                 log(f"   (could not write row {row}: {exc})")
 
@@ -307,7 +307,7 @@ def play(ws, roster, site_url, args, on_stage=None):
         row = by_user.get(summary["winner"], {}).get("_row")
         if row:
             try:
-                ws.update(f"E{row}", [["WINNER"]])
+                ws.update(range_name=f"E{row}", values=[["WINNER"]])
             except Exception:
                 pass
     return summary
@@ -337,7 +337,7 @@ POLL_SECONDS = float(os.environ.get("TOURNAMENT_POLL_SECONDS", "20"))
 def ensure_header(ws):
     try:
         if ws.row_values(1)[:1] != HEADER[:1]:
-            ws.update("A1:E1", [HEADER])
+            ws.update(range_name="A1:E1", values=[HEADER])
     except Exception:
         pass
 
@@ -352,7 +352,7 @@ def read_control(ws):
 
 def write_control(ws, text):
     try:
-        ws.update(CONTROL_CELL, [[text]])
+        ws.update(range_name=CONTROL_CELL, values=[[text]])
     except Exception as exc:
         log(f"(could not write {CONTROL_CELL}: {exc})")
 
@@ -365,8 +365,8 @@ def clear_results(ws, roster):
     if not rows:
         return
     try:
-        ws.update(f"C{min(rows)}:E{max(rows)}",
-                  [["", "", ""] for _ in range(min(rows), max(rows) + 1)])
+        ws.update(range_name=f"C{min(rows)}:E{max(rows)}",
+                  values=[["", "", ""] for _ in range(min(rows), max(rows) + 1)])
     except Exception as exc:
         log(f"(could not clear old results: {exc})")
 
@@ -375,7 +375,7 @@ def watch_loop(args, site_url):
     ws = open_worksheet()
     ensure_header(ws)
     try:
-        ws.update(CONTROL_LABEL_CELL, [["CONTROL"]])
+        ws.update(range_name=CONTROL_LABEL_CELL, values=[["CONTROL"]])
     except Exception:
         pass
 

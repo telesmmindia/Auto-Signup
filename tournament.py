@@ -132,6 +132,13 @@ RETRY_WAIT_SECS = 20
 # different tables) and more waiting will not fix it.
 MAX_STALLED_HANDS = 10
 
+# Seating one account is a login + the casino lobby + a live-video table load,
+# and any of the three fails transiently (the SPRIBE overlay, a frame that never
+# renders, a rate-limited login). Each retry builds a BRAND-NEW browser and logs
+# in again, which is the only thing that clears a half-loaded table.
+SEAT_ATTEMPTS = 3
+SEAT_RETRY_WAIT_SECS = 30
+
 # Stages in a row that eliminate nobody before the whole tournament gives up.
 # A stage replay re-seats every account in a fresh browser with a fresh login,
 # so it fixes things an in-group replay cannot -- worth doing more than once
@@ -819,6 +826,86 @@ def chunk(items, size):
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
+def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
+                  attempts=SEAT_ATTEMPTS):
+    """Open a browser + live table for every account in `group`, retrying the
+    ones that fail.
+
+    Returns (ready_seats, failures), failures being
+    [{"username", "password", "error"}, ...] for accounts that never seated.
+
+    A retry throws the old browser away and builds a fresh one rather than
+    re-driving the existing page: the observed failure ("could not open the
+    'Baccarat A' table") leaves a half-loaded frame that nothing short of a new
+    context recovers. Retries also land on the NEXT proxy in the rotation,
+    since a rate-limited exit IP is one of the ways this fails."""
+    progress = progress or (lambda _s: None)
+    ready = []
+    pending = list(group)
+    last_error = {}
+
+    for attempt in range(1, max(1, attempts) + 1):
+        if not pending:
+            break
+        if attempt > 1:
+            progress(f"   .. {len(pending)} seat(s) did not come up -- waiting "
+                     f"{SEAT_RETRY_WAIT_SECS}s and rebuilding them "
+                     f"(attempt {attempt}/{attempts})")
+            time.sleep(SEAT_RETRY_WAIT_SECS)
+
+        seats = [Seat(a["username"], a["password"], site_url=site_url,
+                      proxy=proxies[(i + gi + attempt) % len(proxies)])
+                 for i, a in enumerate(pending)]
+
+        # Open concurrently, but space the LOGIN starts: a burst of ~10
+        # simultaneous logins from one IP is exactly what trips the site's
+        # bare-403 rate block.
+        futs = []
+        for s in seats:
+            futs.append(s.open_async(progress=lambda msg: progress(f"   {msg}")))
+            if login_spacing:
+                time.sleep(login_spacing)
+
+        still = []
+        for acct, s, f in zip(pending, seats, futs):
+            try:
+                f.result(timeout=600)
+                ready.append(s)
+            except Exception as exc:
+                s.error = str(exc).splitlines()[0][:200]
+                last_error[s.username] = s.error
+                progress(f"   XX {s.username} could not be seated: {s.error}")
+                # Free the browser/bridge before trying again, or a retried
+                # group leaks one Chromium (and one pproxy) per failed attempt.
+                s.close()
+                still.append(acct)
+        pending = still
+
+    failures = [{"username": a["username"], "password": a["password"],
+                 "error": last_error.get(a["username"], "unknown")}
+                for a in pending]
+    return ready, failures
+
+
+def probe_balance(username, password, site_url=None, proxy=None):
+    """Read one account's balance over HTTP, with no browser at all.
+
+    Used only on accounts that could NOT be seated, to answer the one question
+    that actually matters about them: is money stranded in there, or were they
+    already broke? An account drained to nothing failing to open a live table
+    is a non-event -- it was out anyway. A funded one failing is money the
+    tournament cannot move, which needs saying loudly.
+
+    Returns a balance or None if it could not be read (never 0 for 'unknown' --
+    the caller has to be able to tell those apart)."""
+    try:
+        res = m.http_check_account_balance(username, password,
+                                           site_url=site_url, proxy=proxy)
+    except Exception:
+        return None
+    return res.get("balance") if res.get("ok") else None
+
+
 def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                    table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
                    progress=None, dry_run=False, login_spacing=0,
@@ -882,38 +969,51 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
 
             progress(f"\n-- group {gi}/{len(groups)}: "
                      + ", ".join(a["username"] for a in group))
-            seats = [Seat(a["username"], a["password"], site_url=site_url,
-                          proxy=proxies[(i + gi) % len(proxies)])
-                     for i, a in enumerate(group)]
+            ready, failures = seat_accounts(
+                group, gi, site_url, proxies, login_spacing=login_spacing,
+                progress=progress)
 
             try:
-                # Open every seat concurrently, but space the LOGIN starts: a
-                # burst of ~10 simultaneous logins from one IP is exactly what
-                # trips the site's bare-403 rate block.
-                futs = []
-                for s in seats:
-                    futs.append((s, s.open_async(
-                        progress=lambda msg: progress(f"   {msg}"))))
-                    if login_spacing:
-                        time.sleep(login_spacing)
-
-                ready = []
-                for s, f in futs:
-                    try:
-                        f.result(timeout=600)
-                        ready.append(s)
-                    except Exception as exc:
-                        s.error = str(exc).splitlines()[0][:200]
-                        progress(f"   XX {s.username} could not be seated: "
-                                 f"{s.error}")
+                # An account that never seated must NOT just vanish from the
+                # bracket -- that would silently leave its balance outside the
+                # tournament while a winner is declared elsewhere. Read what it
+                # is actually holding (cheap, no browser) and say so.
+                for f in failures:
+                    bal = probe_balance(f["username"], f["password"], site_url,
+                                        proxies[gi % len(proxies)])
+                    if bal is not None and bal < table_min:
+                        progress(f"   .. {f['username']} could not open a table "
+                                 f"but holds {bal} (< table min {table_min}) -- "
+                                 "already out, nothing stranded")
+                        note = ("could not be seated; was already below the "
+                                "table minimum, so nothing is stranded")
+                    else:
+                        held = "an unreadable balance" if bal is None else str(bal)
+                        progress(f"   XX {f['username']} could not open a table "
+                                 f"after {SEAT_ATTEMPTS} tries and holds {held} "
+                                 "-- that money stays put")
                         summary["problems"].append(
-                            {"account": s.username, "stage": stage,
-                             "problem": f"seating failed: {s.error}"})
+                            {"account": f["username"], "stage": stage,
+                             "balance": bal,
+                             "problem": f"could not be seated after "
+                                        f"{SEAT_ATTEMPTS} tries ({f['error']}); "
+                                        f"holds {held} that the tournament "
+                                        f"could not move"})
+                        note = "could not be seated; balance left stranded"
+                    if on_account:
+                        on_account(f["username"], bal, "eliminated", stage)
+                    summary["eliminated"].append(
+                        {"account": f["username"], "stage": stage,
+                         "balance": bal, "note": note})
+
+                seated = [a for a in group
+                          if a["username"] in {s.username for s in ready}]
 
                 if len(ready) < 2:
                     progress("   XX fewer than two seats came up -- skipping "
-                             "this group, its accounts stay in the bracket")
-                    next_round.extend(group)
+                             "this group, its seated accounts stay in the "
+                             "bracket")
+                    next_round.extend(seated)
                     continue
 
                 # Stake sizing depends entirely on the rail. Check it against
@@ -926,7 +1026,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                         {"stage": stage, "group": gi,
                          "problem": f"chip rail check failed: {msg}"})
                     progress("   XX refusing to bet in this group")
-                    next_round.extend(group)
+                    next_round.extend(seated)
                     continue
 
                 winner, history, still_alive = play_group(
@@ -989,7 +1089,9 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                          for s in advancing)
                              + " play on next stage")
             finally:
-                for s in seats:
+                # Seats that never came up were already closed inside
+                # seat_accounts(); these are the ones that played.
+                for s in ready:
                     s.close()
 
             save()

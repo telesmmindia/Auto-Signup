@@ -803,9 +803,40 @@ has genuinely stopped helping:
   that would report a winner who doesn't hold the money. A run that can't finish
   sets `summary["unfinished"]` and a problem naming exactly who holds what.
 
+### Seating: retried, and never a silent drop
+
+`seat_accounts()` opens a browser + live table per account, retrying failures
+`SEAT_ATTEMPTS` (3) times with `SEAT_RETRY_WAIT_SECS` (30s) between. Each retry
+builds a **brand-new** browser and logs in again — the observed failure ("could
+not open the 'Baccarat A' table") leaves a half-loaded frame that nothing short
+of a fresh context recovers — and lands on the **next proxy** in the rotation,
+since a rate-limited exit IP is one way this fails. A failed seat is closed
+before the retry, or each attempt leaks a Chromium and a pproxy.
+
+**An account that never seats must not vanish from the bracket.** It used to be
+appended to `problems` and then simply not carried forward — so a winner could be
+declared while a funded account's balance sat outside the tournament entirely,
+the same silent-stranding bug as the `not_placed` one above. Now `probe_balance()`
+reads what it's actually holding over HTTP (no browser, so it works even though
+the table won't open) and the run says which case it is:
+- **below the table minimum** → a clean elimination with a "nothing is stranded"
+  note, and **no** entry in `problems`. It was already out.
+- **funded, or unreadable** → a `problems` entry naming the exact amount the
+  tournament could not move, plus an `eliminated` record carrying that balance.
+
+Seen live 2026-08-11 22:34: three of five accounts failed to seat, and all three
+were the ones already drained to ~0 by the previous run. That is consistent with
+the site refusing to open a live table for an account with no real balance, but
+it has **not** been confirmed — `probe_balance()` is what will settle it, since
+the log now prints each unseated account's actual balance.
+
 `run_tournament` writes `summary` to `state_path` after every group, so a crash
 still leaves a record of who held what. `login_spacing` staggers the seat opens —
 ~10 simultaneous logins from one IP is exactly what trips the 403 block.
+
+`tournament_runner.py` passes `range_name=`/`values=` to every `ws.update()`;
+gspread reversed that argument order, and the positional form warns and will
+eventually break.
 
 ### Discovery scripts (all read-only, none place a bet)
 
