@@ -138,6 +138,10 @@ MAX_STALLED_HANDS = 10
 # in again, which is the only thing that clears a half-loaded table.
 SEAT_ATTEMPTS = 3
 SEAT_RETRY_WAIT_SECS = 30
+# When the failure is the site's login RATE BLOCK rather than anything about
+# the account, 30s is useless: the block runs ~20 minutes and holds regardless
+# of pacing (CLAUDE.md, balance_checker findings). Wait a real interval instead.
+SEAT_BLOCK_WAIT_SECS = 300
 
 # Stages in a row that eliminate nobody before the whole tournament gives up.
 # A stage replay re-seats every account in a fresh browser with a fresh login,
@@ -843,15 +847,11 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
     ready = []
     pending = list(group)
     last_error = {}
+    seen = {}          # username -> (state, balance, detail) from diagnose
 
     for attempt in range(1, max(1, attempts) + 1):
         if not pending:
             break
-        if attempt > 1:
-            progress(f"   .. {len(pending)} seat(s) did not come up -- waiting "
-                     f"{SEAT_RETRY_WAIT_SECS}s and rebuilding them "
-                     f"(attempt {attempt}/{attempts})")
-            time.sleep(SEAT_RETRY_WAIT_SECS)
 
         seats = [Seat(a["username"], a["password"], site_url=site_url,
                       proxy=proxies[(i + gi + attempt) % len(proxies)])
@@ -881,29 +881,78 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
                 still.append(acct)
         pending = still
 
-    failures = [{"username": a["username"], "password": a["password"],
-                 "error": last_error.get(a["username"], "unknown")}
-                for a in pending]
+        if not pending or attempt >= max(1, attempts):
+            break
+
+        # Before burning another round of REAL browser logins, ask the site
+        # over HTTP what is actually wrong. A browser seat costs ~40s and a
+        # login that counts against the very rate limit that may be causing
+        # this; one HTTP login costs ~3s and says whether retrying can help.
+        for a in pending:
+            seen[a["username"]] = diagnose_account(
+                a["username"], a["password"], site_url,
+                proxies[gi % len(proxies)])
+        kinds = {st for st, _, _ in seen.values() if st}
+
+        if "blocked" in kinds:
+            # Documented live: once tripped, the login block lasts ~20 minutes
+            # and holds regardless of pacing, so a 30s retry is pure waste.
+            progress(f"   .. the site is rate-limiting logins (the edge "
+                     f"answered, not the app) -- waiting "
+                     f"{SEAT_BLOCK_WAIT_SECS}s before trying again; retrying "
+                     "sooner only extends the block")
+            time.sleep(SEAT_BLOCK_WAIT_SECS)
+        elif kinds == {"rejected"}:
+            progress("   XX the site refused these credentials outright, so "
+                     "another try cannot help -- not retrying them")
+            break
+        else:
+            progress(f"   .. {len(pending)} seat(s) did not come up -- waiting "
+                     f"{SEAT_RETRY_WAIT_SECS}s and rebuilding them "
+                     f"(attempt {attempt + 1}/{attempts})")
+            time.sleep(SEAT_RETRY_WAIT_SECS)
+
+    failures = []
+    for a in pending:
+        state, bal, detail = seen.get(a["username"]) or diagnose_account(
+            a["username"], a["password"], site_url,
+            proxies[gi % len(proxies)])
+        failures.append({"username": a["username"], "password": a["password"],
+                         "error": last_error.get(a["username"], "unknown"),
+                         "state": state, "balance": bal, "detail": detail})
     return ready, failures
 
 
-def probe_balance(username, password, site_url=None, proxy=None):
-    """Read one account's balance over HTTP, with no browser at all.
+def diagnose_account(username, password, site_url=None, proxy=None):
+    """Ask the site directly what is wrong with an account, over HTTP.
 
-    Used only on accounts that could NOT be seated, to answer the one question
-    that actually matters about them: is money stranded in there, or were they
-    already broke? An account drained to nothing failing to open a live table
-    is a non-event -- it was out anyway. A funded one failing is money the
-    tournament cannot move, which needs saying loudly.
+    A browser seat costs ~40s and a real login; this costs ~3s and answers the
+    question that decides everything else. Returns (state, balance, detail):
 
-    Returns a balance or None if it could not be read (never 0 for 'unknown' --
-    the caller has to be able to tell those apart)."""
+      "ok"       credentials work -- balance is the real figure. Whatever went
+                 wrong was the table/browser path, so a retry can help.
+      "blocked"  the edge/WAF answered, not the app (bare 403 / non-JSON, i.e.
+                 http_check_account_balance's infra_block). Nothing about this
+                 account was actually checked, and retrying faster only extends
+                 the block -- see CLAUDE.md's login rate-limit findings.
+      "rejected" the app answered and refused (wrong password, locked account).
+                 A retry cannot help; the credentials need fixing.
+      "unknown"  could not tell.
+
+    The browser's own login timeout cannot tell "rejected" from "blocked" --
+    it says "credentials rejected or the login was throttled" for both, which
+    is exactly the ambiguity this resolves."""
     try:
         res = m.http_check_account_balance(username, password,
                                            site_url=site_url, proxy=proxy)
-    except Exception:
-        return None
-    return res.get("balance") if res.get("ok") else None
+    except Exception as exc:
+        return "unknown", None, str(exc).splitlines()[0][:200]
+    detail = "; ".join(str(x) for x in (res.get("messages") or []))[:200]
+    if res.get("ok"):
+        return "ok", res.get("balance"), detail or "credentials fine"
+    if res.get("infra_block"):
+        return "blocked", None, detail or "edge/WAF block, the app never saw it"
+    return "rejected", None, detail or "the site refused the login"
 
 
 def run_tournament(roster, site_url=None, proxies=None, group_size=10,
@@ -976,12 +1025,43 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
             try:
                 # An account that never seated must NOT just vanish from the
                 # bracket -- that would silently leave its balance outside the
-                # tournament while a winner is declared elsewhere. Read what it
-                # is actually holding (cheap, no browser) and say so.
+                # tournament while a winner is declared elsewhere. What to do
+                # with it depends entirely on WHY it failed, which
+                # diagnose_account() has already established over HTTP.
+                blocked = []
                 for f in failures:
-                    bal = probe_balance(f["username"], f["password"], site_url,
-                                        proxies[gi % len(proxies)])
-                    if bal is not None and bal < table_min:
+                    state, bal = f["state"], f["balance"]
+
+                    if state == "blocked":
+                        # Nothing about this account was actually checked, so it
+                        # is NOT eliminated and its money is NOT stranded -- the
+                        # run simply could not reach the site. It goes back in
+                        # the bracket and the next stage tries again.
+                        progress(f"   XX {f['username']}: the site is rate-"
+                                 "limiting logins, so it was never really "
+                                 "checked -- it stays in the bracket")
+                        summary["problems"].append(
+                            {"account": f["username"], "stage": stage,
+                             "problem": "login rate-limited (the edge blocked "
+                                        "it, the site never saw it), so this "
+                                        "account was never actually tried. "
+                                        "Nothing is wrong with it; re-run once "
+                                        "the block clears (~20 min)."})
+                        blocked.append(f["username"])
+                        continue
+
+                    if state == "rejected":
+                        progress(f"   XX {f['username']}: the site refused "
+                                 f"these credentials ({f['detail']}) -- check "
+                                 "the username/password")
+                        summary["problems"].append(
+                            {"account": f["username"], "stage": stage,
+                             "problem": f"the site refused this login: "
+                                        f"{f['detail']}. Credentials look "
+                                        f"wrong; whatever it holds could not "
+                                        f"be reached."})
+                        note = "could not log in; credentials refused"
+                    elif bal is not None and bal < table_min:
                         progress(f"   .. {f['username']} could not open a table "
                                  f"but holds {bal} (< table min {table_min}) -- "
                                  "already out, nothing stranded")
@@ -1000,14 +1080,15 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         f"holds {held} that the tournament "
                                         f"could not move"})
                         note = "could not be seated; balance left stranded"
+
                     if on_account:
                         on_account(f["username"], bal, "eliminated", stage)
                     summary["eliminated"].append(
                         {"account": f["username"], "stage": stage,
                          "balance": bal, "note": note})
 
-                seated = [a for a in group
-                          if a["username"] in {s.username for s in ready}]
+                keep = {s.username for s in ready} | set(blocked)
+                seated = [a for a in group if a["username"] in keep]
 
                 if len(ready) < 2:
                     progress("   XX fewer than two seats came up -- skipping "
@@ -1078,6 +1159,12 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                     row["balance"] = s.balance
                     next_round.append(row)
 
+                # Rate-limited accounts were never actually tried, so they keep
+                # their place in the bracket for the next stage to retry.
+                for name in blocked:
+                    next_round.append(dict(next(a for a in group
+                                                if a["username"] == name)))
+
                 if winner:
                     stage_rec["winners"].append(
                         {"account": winner.username, "balance": winner.balance})
@@ -1138,14 +1225,15 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
         summary["unfinished"] = [
             {"account": c["username"], "balance": c.get("balance")}
             for c in contenders]
+        held = ", ".join(
+            f"{c['username']} ("
+            + ("balance never read" if c.get("balance") is None
+               else str(c["balance"])) + ")"
+            for c in contenders)
         summary["problems"].append(
-            {"problem": "tournament ended with no single winner; money is "
-                        "still split across "
-                        + ", ".join(f"{c['username']} ({c.get('balance')})"
-                                    for c in contenders)})
-        progress("\nXX NO WINNER -- the pot is still split across "
-                 + ", ".join(f"{c['username']} ({c.get('balance')})"
-                             for c in contenders))
+            {"problem": f"tournament ended with no single winner; still to be "
+                        f"settled between {held}"})
+        progress(f"\nXX NO WINNER -- still to be settled between {held}")
     summary["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()
     return summary
