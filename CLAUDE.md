@@ -859,6 +859,18 @@ still leaves a record of who held what. `login_spacing` staggers the seat opens 
 gspread reversed that argument order, and the positional form warns and will
 eventually break.
 
+**`tournament_runner.py --env <file> --check`** runs `diagnose_account()` over
+the whole roster (~3s each, `TOURNAMENT_CHECK_SPACING` = 5s apart) and prints
+`ok`/`blocked`/`rejected`/`unknown` per account. No browser, no bets. Run it
+whenever a tournament reports "login did not complete" — that message cannot
+tell a wrong password from a rate block, and finding out via browser seats costs
+~40s each *plus* a real login against the very limit that may be the cause. The
+first `blocked` stops the sweep (everything after it would be measuring the
+block, and each attempt extends it). Verified against khelofun 2026-08-14: its
+`/login` + `/api2/v2/getBalance` answer exactly like cricmatch's, including a
+JSON `"Invalid Username or Password"` for a bad account, so the diagnosis is
+trustworthy on both sites.
+
 ### Discovery scripts (all read-only, none place a bet)
 
 Run them, read the dump, *then* write selectors — same precedent as

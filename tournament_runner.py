@@ -85,6 +85,10 @@ GROUP_SIZE = max(2, int(os.environ.get("TOURNAMENT_GROUP_SIZE", "10")))
 # simultaneous logins from one IP is what trips the site's bare-403 block --
 # see CLAUDE.md's balance_checker findings.
 LOGIN_SPACING = float(os.environ.get("TOURNAMENT_LOGIN_SPACING", "20"))
+# Seconds between the HTTP logins --check makes. These are cheap (~3s each,
+# no browser) but they still count against the same POST /login rate rule, so
+# they are paced too -- just far tighter than a browser seat needs to be.
+CHECK_SPACING = float(os.environ.get("TOURNAMENT_CHECK_SPACING", "5"))
 TABLE_MIN = int(os.environ.get("TOURNAMENT_TABLE_MIN", str(T.DEFAULT_TABLE_MIN)))
 TABLE_MAX = int(os.environ.get("TOURNAMENT_TABLE_MAX", str(T.DEFAULT_TABLE_MAX)))
 
@@ -183,6 +187,9 @@ def main_():
     ap.add_argument("--url", default=None)
     ap.add_argument("--yes", action="store_true",
                     help="skip the confirmation prompt")
+    ap.add_argument("--check", action="store_true",
+                    help="just ask the site about every account's login over "
+                         "HTTP and print what it says -- no browsers, no bets")
     ap.add_argument("--watch", action="store_true",
                     help=f"run as a service, starting a tournament whenever "
                          f"{CONTROL_CELL} in the sheet is set to START")
@@ -208,6 +215,10 @@ def main_():
 
     if args.limit:
         roster = roster[:args.limit]
+
+    if args.check:
+        return check_roster(roster, site_url)
+
     if len(roster) < 2:
         raise SystemExit("Need at least two accounts to run a tournament.")
 
@@ -223,6 +234,53 @@ def main_():
         preflight(roster, site_url, args)
         summary = play(ws, roster, site_url, args)
     return summary
+
+
+def check_roster(roster, site_url):
+    """Ask the site about every account's login over HTTP and print the answer.
+
+    A tournament that seats nobody reports "login did not complete", which
+    cannot tell a wrong password from a rate block -- and finding out the slow
+    way costs ~40s of browser per account plus a real login against the very
+    rate limit that may be the problem. This is the same ~3s HTTP check
+    seat_accounts() uses between retries (tournament.diagnose_account), run
+    over the whole roster before committing to anything. It places no bets and
+    opens no browser."""
+    proxies = current_proxies()
+    log("")
+    log(f"  site   : {site_url}")
+    log(f"  proxies: {len(proxies)} "
+        f"({'direct' if proxies == [None] else 'configured'})")
+    log(f"  checking {len(roster)} account(s), {CHECK_SPACING}s apart")
+    log("")
+
+    counts = {}
+    for i, acct in enumerate(roster):
+        if i:
+            time.sleep(CHECK_SPACING)
+        state, bal, detail = T.diagnose_account(
+            acct["username"], acct["password"], site_url,
+            proxies[i % len(proxies)])
+        counts[state] = counts.get(state, 0) + 1
+        held = "" if bal is None else f"  balance {bal}"
+        log(f"  {acct['username']:<24} {state:<9}{held:<18} {detail}")
+        if state == "blocked":
+            # Everything after this would be measuring the block, not the
+            # accounts -- and each further attempt extends it.
+            log("")
+            log("  The site is rate-limiting logins (its edge answered, not "
+                "the app), so nothing here was really checked. Stopping -- "
+                "wait ~20 minutes and run this again.")
+            return counts
+    log("")
+    log("  " + ", ".join(f"{n} {state}" for state, n in sorted(counts.items())))
+    if counts.get("rejected"):
+        log("  'rejected' means the site itself refused the username or "
+            "password -- fix those rows in the sheet; retrying cannot help.")
+    if counts.get("ok") == len(roster):
+        log("  Every login works, so a seating failure is the table/browser "
+            "path, not the accounts.")
+    return counts
 
 
 def preflight(roster, site_url, args):
