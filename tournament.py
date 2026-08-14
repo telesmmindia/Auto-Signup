@@ -208,25 +208,62 @@ def _pick_chip(frame, value, timeout_secs=5):
     return m.read_chips(frame).get("selected") == value
 
 
+# A frame this many consecutive polls in a row has stopped answering at all.
+# The real windows on khelofun's Baccarat A cycle every ~40s (probed live
+# 2026-08-14: open ~10-20s, then closed), so at WINDOW_POLL_SECS this is a few
+# seconds of total silence -- far too short to be a normal closed phase.
+DEAD_FRAME_POLLS = 25
+
+
 def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
-    """Block until a FRESH betting window opens, and return True.
+    """Block until a FRESH betting window opens. Returns True, False or "dead".
 
     Waits for a closed->open edge rather than just "is it open now": joining a
     window already half elapsed leaves too little time to select chips and get
-    every click down, and a stake that only half lands is an unhedged bet."""
+    every click down, and a stake that only half lands is an unhedged bet.
+
+    "dead" means the frame stopped answering -- the tab is gone, the iframe was
+    detached, or the provider dropped the session. This is NOT the same as a
+    closed window and must not be reported as one. main._betting_open() answers
+    False for both (it swallows its own exceptions), which cost a real run 52
+    minutes on 2026-08-14: ten hands each waited the full four minutes and
+    reported "no betting window opened in time" while the truth was that every
+    seat had lost its table. Waiting cannot fix a dead frame -- only a fresh
+    seat can -- so say so immediately instead of burning the deadline."""
     deadline = time.time() + wait_secs
     saw_closed = False
+    silent = 0
     while time.time() < deadline:
         try:
             is_open = m._betting_open(frame, game)
+            if _frame_gone(frame):
+                silent += 1
+            else:
+                silent = 0
         except Exception:
-            is_open = False
+            is_open, silent = False, silent + 1
+        if silent >= DEAD_FRAME_POLLS:
+            return "dead"
         if not is_open:
             saw_closed = True
         elif saw_closed:
             return True
         time.sleep(WINDOW_POLL_SECS)
     return False
+
+
+def _frame_gone(frame):
+    """True when `frame` is no longer a live, attached frame we can read.
+
+    Checked every poll because _betting_open() cannot raise -- it catches its
+    own errors and returns False, which is indistinguishable from a perfectly
+    healthy table between rounds."""
+    try:
+        if frame.is_detached():
+            return True
+        return frame.page.is_closed()
+    except Exception:
+        return True
 
 
 def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT):
@@ -535,13 +572,24 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     seats = [s for L in live for s in (L["a"], L["b"])]
     wfuts = [s.call(wait_for_window_open, s.frame) for s in seats]
     opened = [_resolve(f, WINDOW_WAIT_SECS + 30, False) for f in wfuts]
-    if not all(opened):
+    if not all(o is True for o in opened):
+        # Name the real cause. A seat whose frame died needs a NEW seat, which
+        # only a stage replay can give it -- replaying the hand against the
+        # same dead frame just waits out the deadline again (52 minutes of
+        # exactly that on 2026-08-14).
+        dead = [s.username for s, o in zip(seats, opened) if o == "dead"]
+        if dead:
+            detail = ("lost the connection to the live table ("
+                      + ", ".join(dead) + ") — no money was staked; "
+                      "these seats need reopening, waiting cannot fix them")
+        else:
+            detail = "no betting window opened in time — no money was staked"
         for L in live:
             results.append({"pair": (L["a"].username, L["b"].username),
                             "stake": L["stake"], "winner": None, "loser": None,
-                            "status": "not_placed",
-                            "message": "no betting window opened in time — "
-                                       "no money was staked"})
+                            "status": "table_lost" if dead else "not_placed",
+                            "dead_seats": dead,
+                            "message": detail})
         return results
 
     # --- place every stake concurrently -------------------------------
@@ -800,6 +848,19 @@ def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
             break
 
         alive = survivors
+
+        # A dead table is the one failure replaying cannot mend: the seat needs
+        # a fresh browser and a fresh login, which only a stage replay gives it.
+        # End the group now so that happens in minutes instead of after ten
+        # futile replays. Nobody is eliminated -- run_tournament carries these
+        # seats forward with their real balances.
+        lost = sorted({u for res in results for u in (res.get("dead_seats") or [])})
+        if lost:
+            stuck = ("lost the live table for " + ", ".join(lost)
+                     + " -- these seats have to be reopened, which replaying "
+                       "the hand cannot do")
+            progress(f"   XX {stuck}")
+            break
 
         if knocked_out:
             stalled = 0
