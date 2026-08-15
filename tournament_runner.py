@@ -15,7 +15,7 @@ scoreboard coming out.
 
 Sheet layout (row 1 = header):
 
-    A: USERNAME | B: PASSWORD | C: BALANCE | D: STAGE OUT | E: RESULT
+    A: USERNAME | B: PASSWORD | C: START BALANCE | D: BALANCE | E: STAGE OUT | F: RESULT
 
 USERNAME/PASSWORD are yours to fill. The script writes the other three as it
 goes: BALANCE is that account's balance when it left the bracket, STAGE OUT is
@@ -92,7 +92,7 @@ CHECK_SPACING = float(os.environ.get("TOURNAMENT_CHECK_SPACING", "5"))
 TABLE_MIN = int(os.environ.get("TOURNAMENT_TABLE_MIN", str(T.DEFAULT_TABLE_MIN)))
 TABLE_MAX = int(os.environ.get("TOURNAMENT_TABLE_MAX", str(T.DEFAULT_TABLE_MAX)))
 
-HEADER = ["USERNAME", "PASSWORD", "BALANCE", "STAGE OUT", "RESULT"]
+HEADER = ["USERNAME", "PASSWORD", "START BALANCE", "BALANCE", "STAGE OUT", "RESULT"]
 
 
 def log(msg=""):
@@ -308,24 +308,35 @@ def play(ws, roster, site_url, args, on_stage=None):
     by_user = {r["username"]: r for r in roster}
     pending = []
 
-    def on_account(username, balance, result, stage):
+    def on_account(username, balance, result, stage, start_balance=None):
         """Buffer per-account outcomes; flushed to the sheet after each group."""
-        pending.append((username, balance, stage, result))
+        pending.append((username, balance, stage, result, start_balance))
 
     def flush():
         if ws is None or not pending:
             return
         while pending:
-            username, balance, stage, result = pending.pop(0)
+            entry = pending.pop(0)
+            username, balance, stage, result = entry[0], entry[1], entry[2], entry[3]
+            start_balance = entry[4] if len(entry) > 4 else None
             row = by_user.get(username, {}).get("_row")
             if not row:
                 continue
             try:
-                ws.update(range_name=f"C{row}:E{row}",
+                ws.update(range_name=f"D{row}:F{row}",
                           values=[[balance if balance is not None else "",
                                    stage, result]])
             except Exception as exc:
                 log(f"   (could not write row {row}: {exc})")
+            # Write start balance only once (when it first appears)
+            if start_balance is not None:
+                try:
+                    existing = ws.cell(row, 3).value  # column C = START BALANCE
+                    if not existing:
+                        ws.update(range_name=f"C{row}",
+                                  values=[[start_balance]])
+                except Exception:
+                    pass
 
     def progress(msg):
         log(msg)
@@ -365,7 +376,7 @@ def play(ws, roster, site_url, args, on_stage=None):
         row = by_user.get(summary["winner"], {}).get("_row")
         if row:
             try:
-                ws.update(range_name=f"E{row}", values=[["WINNER"]])
+                ws.update(range_name=f"F{row}", values=[["WINNER"]])
             except Exception:
                 pass
     return summary
@@ -387,15 +398,15 @@ def play(ws, roster, site_url, args, on_stage=None):
 # spend the balances in it.
 # ---------------------------------------------------------------------------
 
-CONTROL_CELL = os.environ.get("TOURNAMENT_CONTROL_CELL", "H1")
-CONTROL_LABEL_CELL = os.environ.get("TOURNAMENT_CONTROL_LABEL_CELL", "G1")
+CONTROL_CELL = os.environ.get("TOURNAMENT_CONTROL_CELL", "I1")
+CONTROL_LABEL_CELL = os.environ.get("TOURNAMENT_CONTROL_LABEL_CELL", "H1")
 POLL_SECONDS = float(os.environ.get("TOURNAMENT_POLL_SECONDS", "20"))
 
 
 def ensure_header(ws):
     try:
         if ws.row_values(1)[:1] != HEADER[:1]:
-            ws.update(range_name="A1:E1", values=[HEADER])
+            ws.update(range_name="A1:F1", values=[HEADER])
     except Exception:
         pass
 
@@ -416,14 +427,14 @@ def write_control(ws, text):
 
 
 def clear_results(ws, roster):
-    """Blank C:E for every entrant so a new run does not show stale results."""
+    """Blank D:F for every entrant so a new run does not show stale results."""
     if not roster:
         return
     rows = [r["_row"] for r in roster if r.get("_row")]
     if not rows:
         return
     try:
-        ws.update(range_name=f"C{min(rows)}:E{max(rows)}",
+        ws.update(range_name=f"D{min(rows)}:F{max(rows)}",
                   values=[["", "", ""] for _ in range(min(rows), max(rows) + 1)])
     except Exception as exc:
         log(f"(could not clear old results: {exc})")

@@ -401,6 +401,7 @@ class Seat:
 
     table_id: str = None
     balance: int = None
+    _start_balance: int = field(default=None, repr=False)
     error: str = None
 
     def call(self, fn, *args, **kwargs):
@@ -420,6 +421,7 @@ class Seat:
             game=BACCARAT)
         self.table_id = m._table_id(self.game_page)
         self.balance = m.read_game_balance(self.frame)
+        self._start_balance = self.balance
         return self
 
     def open_async(self, progress=None):
@@ -510,8 +512,12 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     futs = [(p, p[0].call(m.read_game_balance, p[0].frame),
                 p[1].call(m.read_game_balance, p[1].frame)) for p in pairs]
     for (a, b), fa, fb in futs:
-        a.balance = _resolve(fa, 30, a.balance)
-        b.balance = _resolve(fb, 30, b.balance)
+        pre_a = _resolve(fa, 30, a.balance)
+        pre_b = _resolve(fb, 30, b.balance)
+        if pre_a is None or pre_b is None:
+            progress(f"   ⚠️ PRE-HAND BALANCE READ FAILED: "
+                     f"{a.username}={pre_a}, {b.username}={pre_b}")
+        a.balance, b.balance = pre_a, pre_b
 
     # --- same table? --------------------------------------------------
     for a, b in pairs:
@@ -662,6 +668,27 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         post_a = _resolve(fa, 30)
         post_b = _resolve(fb, 30)
         if post_a is None or post_b is None:
+            # Diagnose WHY the read failed: frame dead vs element missing
+            def _frame_status(fr, label):
+                try:
+                    if fr.is_detached():
+                        return f"{label}: DETACHED"
+                    if fr.page.is_closed():
+                        return f"{label}: PAGE CLOSED"
+                    # Frame alive but element might be missing
+                    has_bal = fr.evaluate(
+                        '() => !!document.querySelector'
+                        '(\'[data-role="balance-label-value"]\')')
+                    return (f"{label}: alive, balance element="
+                            f"{'found' if has_bal else 'MISSING'}")
+                except Exception as exc:
+                    return f"{label}: EXCEPTION ({exc})"
+            progress(f"   ⚠️ BALANCE READ FAILED after settle: "
+                     f"{a.username} pre={L['pre_a']} post={post_a}, "
+                     f"{b.username} pre={L['pre_b']} post={post_b} | "
+                     f"{_frame_status(a.frame, a.username)} | "
+                     f"{_frame_status(b.frame, b.username)} | "
+                     f"NOTE: balances NOT updated, keeping pre-hand values")
             results.append({"pair": (a.username, b.username), "stake": stake,
                             "winner": None, "loser": None, "status": "error",
                             "message": "hand ran but a balance could not be "
@@ -669,6 +696,8 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
             continue
         a.balance, b.balance = post_a, post_b
         d_a, d_b = post_a - L["pre_a"], post_b - L["pre_b"]
+        progress(f"   📊 {a.username} {L['pre_a']}→{post_a} ({d_a:+}), "
+                 f"{b.username} {L['pre_b']}→{post_b} ({d_b:+})")
 
         # A hand that went down mismatched is real, settled money, but the two
         # sides were not covering each other -- so the result says nothing
@@ -1143,7 +1172,8 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                         note = "could not be seated; balance left stranded"
 
                     if on_account:
-                        on_account(f["username"], bal, "eliminated", stage)
+                        on_account(f["username"], bal, "eliminated", stage,
+                                   start_balance=None)
                     summary["eliminated"].append(
                         {"account": f["username"], "stage": stage,
                          "balance": bal, "note": note})
@@ -1208,7 +1238,8 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                               else "playing on" if keeps_playing
                               else "eliminated")
                     if on_account:
-                        on_account(s.username, s.balance, result, stage)
+                        on_account(s.username, s.balance, result, stage,
+                                   start_balance=s._start_balance)
                     if not keeps_playing:
                         summary["eliminated"].append(
                             {"account": s.username, "stage": stage,
