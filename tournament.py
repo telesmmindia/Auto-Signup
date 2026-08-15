@@ -215,7 +215,8 @@ def _pick_chip(frame, value, timeout_secs=5):
 DEAD_FRAME_POLLS = 25
 
 
-def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
+def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
+                         progress=None):
     """Block until a FRESH betting window opens. Returns True, False or "dead".
 
     Waits for a closed->open edge rather than just "is it open now": joining a
@@ -230,6 +231,7 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
     reported "no betting window opened in time" while the truth was that every
     seat had lost its table. Waiting cannot fix a dead frame -- only a fresh
     seat can -- so say so immediately instead of burning the deadline."""
+    progress = progress or (lambda _s: None)
     deadline = time.time() + wait_secs
     saw_closed = False
     silent = 0
@@ -590,7 +592,8 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     # --- wait for a fresh window, on every seat at once ---------------
     progress("   ⏳ waiting for a fresh betting window…")
     seats = [s for L in live for s in (L["a"], L["b"])]
-    wfuts = [s.call(wait_for_window_open, s.frame) for s in seats]
+    wfuts = [s.call(wait_for_window_open, s.frame, BACCARAT,
+                     progress=progress) for s in seats]
     opened = [_resolve(f, WINDOW_WAIT_SECS + 30, False) for f in wfuts]
     if not all(o is True for o in opened):
         # Name the real cause. A seat whose frame died needs a NEW seat, which
