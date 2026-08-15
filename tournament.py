@@ -233,6 +233,7 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
     deadline = time.time() + wait_secs
     saw_closed = False
     silent = 0
+    polls = 0
     while time.time() < deadline:
         try:
             is_open = m._betting_open(frame, game)
@@ -242,6 +243,18 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
                 silent = 0
         except Exception:
             is_open, silent = False, silent + 1
+        polls += 1
+        # Log every 30 polls (~12s) to diagnose without flooding
+        if polls % 30 == 0:
+            try:
+                timer = frame.evaluate("""() => {
+                    const t = document.querySelector('[data-role="circle-timer"]');
+                    return t ? {h: t.getBoundingClientRect().height, vis: t.offsetParent !== null} : null;
+                }""")
+            except Exception:
+                timer = "eval_failed"
+            progress(f"   🔍 window poll #{polls}: is_open={is_open} saw_closed={saw_closed} "
+                     f"timer={timer} silent={silent}")
         if silent >= DEAD_FRAME_POLLS:
             return "dead"
         if not is_open:
@@ -249,6 +262,7 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS):
         elif saw_closed:
             return True
         time.sleep(WINDOW_POLL_SECS)
+    progress(f"   ⏰ window timeout after {polls} polls, is_open={is_open}")
     return False
 
 
