@@ -788,8 +788,47 @@ accounts. Nothing had gone wrong with the money; the code treated "nothing
 happened" the same as "something broke". **Don't drop an account on a non-`ok`
 status again.**
 
+**`not_placed` vs `no_window` — replay one, re-seat the other (2026-08-17).** A
+khelofun run played 150 hands over **2h25m and staked nothing**: every hand
+timed out in `wait_for_window_open()` with `timer=None`, i.e.
+`[data-role="circle-timer"]` was never present, so `_betting_open()` answered
+False forever. Seating had succeeded and the chip-rail check had passed, so the
+frame was the real game frame — only the phase signal was missing. The give-up
+ladder worked exactly as designed (10 stalled hands × 3 stages) but each hand
+first burned the full `WINDOW_WAIT_SECS`, which is where the 2.5 hours went. No
+money was lost; nothing was ever staked.
+
+So `wait_for_window_open()` now returns a fourth value, **`"blind"`**: the frame
+answers every poll but the window never opened *once* in `wait_secs` — six full
+~40s table cycles at the default. A seat that misses one edge is unlucky and
+worth replaying; a seat that has never seen a window is on a table that is not
+dealing to it, and only a fresh seat can fix that. `blind` seats therefore ride
+the same `dead_seats` channel as a dead frame and end the group immediately
+(status `no_window`), turning ~145 minutes of futile replay into ~4. Plain
+`False` now means only "windows are opening, we just missed the edge" — verified
+by test: a frame open at every poll (joined mid-window, no closed→open edge)
+returns `False`, **not** `blind`, so the new case can't over-trigger.
+
+Root cause of the missing timer is **not** established. Ruled out live
+2026-08-18 with `probe_baccarat_window.py`:
+- **Not a khelofun-wide selector problem** — `circle-timer` cycles normally
+  there (27 of 60 samples, ~20s open on a ~40s cycle).
+- **Not concurrency or box load** — four seats held simultaneously all saw
+  identical windows (27/60 each, same `table_id`, in lockstep).
+
+The one material difference is balance: the run's accounts each read **₹1,005**,
+and by 2026-08-18 the same accounts read **₹0–5**. The untested suspect is the
+bonus-balance launch path — an account with a bonus hits the CHOOSE CHIPS gate,
+and picking REAL CHIPS navigates the **same tab** to `vt_id=` instead of opening
+a new tab at `table_id=` (see `_dismiss_choose_chips_modal`). Whether that view
+renders a `circle-timer` has never been checked. **To confirm, run
+`probe_baccarat_window.py` against an account that still holds a bonus** — that
+is the missing experiment, and none of the drained accounts can supply it.
+
 Give-up ladder, widest to narrowest — each layer only fires when the one below
 has genuinely stopped helping:
+- A `blind`/`table_lost` seat ends the group at once — replaying cannot mend
+  either, only a fresh seat can.
 - `MAX_STALLED_HANDS` (10) consecutive hands knocking nobody out ends the group.
 - `MAX_GROUP_HANDS` (60) total hands ends it regardless.
 - A group that ends without a winner returns its still-funded seats, and
@@ -844,8 +883,15 @@ depends on the diagnosis:
 Two live failures drove this:
 - **2026-08-11 22:34** — three of five accounts failed to seat, and all three
   were the ones already drained to ~0 by the previous run. Consistent with the
-  site refusing a live table to an account with no real balance, but **not
-  confirmed**; the log now prints each unseated account's actual balance.
+  site refusing a live table to an account with no real balance.
+  **Now confirmed (2026-08-18)**: seating five khelofun accounts at once,
+  the only one at **₹0** (`sureshyadav2393`) failed with "could not open the
+  'Baccarat A' table" on both attempts, while every account holding **₹5**
+  seated fine. So it is not a rate block or bad luck — a zero-balance account
+  simply cannot open a live table. Login still succeeds, which is why this
+  looks like a table/browser fault rather than an account one. `diagnose_account`
+  already reads the balance first, so a below-minimum account is eliminated
+  cleanly instead of being retried three times.
 - **2026-08-12 02:59** — all three accounts failed at *login*, and the run
   marked every one "eliminated, balance left stranded" when in fact nothing had
   been checked at all. That report was actively misleading, which is what the
@@ -854,6 +900,14 @@ Two live failures drove this:
 `run_tournament` writes `summary` to `state_path` after every group, so a crash
 still leaves a record of who held what. `login_spacing` staggers the seat opens —
 ~10 simultaneous logins from one IP is exactly what trips the 403 block.
+
+⚠️ **Give every instance its own `TOURNAMENT_STATE_FILE`.** Both
+`.env.tournament.cricmatch` and `.env.tournament.khelofun` shipped pointing at a
+bare `tournament_state.json`, so whichever ran last silently erased the other's
+record — the exact clash `tournament@.service` warns about. Split 2026-08-18
+into `tournament_state.cricmatch.json` / `tournament_state.khelofun.json`
+(`tournament_state.*.json` is already gitignored). The env files are gitignored,
+so this lives on the server and has to be re-done on any fresh checkout.
 
 `tournament_runner.py` passes `range_name=`/`values=` to every `ws.update()`;
 gspread reversed that argument order, and the positional form warns and will
@@ -882,6 +936,16 @@ Run them, read the dump, *then* write selectors — same precedent as
 - `probe_login_balance.py` — captures the login/getBalance network calls.
 - `verify_stockmarket.py <user> <pass>` — drives `_open_table_for(game=STOCKMARKET)`
   end to end. **Run before any `/run`.**
+- `probe_baccarat_window.py <user> <pass> [--env F] [--seats N] [--secs N]` —
+  seats via `tournament.Seat` (the exact tournament path, proxies included) and
+  samples the live table once a second: whether `circle-timer` is present, the
+  chip rail's size and how much of it is clickable, TOTAL BET, and every
+  visible `data-role`/short text. Prints which roles and texts **come and go**
+  across phases, so a new betting-window detector can be written from a dump.
+  Run this whenever a run reports "no betting window opened in time".
+  `--seats N` with a comma-separated username list holds N tables at once,
+  which is the only way to reproduce tournament conditions — a single seat
+  cannot show a load-dependent fault. Places no bets.
 
 ⚠️ Memory: Janvi/Myank session drops are a temporary velocity throttle (rapid
 automated logins; ~30-60min cooldown). ali789/asha788 rarely trip it.

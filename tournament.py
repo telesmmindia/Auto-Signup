@@ -217,7 +217,8 @@ DEAD_FRAME_POLLS = 25
 
 def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
                          progress=None):
-    """Block until a FRESH betting window opens. Returns True, False or "dead".
+    """Block until a FRESH betting window opens. Returns True, False, "dead"
+    or "blind".
 
     Waits for a closed->open edge rather than just "is it open now": joining a
     window already half elapsed leaves too little time to select chips and get
@@ -230,10 +231,24 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
     minutes on 2026-08-14: ten hands each waited the full four minutes and
     reported "no betting window opened in time" while the truth was that every
     seat had lost its table. Waiting cannot fix a dead frame -- only a fresh
-    seat can -- so say so immediately instead of burning the deadline."""
+    seat can -- so say so immediately instead of burning the deadline.
+
+    "blind" is the third case, and it cost 2h25m on 2026-08-17: the frame
+    answers every poll perfectly happily, but the window NEVER opens -- not
+    once in `wait_secs`, which at the default is six full ~40s table cycles.
+    A seat that misses one edge is unlucky and worth replaying; a seat that
+    has never seen a window is on a table that is not dealing to it, and
+    replaying the same frame just waits out the deadline again. That khelofun
+    run replayed it 10 times a group across 3 stages -- 150 hands, nothing
+    staked, no money lost but 2.5 hours gone. Distinguishing the two is the
+    difference between giving up in minutes and giving up in hours.
+
+    False therefore now means only "windows are opening, we just missed the
+    edge in time" -- the genuinely retryable case."""
     progress = progress or (lambda _s: None)
     deadline = time.time() + wait_secs
     saw_closed = False
+    ever_open = False
     silent = 0
     polls = 0
     while time.time() < deadline:
@@ -261,11 +276,14 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
             return "dead"
         if not is_open:
             saw_closed = True
-        elif saw_closed:
-            return True
+        else:
+            ever_open = True
+            if saw_closed:
+                return True
         time.sleep(WINDOW_POLL_SECS)
-    progress(f"   ⏰ window timeout after {polls} polls, is_open={is_open}")
-    return False
+    progress(f"   ⏰ window timeout after {polls} polls, is_open={is_open}, "
+             f"ever_open={ever_open}")
+    return False if ever_open else "blind"
 
 
 def _frame_gone(frame):
@@ -518,7 +536,11 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     seat_a bets Banker, seat_b bets Player. Returns a list of per-pair result
     dicts: {"pair", "stake", "winner", "loser", "status", "message"}.
     status is one of: "ok", "tie", "walkover", "no_stake", "unhedged",
-    "not_placed", "error".
+    "not_placed", "no_window", "table_lost", "error".
+
+    "not_placed" vs "no_window" matters: the first is a missed betting window
+    and is worth replaying, the second means no window ever appeared and only
+    a fresh seat can help. See wait_for_window_open.
     """
     progress = progress or (lambda _s: None)
     results = []
@@ -601,17 +623,33 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         # same dead frame just waits out the deadline again (52 minutes of
         # exactly that on 2026-08-14).
         dead = [s.username for s, o in zip(seats, opened) if o == "dead"]
+        # "blind" seats are alive and answering but have never once been dealt
+        # a betting window. Like a dead frame, only a fresh seat can mend that,
+        # so they ride the same dead_seats channel that ends the group -- what
+        # they must NOT do is look like an unlucky miss and get replayed.
+        blind = [s.username for s, o in zip(seats, opened) if o == "blind"]
         if dead:
             detail = ("lost the connection to the live table ("
                       + ", ".join(dead) + ") — no money was staked; "
                       "these seats need reopening, waiting cannot fix them")
+        elif blind:
+            detail = ("the table never opened a single betting window for ("
+                      + ", ".join(blind) + f") in {WINDOW_WAIT_SECS:.0f}s — no "
+                      "money was staked; the seat is on a table that is not "
+                      "dealing to it, so it needs reopening, not replaying")
         else:
             detail = "no betting window opened in time — no money was staked"
+        if dead:
+            status = "table_lost"
+        elif blind:
+            status = "no_window"
+        else:
+            status = "not_placed"
         for L in live:
             results.append({"pair": (L["a"].username, L["b"].username),
                             "stake": L["stake"], "winner": None, "loser": None,
-                            "status": "table_lost" if dead else "not_placed",
-                            "dead_seats": dead,
+                            "status": status,
+                            "dead_seats": dead + blind,
                             "message": detail})
         return results
 
@@ -902,7 +940,14 @@ def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         # seats forward with their real balances.
         lost = sorted({u for res in results for u in (res.get("dead_seats") or [])})
         if lost:
-            stuck = ("lost the live table for " + ", ".join(lost)
+            # Same remedy (a fresh seat), but say which of the two it was --
+            # "lost the table" and "the table never dealt to us" point at very
+            # different things when a human comes to read this.
+            blind_only = all(res.get("status") != "table_lost"
+                             for res in results if res.get("dead_seats"))
+            cause = ("never got a betting window on the live table for "
+                     if blind_only else "lost the live table for ")
+            stuck = (cause + ", ".join(lost)
                      + " -- these seats have to be reopened, which replaying "
                        "the hand cannot do")
             progress(f"   XX {stuck}")
