@@ -328,13 +328,11 @@ def play(ws, roster, site_url, args, on_stage=None):
                                    stage, result]])
             except Exception as exc:
                 log(f"   (could not write row {row}: {exc})")
-            # Write start balance only once (when it first appears)
+            # Always write start balance (overwrite stale data from previous runs)
             if start_balance is not None:
                 try:
-                    existing = ws.cell(row, 3).value  # column C = START BALANCE
-                    if not existing:
-                        ws.update(range_name=f"C{row}",
-                                  values=[[start_balance]])
+                    ws.update(range_name=f"C{row}",
+                              values=[[start_balance]])
                 except Exception:
                     pass
 
@@ -404,8 +402,23 @@ POLL_SECONDS = float(os.environ.get("TOURNAMENT_POLL_SECONDS", "20"))
 
 
 def ensure_header(ws):
+    """Make row 1 match HEADER exactly.
+
+    Compares the WHOLE header, not just column A. It used to check `[:1]`, so
+    a sheet still on the pre-START-BALANCE layout (USERNAME | PASSWORD |
+    BALANCE | STAGE OUT | RESULT) passed the guard purely because A1 said
+    "USERNAME" -- while the writers below address C and D:F by position and
+    would have laid every result down one column to the right, quietly
+    scribbling the balance into STAGE OUT and the result into a blank column.
+    Found on the cricmatch sheet 2026-08-18, after the khelofun sheet had
+    already been migrated by hand.
+
+    Only the header row is rewritten; nothing moves existing rows, so a sheet
+    that has real data under the old layout still needs a human to shift it."""
     try:
-        if ws.row_values(1)[:1] != HEADER[:1]:
+        row = ws.row_values(1)
+        row = (row + [""] * len(HEADER))[:len(HEADER)]
+        if [c.strip().upper() for c in row] != HEADER:
             ws.update(range_name="A1:F1", values=[HEADER])
     except Exception:
         pass
