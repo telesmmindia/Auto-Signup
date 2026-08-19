@@ -152,6 +152,17 @@ Two conventions worth not re-guessing:
 free-number functions (in-page `fetch()`, same reasoning). **No retry loop** —
 don't add one speculatively.
 
+`http_change_account_password()` is the no-browser counterpart (login POST +
+changePassword POST on one `requests.Session`, ~2s vs ~30s), gated by the
+**separate** `supports_http_change_password` flag. That flag is deliberately
+NOT implied by `supports_change_password`: cricmatch supports the endpoint but
+only from an in-page `fetch()`, which is the same reason
+`http_free_phone_number()` is believed broken. Only starexch has it on, and
+only because it was verified live. It sets `infra_block` the same way
+`http_check_account_balance()` does, and `password_changer.py` records that as
+a retryable `⏳` row instead of burning the row on a failure that never
+happened.
+
 ### Balance reading
 
 - `read_wallet_balance(page)` — the **site header** wallet (`span.total_balance`),
@@ -243,6 +254,43 @@ selectors are byte-identical (`#userNameid`/`#userEmailid`/`#pass_log_id`/
 `#phoneNumber`/`#remChck2`/`button.cls_register_new`). Dismiss the SPRIBE overlay
 (`.skip_right_img`) first. OTP selectors unverified. `supports_http_fast` stays
 `False`.
+
+**starexch555** — same white-label Laravel platform as cricmatch/khelofun, added
+2026-08-19 for a three-tab Google Sheet (balance / password change / multi-id
+wager). Confirmed live against a real account:
+- Login selectors are **byte-identical to cricmatch's** (`a.cls_loginbtn` →
+  `#user_login_id`/`#passwordId` → `#loginbutton`, `#acctSec`), and
+  `span.total_balance` reads the header wallet. The login modal is fetched from
+  `/append/loginpp` on demand, so **those ids are absent from the static page
+  source** — don't conclude they're wrong by grepping the HTML.
+- `supports_http_login=True`: `POST /login` → `{"status":200,"message":"Login
+  Successfully","url":"?uid=..."}`, then `POST /api2/v2/getBalance` → the figure
+  in `balance.balance`/`main_balance`/`totalBalance`. **There is no
+  `balance.wallet` key here** (cricmatch has one) — the `totalBalance`/`balance`
+  fallback in `http_check_account_balance()` is what makes this site work.
+  Measured **1.8s** per account vs ~20-30s for a browser login.
+- `supports_change_password=True` **and `supports_http_change_password=True`**:
+  `POST /changePassword` works from a bare `requests.Session` — no browser, no
+  in-page `fetch()`, unlike cricmatch. Verified end to end (changed, logged in
+  with the new password, reverted). Response is the same `{"status":..,"msg":..}`
+  convention: **200 = changed, 201 = refused** ("Please enter the valid current
+  password"). Note that a wrong current password fails at the *login* step
+  first, so the caller sees "Invalid username or password", not the 201.
+- ⚠️ A first bare `POST /login` came back a **flat edge 403**, which looks
+  exactly like cricmatch's rate block — it wasn't. The field is `username`;
+  sending `userName` is refused at the edge before the app sees it. **Don't read
+  a 403 here as a rate block without checking field names first.**
+- `supports_casino=False` **deliberately**: the site does host Evolution/Ezugi
+  Baccarat, but its Live Casino entry is a `<div data-href="/live-casino">`, not
+  cricmatch's `<a>`, so `open_casino_lobby()`'s selector cannot match. The
+  tournament refuses cleanly until that path is captured live. Direct URLs exist
+  (`/live-casino/?game=baccarat`) and are the obvious starting point.
+- Signup/OTP selectors were **never inspected** — the ones in the profile are
+  inherited cricmatch guesses, a starting point for `inspect_form.py`, nothing more.
+- Config: `.env.starexch.balance` / `.env.starexch.password` /
+  `.env.starexch.tournament`, all three pointing at one workbook but **different
+  tab gids**, sharing `bot_settings.starexch.json` and using
+  `tournament_state.starexch.json`.
 
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a

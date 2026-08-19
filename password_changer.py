@@ -69,6 +69,7 @@ from google.oauth2.service_account import Credentials
 # plain .env); override=True here so an explicit --env file wins for any key
 # both files define, same gotcha documented in telegram_bot.py/sheet_watcher.py.
 import main as engine
+from sites import profile_for
 load_dotenv(_env_file, override=True)
 
 SPREADSHEET_ID = os.environ.get("PASSWORD_SHEET_SPREADSHEET_ID", "")
@@ -140,8 +141,19 @@ def process_row(ws, row_idx, username, current_password, new_password):
 
     result = {"ok": False, "messages": [], "shot": None, "new_password": None}
     try:
-        result = engine.run_change_account_password(
-            username, current_password, new_password, site_url=SITE_URL, proxy=current_proxy())
+        # Same shape as balance_checker.process_row(): take the ~2s HTTP route
+        # where the site is confirmed to accept an out-of-band change-password
+        # POST, otherwise fall back to the ~30s Playwright login. NOT keyed on
+        # supports_change_password -- cricmatch supports the endpoint but only
+        # from an in-page fetch(), which is why the flag is separate.
+        prof = profile_for(SITE_URL)
+        if prof.supports_http_change_password:
+            result = engine.http_change_account_password(
+                username, current_password, new_password,
+                site_url=SITE_URL, proxy=current_proxy())
+        else:
+            result = engine.run_change_account_password(
+                username, current_password, new_password, site_url=SITE_URL, proxy=current_proxy())
     except Exception as e:
         traceback.print_exc()
         result["messages"] = [f"Unhandled error: {e}"]
@@ -150,6 +162,13 @@ def process_row(ws, row_idx, username, current_password, new_password):
     try:
         if result["ok"]:
             ws.update_cell(row_idx, COL_STATUS, f"✅ changed {ts}")
+        elif result.get("infra_block"):
+            # The edge answered, not the app -- this account was never actually
+            # checked, so record it as retryable (⏳) rather than burning the
+            # row on a failure that never happened. poll_once() picks ⏳ rows
+            # back up; ✅/❌ are terminal.
+            msg = "; ".join(result.get("messages") or ["blocked"])[:150]
+            ws.update_cell(row_idx, COL_STATUS, f"⏳ blocked {ts} — {msg}")
         else:
             msg = "; ".join(result.get("messages") or ["unknown error"])[:200]
             ws.update_cell(row_idx, COL_STATUS, f"❌ {ts} — {msg}")
@@ -171,8 +190,11 @@ def poll_once(ws, executor):
         status = row[3].strip()
         if not (username and current_password):
             continue
-        if status:
-            continue  # already processed -- clear STATUS by hand to retry
+        # Empty STATUS (never attempted) or a "⏳" marker (the edge blocked an
+        # earlier attempt, so nothing was actually changed) are both eligible.
+        # Any other non-empty STATUS is terminal -- clear it by hand to retry.
+        if status and not status.startswith("⏳"):
+            continue
         with _lock:
             if i in _in_flight_rows:
                 continue  # already picked up this cycle, still running

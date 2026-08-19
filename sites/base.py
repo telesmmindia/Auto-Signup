@@ -105,3 +105,15 @@ class SiteProfile:
     # newPassword/_token and changes the logged-in account's password. Used
     # only when supports_change_password is True.
     change_password_path: str = "/changePassword"
+
+    # Whether the change_password_path POST above works on a bare
+    # requests.Session (no browser at all), i.e. the endpoint needs nothing
+    # the login POST didn't already give the session. This is NOT implied by
+    # supports_change_password: cricmatch's own change-password call is
+    # fired as an in-page fetch() precisely because an out-of-band client
+    # misbehaves there (same reason http_free_phone_number() is believed
+    # broken -- a requests.Session never receives the login-only cookies the
+    # in-page path relies on). Confirmed live per site before flipping this
+    # on. True -> password_changer.py takes the ~2s HTTP route instead of a
+    # ~30s Playwright login, which also keeps it off the /login volume block.
+    supports_http_change_password: bool = False

@@ -1378,6 +1378,91 @@ def http_check_account_balance(username, password, site_url=None, proxy=None):
     return result
 
 
+def http_change_account_password(username, current_password, new_password,
+                                 site_url=None, proxy=None):
+    """HTTP-only counterpart to run_change_account_password(): no browser, just
+    the two POSTs the site's own JS makes (login, then changePassword). Same
+    result shape ({"ok","messages","shot","new_password"}), "shot" always None
+    since there is no page to screenshot.
+
+    Only used where the profile sets supports_http_change_password. On
+    cricmatch the change-password call is deliberately fired as an in-page
+    fetch() because an out-of-band client misbehaves there, so this must never
+    be assumed to work from supports_change_password alone.
+
+    Response convention (confirmed live on starexch 2026-08-19, and the same
+    shape cricmatch documents): {"status":200,"msg":"..."} on success,
+    {"status":201,"msg":"Please enter the valid current password"} when the
+    current password is wrong -- the key is "msg", there is no
+    "message_class", and success is status == 200 specifically, so
+    http_is_error() does NOT apply here.
+
+    Like http_check_account_balance(), sets result["infra_block"] when the
+    edge answered instead of the app (a bare 403 / any non-JSON body), so a
+    caller can retry that rather than recording it as a real per-account
+    failure."""
+    url = site_url or SITE_URL
+    prof = profile_for(url)
+    result = {"ok": False, "messages": [], "shot": None, "new_password": None,
+              "infra_block": False}
+
+    if not (prof.supports_change_password and prof.supports_http_change_password):
+        result["messages"] = [
+            f"{prof.key} does not support HTTP-fast password changes."]
+        return result
+
+    try:
+        session = http_session_for(proxy)
+    except ValueError as e:
+        result["messages"] = [f"Bad proxy value: {e}"]
+        return result
+
+    try:
+        csrf = http_fetch_csrf(session, url)
+    except (requests.RequestException, RuntimeError) as e:
+        result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
+        result["infra_block"] = True
+        return result
+
+    login_resp = http_login_call(session, csrf, username, current_password, url)
+    if login_resp.get("status") != 200:
+        result["messages"] = [login_resp.get("message") or f"Login failed: {login_resp}"]
+        result["infra_block"] = login_resp.get("status") is None
+        return result
+
+    parts = urlsplit(url)
+    change_url = f"{parts.scheme}://{parts.netloc}{prof.change_password_path}"
+    headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf,
+               "Referer": url, "Origin": _http_fast_origin(url)}
+    try:
+        resp = session.post(change_url,
+                            data={"oldPassword": current_password,
+                                  "newPassword": new_password,
+                                  "_token": csrf},
+                            headers=headers, timeout=20)
+    except requests.RequestException as e:
+        result["messages"] = [f"Change-password request failed: {str(e)[:200]}"]
+        result["infra_block"] = True
+        return result
+
+    try:
+        body = resp.json()
+    except ValueError:
+        result["messages"] = [
+            f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"]
+        result["infra_block"] = True
+        return result
+
+    msg = body.get("msg") or body.get("message") or str(body)
+    if body.get("status") == 200:
+        result["ok"] = True
+        result["new_password"] = new_password
+        result["messages"] = [msg]
+    else:
+        result["messages"] = [msg]
+    return result
+
+
 def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy=None,
                 free_number=False):
     """Run one signup attempt. Returns a result dict.
