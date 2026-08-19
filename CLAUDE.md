@@ -907,21 +907,42 @@ the same `dead_seats` channel as a dead frame and end the group immediately
 by test: a frame open at every poll (joined mid-window, no closed→open edge)
 returns `False`, **not** `blind`, so the new case can't over-trigger.
 
-Root cause of the missing timer is **not** established. Ruled out live
-2026-08-18 with `probe_baccarat_window.py`:
-- **Not a khelofun-wide selector problem** — `circle-timer` cycles normally
-  there (27 of 60 samples, ~20s open on a ~40s cycle).
-- **Not concurrency or box load** — four seats held simultaneously all saw
-  identical windows (27/60 each, same `table_id`, in lockstep).
+**Root cause: Chromium background-throttling. Found and fixed 2026-08-19.**
+Chromium throttles timers, rAF and rendering in any page it considers
+backgrounded or occluded. `circle-timer` is an **animated** element, so a
+throttled page keeps answering DOM queries — no errors, no dead frame, the
+chip-rail check still passes — while never *drawing* the timer at all. That is
+precisely the "timer=None forever" fault, and it is why `blind` could not tell
+it apart from a table that wasn't dealing.
 
-The one material difference is balance: the run's accounts each read **₹1,005**,
-and by 2026-08-18 the same accounts read **₹0–5**. The untested suspect is the
-bonus-balance launch path — an account with a bonus hits the CHOOSE CHIPS gate,
-and picking REAL CHIPS navigates the **same tab** to `vt_id=` instead of opening
-a new tab at `table_id=` (see `_dismiss_choose_chips_modal`). Whether that view
-renders a `circle-timer` has never been checked. **To confirm, run
-`probe_baccarat_window.py` against an account that still holds a bonus** — that
-is the missing experiment, and none of the drained accounts can supply it.
+Measured on starexch with `probe_baccarat_window.py`, 5 seats on one table,
+one browser per seat, sampled once a second for 100s:
+
+| seat (open order) | timer seen, before | after |
+|---|---|---|
+| 1st | **0**/98 | 31/98 |
+| 2nd | **0**/98 | 42/98 |
+| 3rd | 22/98 | 45/98 |
+| 4th | 7/98 | 46/98 |
+| 5th | 33/98 | 46/98 |
+
+Zero errors on every seat in both runs, and a **lone** seat on the same table
+saw 30/99 — so the table was dealing normally throughout. The before-gradient
+tracks how long a page had sat un-focused, nothing about the account or table.
+
+The fix is `_ANTI_THROTTLE_ARGS` in `main.py` (`--disable-background-timer-
+throttling`, `--disable-backgrounding-occluded-windows`,
+`--disable-renderer-backgrounding`), passed by `_launch_pw_browser()`. **Any
+new launch path that will hold a live table open must pass them too.**
+
+This **supersedes** the earlier "not established" verdict and corrects one of
+its conclusions: concurrency *was* the trigger after all. The 2026-08-18
+khelofun probe that "ruled out concurrency" held four seats and saw 27/60 on
+each — consistent with this, since that probe's seats were all young. What
+matters is not how many seats exist but **how long a page has been
+un-focused**, which is why a short 4-seat sample missed it and a real
+2h25m tournament did not. The bonus-balance / `vt_id` suspicion is also moot:
+starexch launches every table as `vt_id=` and works fine once un-throttled.
 
 Give-up ladder, widest to narrowest — each layer only fires when the one below
 has genuinely stopped helping:

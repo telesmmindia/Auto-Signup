@@ -3174,6 +3174,35 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
     raise last
 
 
+# Chromium throttles timers, rAF and rendering in any page it considers
+# backgrounded or occluded. A live Evolution table signals its betting window
+# through [data-role="circle-timer"], an ANIMATED element -- so a throttled
+# page keeps answering DOM queries (no errors, no dead frame) while never
+# drawing the timer at all. That is exactly the "no betting window opened in
+# time, timer=None" fault, and it is why the give-up ladder's `blind` state
+# could not tell it apart from a table that simply wasn't dealing.
+#
+# Measured live on starexch 2026-08-19, 5 seats on one table for 100s, one
+# browser per seat, sampling once a second:
+#     seat 1 (opened first)   0/98 samples saw the timer
+#     seat 2                  0/98
+#     seat 3                 22/98
+#     seat 4                  7/98
+#     seat 5 (opened last)   33/98      <- matches a lone seat's 30/99
+# Zero errors on every seat. A single seat on the same table saw 30/99, so
+# the table was dealing normally throughout; the gradient tracks how long a
+# page had been sitting un-focused, not anything about the account or the
+# table.
+#
+# These three flags are the standard Chromium answer to that. Keep them on
+# every launch that will hold a live table open.
+_ANTI_THROTTLE_ARGS = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
+
+
 def _launch_pw_browser():
     """Start a standalone Playwright connection + headless Chromium. Must be
     called from (and every object it returns used from) the thread that will
@@ -3183,7 +3212,7 @@ def _launch_pw_browser():
     serialized on one thread (see run_paired_hedge)."""
     pw = sync_playwright().start()
     try:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=True, args=_ANTI_THROTTLE_ARGS)
     except Exception:
         pw.stop()
         raise
