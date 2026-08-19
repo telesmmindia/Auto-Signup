@@ -46,6 +46,33 @@ class SiteProfile:
     # of mis-clicking uninspected markup.
     supports_casino: bool = False
 
+    # How to reach the Live Casino lobby.
+    #   "nav_click"  -- cricmatch/khelofun: click the sidebar Live Casino
+    #                   link. A hard page load is NOT safe there (confirmed
+    #                   live: it lands on a logged-out-looking homepage).
+    #   "direct_url" -- starexch: page.goto(casino_lobby_path). Confirmed
+    #                   live 2026-08-19 that the session SURVIVES the load
+    #                   there, and that no nav click works at all (every
+    #                   candidate times out or silently no-ops).
+    casino_lobby_mode: str = "nav_click"
+
+    # Path used only when casino_lobby_mode == "direct_url". starexch groups
+    # the lobby by PROVIDER, and the provider matters: "?p=All" surfaces a
+    # third-party "Baccarat" whose table markup the engine cannot drive,
+    # while "?p=evolution" lists the real Evolution tables (Baccarat A/B).
+    casino_lobby_path: str = "/live-casino/?p=evolution"
+
+    # How to open a game tile in that lobby.
+    #   "text_click"         -- cricmatch: click a category tab, then the
+    #                           tile's text.
+    #   "go_to_casino_live"  -- starexch: the tile's clickable element is
+    #                           div[onclick="goToCasinoLive(this)"] on the
+    #                           tile IMAGE; the <p class="game__name"> label
+    #                           is inert (clicking it silently does nothing).
+    #                           There are no category tabs to click either --
+    #                           the provider is already in the lobby URL.
+    casino_tile_mode: str = "text_click"
+
     # Whether the LOGIN selectors alone are inspected. Split out from
     # supports_casino 2026-08-19: starexch's login is verified live while its
     # casino navigation is not (different markup), and the two used to be one

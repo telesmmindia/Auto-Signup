@@ -29,12 +29,13 @@ looked like cricmatch's rate block -- it was not. The field is "username", and
 sending "userName" is refused at the edge before the app sees it. Don't read a
 403 here as a rate block without checking the field names first.
 
+Casino: VERIFIED 2026-08-19, but only via a different route (see the two
+casino_* flags below and probe_starexch_casino.py). The site carries BOTH an
+Ezugi-client baccarat, whose table markup the engine cannot drive at all, and
+the real Evolution tables it can -- picking the wrong provider silently lands
+on the wrong one, which is why casino_lobby_path pins ?p=evolution.
+
 NOT verified, deliberately left False:
-  * supports_casino -- the site does host Evolution/Ezugi Baccarat, but its
-    Live Casino entry point is a <div data-href="/live-casino"> rather than
-    cricmatch's <a>, so open_casino_lobby()'s selector does not match. Leaving
-    this False makes the casino/tournament paths refuse cleanly instead of
-    mis-clicking uninspected markup. Flip it only after a live capture.
   * signup (register modal / OTP) -- never inspected on this site. The selectors
     below are inherited from the cricmatch template as a starting point for
     inspect_form.py; treat them as unconfirmed guesses.
@@ -52,11 +53,26 @@ PROFILE = SiteProfile(
     result_selectors=GENERIC_RESULT_SELECTORS,
     tracking_param="btag",
 
-    # Login selectors ARE verified live; the casino navigation is NOT (see the
-    # module docstring). These are separate flags precisely so one can be true
-    # without claiming the other.
     supports_login=True,
-    supports_casino=False,
+    # Enabled 2026-08-19 after driving the whole route live: the Evolution
+    # tables here (Baccarat A = data-id 85, B = 86, under ?p=evolution) open
+    # at ezugi.evo-games.com -- the SAME host and the SAME markup cricmatch
+    # uses. find_game_frame(), read_game_balance(), _read_total_bet() and
+    # _betting_open() were each verified working against a live starexch
+    # table, and all 11 data-roles the hedge/tournament engine needs
+    # (bet-spot-Banker/Player, circle-timer, balance-label-value,
+    # total-bet-label-value, chip, chip-value, selected-chip, double-button,
+    # undo-button, lobby-button) are present. Only the ROUTE to the table
+    # differs, which is what the two flags below express.
+    supports_casino=True,
+    # No nav element responds to a click here; a direct load keeps the
+    # session. See _open_casino_lobby_direct() in main.py.
+    casino_lobby_mode="direct_url",
+    # ?p=All lists a third-party "Baccarat" whose table the engine cannot
+    # drive. Pinning the provider is what keeps the tournament on a real
+    # Evolution table.
+    casino_lobby_path="/live-casino/?p=evolution",
+    casino_tile_mode="go_to_casino_live",
     supports_http_fast=False,
     supports_free_number=False,
 

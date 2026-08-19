@@ -2097,8 +2097,12 @@ def open_casino_lobby(page, timeout_ms=15000):
     listeners aren't attached yet the instant the logged-in view first
     renders) -- retries the click itself, not just the readiness poll,
     since a single click attempt isn't reliable enough here."""
+    prof = profile_for(page.url)
+    if prof.casino_lobby_mode == "direct_url":
+        return _open_casino_lobby_direct(page, prof, timeout_ms)
+
     dismiss_popups(page)
-    casino_nav = profile_for(page.url).sel["casino_nav"]
+    casino_nav = prof.sel["casino_nav"]
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         try:
@@ -2123,6 +2127,66 @@ def open_casino_lobby(page, timeout_ms=15000):
         except Exception:
             pass
     return False
+
+
+def _open_casino_lobby_direct(page, prof, timeout_ms=15000):
+    """Reach the Live Casino lobby by navigating straight to it.
+
+    Used where casino_lobby_mode == "direct_url" (starexch). Everything the
+    cricmatch path does is wrong here and was confirmed so live 2026-08-19:
+    no "Live Casino" nav element responds to a click (they time out or
+    no-op), while a plain goto works AND keeps the session -- the opposite of
+    cricmatch, where a hard load drops the logged-in view. Readiness is
+    therefore checked on the tiles themselves rather than on a category tab,
+    because this lobby has no category tabs: the provider is in the URL.
+
+    Returns True once at least one openable tile is present."""
+    parts = urlsplit(page.url)
+    lobby_url = f"{parts.scheme}://{parts.netloc}{prof.casino_lobby_path}"
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        try:
+            page.goto(lobby_url, wait_until="domcontentloaded", timeout=30000)
+        except PWError:
+            # ERR_ABORTED shows up when a previous navigation is still
+            # settling right after login -- worth one more try, not a failure.
+            page.wait_for_timeout(2000)
+            continue
+        page.wait_for_timeout(3000)
+        dismiss_popups(page)
+        try:
+            if page.locator("[onclick*='goToCasinoLive']").count() > 0:
+                return True
+        except Exception:
+            pass
+        page.wait_for_timeout(1000)
+    return False
+
+
+def _click_tile_go_to_casino_live(page, tile_text):
+    """Open a game tile by invoking the site's own handler.
+
+    starexch binds the click to div[onclick="goToCasinoLive(this)"], which
+    sits on the tile's IMAGE container. The visible <p class="game__name">
+    label is inert -- clicking it silently does nothing at all, which reads
+    as "the tile didn't open" rather than as an error (cost a probe run to
+    find). Matching is on the tile's exact name, so "Baccarat A" can't pick
+    up "All In Baccarat".
+
+    Returns the tile's data-id on success, or "" if no such tile is visible.
+    """
+    return page.evaluate("""(want) => {
+      const els = [...document.querySelectorAll('[onclick*="goToCasinoLive"]')];
+      const t = els.find(e => {
+        const par = e.closest('.partclrGamesParDv,.partclrGamesParDvMob');
+        const nm = par && par.querySelector('.game__name');
+        return nm && nm.innerText.trim() === want
+               && e.getBoundingClientRect().width > 5;
+      });
+      if (!t) return '';
+      t.click();
+      return t.getAttribute('data-id') || '?';
+    }""", tile_text)
 
 
 def _dismiss_casino_promo_modal(page):
@@ -2184,18 +2248,27 @@ def search_and_open_game(page, category, tile_text):
     or None on failure. Caller owns closing it."""
     context = page.context
     pages_before = len(context.pages)
+    prof = profile_for(page.url)
     _dismiss_casino_promo_modal(page)
     try:
-        page.locator(f"a:has-text('{category}')").first.click(timeout=5000, force=True)
-        page.wait_for_timeout(2500)
-        _dismiss_casino_promo_modal(page)
-        page.locator(f"text={tile_text}").first.click(timeout=5000, force=True)
-        page.wait_for_timeout(1000)
-        _dismiss_choose_chips_modal(page)
+        if prof.casino_tile_mode == "go_to_casino_live":
+            # No category tabs in this lobby -- `category` is unused here, the
+            # provider was already chosen in the lobby URL.
+            if not _click_tile_go_to_casino_live(page, tile_text):
+                return None
+            page.wait_for_timeout(1000)
+            _dismiss_choose_chips_modal(page)
+        else:
+            page.locator(f"a:has-text('{category}')").first.click(timeout=5000, force=True)
+            page.wait_for_timeout(2500)
+            _dismiss_casino_promo_modal(page)
+            page.locator(f"text={tile_text}").first.click(timeout=5000, force=True)
+            page.wait_for_timeout(1000)
+            _dismiss_choose_chips_modal(page)
     except Exception:
         return None
 
-    deadline = time.time() + 15
+    deadline = time.time() + 30
     while time.time() < deadline:
         if len(context.pages) > pages_before:
             new_page = context.pages[-1]
@@ -2959,8 +3032,15 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     if not open_casino_lobby(page, timeout_ms=20000):
         prof = profile_for(site_url or SITE_URL)
         parts = urlsplit(site_url or SITE_URL)
+        # Follow the site's own lobby path, not a bare /live-casino: on
+        # starexch the provider in the query string is what separates the
+        # Evolution tables this engine can drive from a third-party baccarat
+        # it cannot. Readiness is likewise checked the way that site's lobby
+        # actually renders -- an <a>Baccarat</a> exists only on cricmatch's.
         try:
-            page.goto(f"{parts.scheme}://{parts.netloc}/live-casino",
+            page.goto(f"{parts.scheme}://{parts.netloc}{prof.casino_lobby_path}"
+                      if prof.casino_lobby_mode == "direct_url"
+                      else f"{parts.scheme}://{parts.netloc}/live-casino",
                       wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
             dismiss_popups(page)
@@ -2968,7 +3048,10 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
             pass
         lobby_ok = False
         try:
-            lobby_ok = page.locator("a:has-text('Baccarat')").first.is_visible()
+            if prof.casino_tile_mode == "go_to_casino_live":
+                lobby_ok = page.locator("[onclick*='goToCasinoLive']").count() > 0
+            else:
+                lobby_ok = page.locator("a:has-text('Baccarat')").first.is_visible()
         except Exception:
             pass
         if not lobby_ok:

@@ -290,56 +290,57 @@ wager). Confirmed live against a real account:
   tab gids**, sharing `bot_settings.starexch.json` and using
   `tournament_state.starexch.json`.
 
-### starexch's live casino is Ezugi, not Evolution (blocks the tournament)
+### starexch's live casino: two baccarats, only one drivable
 
 Mapped live 2026-08-19 with `probe_starexch_casino.py` (read-only, no bets).
-**The tournament/hedge engine cannot be ported here by adding selectors** — the
-betting UI is a different product, so `GameProfile`'s Evolution values
-(`bet-spot-Banker`, `circle-timer`, `balance-label-value`) match nothing.
+starexch carries **both** an Ezugi-client baccarat and the real **Evolution**
+tables. Picking the wrong one silently lands on a table this engine cannot
+drive, so `casino_lobby_path` pins `?p=evolution`.
 
-Route to a table, every step different from cricmatch:
+**The Evolution tables work with the existing engine unchanged.** Baccarat A
+(`data-id` 85) and B (86) open at `ezugi.evo-games.com` — the same host and the
+same markup cricmatch uses. Verified live on a starexch table: all 11 data-roles
+the hedge/tournament engine needs are present (`bet-spot-Banker`/`Player`,
+`circle-timer`, `balance-label-value`, `total-bet-label-value`, `chip`,
+`chip-value`, `selected-chip`, `double-button`, `undo-button`, `lobby-button`),
+and `find_game_frame()` / `wait_for_live_table()` / `read_game_balance()` /
+`_read_total_bet()` / `_betting_open()` / `read_chips()` all work as-is.
+`_open_table_for()` seats an account in **~38s**, and the betting window cycles
+healthily (~15s open on a ~35s cycle — no sign of the `blind` no-timer fault).
+
+**Only the ROUTE to the table differs**, which is what two new `SiteProfile`
+flags express (`casino_lobby_mode` / `casino_tile_mode`, both defaulting to
+cricmatch's behavior so no existing site changes):
 - **Clicking a "Live Casino" nav element never works** — `div.nb_rdlink
   [data-href]`, `a[href*=live-casino]` and `text=Live Casino` all time out or
-  no-op.
-- **A direct `page.goto("/live-casino/?p=<provider>")` works AND keeps the
-  session** (wallet still readable after). This is the *opposite* of cricmatch,
-  whose `open_casino_lobby()` warns a hard load drops the logged-in view. Don't
-  "fix" it back to a click.
-- Tiles are opened by the site's own handler,
-  `div[onclick="goToCasinoLive(this)"][data-id][data-provider]`, which sits on
-  the tile's **image container**. The `<p class="game__name">` label is **not**
-  clickable — clicking it silently does nothing (cost one probe run to find).
-- **Provider matters**: `?p=All` surfaces a *jacktop* "Baccarat"; the Ezugi
-  tables (Baccarat A–E, **A = `data-id` 1014**) are under `?p=ezugi`.
-- The table opens in a **new tab on a randomised white-label host**
-  (`pxoki81qhmq.xoki81qhmq.com`, **different every launch**) — not
-  `ezugi.evo-games.com`. So `find_game_frame()`'s `host_hint` can't be
-  hardcoded, and there's **no iframe at all**: the game IS the tab's document.
-  `_table_id()` still works (`table_id=100`).
+  no-op. `casino_lobby_mode="direct_url"` navigates straight to the lobby
+  instead (`_open_casino_lobby_direct()`), and the session **survives** the
+  load — the *opposite* of cricmatch, whose `open_casino_lobby()` warns a hard
+  load drops the logged-in view. Don't "fix" it back to a click.
+- Tiles open via the site's own handler,
+  `div[onclick="goToCasinoLive(this)"][data-id][data-provider]`, on the tile's
+  **image container**. The `<p class="game__name">` label is **inert** —
+  clicking it silently does nothing, which reads as "the tile didn't open"
+  rather than as an error (cost a probe run to find).
+  `casino_tile_mode="go_to_casino_live"` (`_click_tile_go_to_casino_live()`)
+  matches the tile's exact name, so "Baccarat A" can't pick up "All In
+  Baccarat". There are no category tabs in this lobby — the provider is in the
+  URL, so `search_and_open_game()`'s `category` argument is unused here.
+- The lobby-recovery ladder in `_open_table_for()` follows the profile too; it
+  used to hardcode a bare `/live-casino` and an `a:has-text('Baccarat')`
+  readiness check, neither of which exists on starexch.
 
-The Ezugi table's own hooks (all confirmed on a live table):
-
-| what | selector | reads |
-|---|---|---|
-| balance | `[data-e2e="balance-value"]` | `"₹ 180.00"` |
-| total bet | `[data-e2e="total-bet-value"]` | `"₹ 0"` |
-| table limits | `[data-e2e="footer-table-info-value"]` | `"₹ 100 - ₹ 1,000,000"` |
-| timer | `[data-e2e="betting-timer"]` / `[data-testid="time-left"]` | seconds |
-| chips | `[data-e2e="chip-<value>"]` + `data-value`/`data-selected`/`data-disabled` | 100…100000 |
-| bet spots | `span.bet-label` with text `Banker` / `Player` | no `data-e2e` |
-
-Two things that make a driver *easier* here than on Evolution:
-- **The chip rail is unambiguously real and readable** — `data-value` on each
-  chip, `data-selected` on the active one. No hidden-template confusion like
-  baccarat's rail (see the tournament notes).
-- **`data-disabled` on the chips flips to `"true"` between rounds**, which is a
-  cleaner betting-window signal than Evolution's circle-timer presence check
-  and doesn't need the `"blind"` workaround.
-
-The remaining fragile part is the same one Evolution has: the Banker/Player
-spots carry no test hook, only a `span.bet-label`, so the clickable element has
-to be found by walking up from the label — the job `_TAG_BET_SPOT_JS` does for
-Evolution. Table minimum is **₹100**, same as cricmatch baccarat.
+**The Ezugi client (`?p=ezugi`, Baccarat A–E) is the one to avoid.** For the
+record, since it looks identical to a person: it opens in a new tab on a
+**randomised** white-label host (`pxoki81qhmq.xoki81qhmq.com`, different every
+launch) with **no iframe** — the game is the tab's own document — and exposes a
+completely different vocabulary (`data-e2e="balance-value"` /
+`"total-bet-value"` / `"betting-timer"` / `"chip-<value>"`, bet spots labelled
+only by `span.bet-label`). None of the engine's selectors match it. It is
+driveable in principle — its chip rail is cleaner than Evolution's, and its
+chips' `data-disabled` flips between rounds, which would be a better
+betting-window signal than the timer — but that is a whole second game driver
+and there is no reason to build one while the Evolution tables are right there.
 
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a
