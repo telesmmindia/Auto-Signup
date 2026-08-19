@@ -150,7 +150,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 import db
 from sites import profile_for
 from main import (
-    SHOTS_DIR, SITE_URL,
+    SHOTS_DIR, SITE_URL, _ANTI_THROTTLE_ARGS,
     capsolver_key, change_account_password_via_login, check_phone_taken,
     click_first_visible, extract_referral_code,
     fill_register_form, free_account_number, free_phone_number, gen_account,
@@ -602,7 +602,15 @@ def _blocking_ensure_browser(slot):
     routed to this slot. Must run on _pw_executors[slot]'s worker thread."""
     if _browsers[slot] is None:
         _playwrights[slot] = sync_playwright().start()
-        _browsers[slot] = _playwrights[slot].chromium.launch(headless=True)
+        # Same anti-throttling args tournament seats use: this browser also
+        # holds live tables open (/testbaccarat, and the Banker side of /run,
+        # which reuses this browser rather than launching its own). Without
+        # them Chromium stops animating a backgrounded page, so the betting
+        # window's circle-timer never draws and the run waits forever on a
+        # page that is otherwise perfectly healthy -- see _ANTI_THROTTLE_ARGS
+        # in main.py for the measurements.
+        _browsers[slot] = _playwrights[slot].chromium.launch(
+            headless=True, args=_ANTI_THROTTLE_ARGS)
     return _browsers[slot]
 
 
