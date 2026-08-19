@@ -1968,9 +1968,9 @@ def login(page, username, password, site_url=None):
     """Log into an EXISTING account (not signup). Returns (outcome, messages)
     where outcome is "ok", "error", or "timeout"."""
     prof = profile_for(site_url or SITE_URL)
-    if not prof.supports_casino:
-        return "error", [f"Login/casino is not supported for {prof.key} "
-                         "(its login/casino selectors are not inspected)."]
+    if not (prof.supports_login or prof.supports_casino):
+        return "error", [f"Login is not supported for {prof.key} "
+                         "(its login selectors are not inspected)."]
     try:
         page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
     except PWError as e:

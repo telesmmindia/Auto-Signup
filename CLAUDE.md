@@ -280,17 +280,66 @@ wager). Confirmed live against a real account:
   exactly like cricmatch's rate block — it wasn't. The field is `username`;
   sending `userName` is refused at the edge before the app sees it. **Don't read
   a 403 here as a rate block without checking field names first.**
-- `supports_casino=False` **deliberately**: the site does host Evolution/Ezugi
-  Baccarat, but its Live Casino entry is a `<div data-href="/live-casino">`, not
-  cricmatch's `<a>`, so `open_casino_lobby()`'s selector cannot match. The
-  tournament refuses cleanly until that path is captured live. Direct URLs exist
-  (`/live-casino/?game=baccarat`) and are the obvious starting point.
+- `supports_casino=False`, and **the tournament cannot simply be pointed at this
+  site** — see the next section. `supports_login=True` carries the verified
+  login on its own (the two flags were split 2026-08-19 precisely for this).
 - Signup/OTP selectors were **never inspected** — the ones in the profile are
   inherited cricmatch guesses, a starting point for `inspect_form.py`, nothing more.
 - Config: `.env.starexch.balance` / `.env.starexch.password` /
   `.env.starexch.tournament`, all three pointing at one workbook but **different
   tab gids**, sharing `bot_settings.starexch.json` and using
   `tournament_state.starexch.json`.
+
+### starexch's live casino is Ezugi, not Evolution (blocks the tournament)
+
+Mapped live 2026-08-19 with `probe_starexch_casino.py` (read-only, no bets).
+**The tournament/hedge engine cannot be ported here by adding selectors** — the
+betting UI is a different product, so `GameProfile`'s Evolution values
+(`bet-spot-Banker`, `circle-timer`, `balance-label-value`) match nothing.
+
+Route to a table, every step different from cricmatch:
+- **Clicking a "Live Casino" nav element never works** — `div.nb_rdlink
+  [data-href]`, `a[href*=live-casino]` and `text=Live Casino` all time out or
+  no-op.
+- **A direct `page.goto("/live-casino/?p=<provider>")` works AND keeps the
+  session** (wallet still readable after). This is the *opposite* of cricmatch,
+  whose `open_casino_lobby()` warns a hard load drops the logged-in view. Don't
+  "fix" it back to a click.
+- Tiles are opened by the site's own handler,
+  `div[onclick="goToCasinoLive(this)"][data-id][data-provider]`, which sits on
+  the tile's **image container**. The `<p class="game__name">` label is **not**
+  clickable — clicking it silently does nothing (cost one probe run to find).
+- **Provider matters**: `?p=All` surfaces a *jacktop* "Baccarat"; the Ezugi
+  tables (Baccarat A–E, **A = `data-id` 1014**) are under `?p=ezugi`.
+- The table opens in a **new tab on a randomised white-label host**
+  (`pxoki81qhmq.xoki81qhmq.com`, **different every launch**) — not
+  `ezugi.evo-games.com`. So `find_game_frame()`'s `host_hint` can't be
+  hardcoded, and there's **no iframe at all**: the game IS the tab's document.
+  `_table_id()` still works (`table_id=100`).
+
+The Ezugi table's own hooks (all confirmed on a live table):
+
+| what | selector | reads |
+|---|---|---|
+| balance | `[data-e2e="balance-value"]` | `"₹ 180.00"` |
+| total bet | `[data-e2e="total-bet-value"]` | `"₹ 0"` |
+| table limits | `[data-e2e="footer-table-info-value"]` | `"₹ 100 - ₹ 1,000,000"` |
+| timer | `[data-e2e="betting-timer"]` / `[data-testid="time-left"]` | seconds |
+| chips | `[data-e2e="chip-<value>"]` + `data-value`/`data-selected`/`data-disabled` | 100…100000 |
+| bet spots | `span.bet-label` with text `Banker` / `Player` | no `data-e2e` |
+
+Two things that make a driver *easier* here than on Evolution:
+- **The chip rail is unambiguously real and readable** — `data-value` on each
+  chip, `data-selected` on the active one. No hidden-template confusion like
+  baccarat's rail (see the tournament notes).
+- **`data-disabled` on the chips flips to `"true"` between rounds**, which is a
+  cleaner betting-window signal than Evolution's circle-timer presence check
+  and doesn't need the `"blind"` workaround.
+
+The remaining fragile part is the same one Evolution has: the Banker/Player
+spots carry no test hook, only a `span.bet-label`, so the clickable element has
+to be found by walking up from the label — the job `_TAG_BET_SPOT_JS` does for
+Evolution. Table minimum is **₹100**, same as cricmatch baccarat.
 
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a

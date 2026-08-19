@@ -52,7 +52,10 @@ PROFILE = SiteProfile(
     result_selectors=GENERIC_RESULT_SELECTORS,
     tracking_param="btag",
 
-    # Not inspected -- see the module docstring.
+    # Login selectors ARE verified live; the casino navigation is NOT (see the
+    # module docstring). These are separate flags precisely so one can be true
+    # without claiming the other.
+    supports_login=True,
     supports_casino=False,
     supports_http_fast=False,
     supports_free_number=False,

@@ -41,10 +41,18 @@ class SiteProfile:
     # (cricmatch: "btag"). Drives extract_referral_code().
     tracking_param: str = "btag"
 
-    # Whether the login + live-casino selectors below are present/inspected for
-    # this site. False -> casino/hedge commands refuse cleanly instead of
-    # mis-clicking uninspected markup.
+    # Whether the live-casino selectors below are present/inspected for this
+    # site. False -> casino/hedge/tournament commands refuse cleanly instead
+    # of mis-clicking uninspected markup.
     supports_casino: bool = False
+
+    # Whether the LOGIN selectors alone are inspected. Split out from
+    # supports_casino 2026-08-19: starexch's login is verified live while its
+    # casino navigation is not (different markup), and the two used to be one
+    # flag, so login() refused on a site whose login demonstrably works.
+    # login() accepts either flag, so every existing site keeps working
+    # unchanged with just supports_casino set.
+    supports_login: bool = False
 
     # Whether this site's register endpoint has been confirmed (live, via a
     # captured network trace + a raw curl replay -- see CLAUDE.md) to be a
