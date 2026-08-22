@@ -81,6 +81,13 @@ STATE_FILE = os.environ.get("TOURNAMENT_STATE_FILE", "tournament_state.json")
 
 # One Chromium per seat, so this is machine capacity, not a tuning knob.
 GROUP_SIZE = max(2, int(os.environ.get("TOURNAMENT_GROUP_SIZE", "10")))
+# How many groups play AT THE SAME TIME. Every pair inside a group already
+# plays the same hand simultaneously, so this is the one remaining serial part
+# of a run -- ten groups played one after another is where a 100-account
+# tournament spent six hours. The machine runs GROUP_SIZE * PARALLEL_GROUPS
+# browsers at once, and logins stay paced globally, so raise it only as far as
+# this box has RAM for.
+PARALLEL_GROUPS = max(1, int(os.environ.get("TOURNAMENT_PARALLEL_GROUPS", "1")))
 # Seconds between starting one seat's login and the next. A burst of ~10
 # simultaneous logins from one IP is what trips the site's bare-403 block --
 # see CLAUDE.md's balance_checker findings.
@@ -181,7 +188,11 @@ def main_():
                     help="seat everyone and compute every stake, but never "
                          "place a bet")
     ap.add_argument("--group-size", type=int, default=GROUP_SIZE,
-                    help=f"browsers running at once (default {GROUP_SIZE})")
+                    help=f"browsers per group (default {GROUP_SIZE})")
+    ap.add_argument("--parallel-groups", type=int, default=PARALLEL_GROUPS,
+                    help=f"groups playing at the same time (default "
+                         f"{PARALLEL_GROUPS}); the machine runs group-size x "
+                         f"this many browsers at once")
     ap.add_argument("--limit", type=int, default=None,
                     help="only enter the first N accounts")
     ap.add_argument("--url", default=None)
@@ -290,7 +301,9 @@ def preflight(roster, site_url, args):
     log("")
     log(f"  site        : {site_url}")
     log(f"  entrants    : {len(roster)}")
-    log(f"  group size  : {args.group_size} browsers at once")
+    log(f"  group size  : {args.group_size} browsers per group")
+    log(f"  groups at once: {args.parallel_groups} "
+        f"({args.group_size * args.parallel_groups} browsers in total)")
     log(f"  proxies     : {len(proxies)} "
         f"({'direct' if proxies == [None] else 'configured'})")
     log(f"  login pacing: {LOGIN_SPACING}s between seats")
@@ -348,7 +361,7 @@ def play(ws, roster, site_url, args, on_stage=None):
         group_size=args.group_size, table_min=TABLE_MIN, table_max=TABLE_MAX,
         progress=progress, dry_run=args.dry_run,
         login_spacing=LOGIN_SPACING, state_path=STATE_FILE,
-        on_account=on_account)
+        on_account=on_account, parallel_groups=args.parallel_groups)
     flush()
 
     log("")

@@ -961,6 +961,52 @@ has genuinely stopped helping:
   that would report a winner who doesn't hold the money. A run that can't finish
   sets `summary["unfinished"]` and a problem naming exactly who holds what.
 
+### Speed: groups play in parallel (`--parallel-groups`)
+
+**What was already parallel:** every pair inside a group bets on the SAME hand
+at the same table, so a group of 10 is 5 pairs on 1 hand, not 5 hands. That has
+always been true and is why `play_hand` takes a list of pairs.
+
+**What was serial:** the groups themselves. `run_tournament` played group 1 to
+completion, then group 2, and so on. A group runs up to `MAX_GROUP_HANDS` (60)
+hands on a ~40s baccarat cycle ≈ 40 min, so 100 accounts / 10 per group = ten
+groups ≈ 6-7 hours. That is exactly where the time went.
+
+Groups now run on their own threads, `parallel_groups` at a time (CLI
+`--parallel-groups`, env `TOURNAMENT_PARALLEL_GROUPS`, **default 1** so nothing
+changes until it is asked for). Ten groups over 3 lanes is ~2.5 hours instead
+of ~7.
+
+- **The machine runs `group_size × parallel_groups` Chromiums at once.** That
+  is the only real ceiling — this is machine capacity, same as `group_size`
+  always was. Preflight prints the total.
+- **Logins are paced globally, not per lane.** `_LoginPacer` is one shared gate
+  that hands out login slots `login_spacing` apart; `seat_accounts` books each
+  seat's slot through it. So N lanes still produce the same logins/minute as
+  one lane did, which is the whole point — the site hard-blocks (bare 403,
+  ~20 min) at roughly 20 logins in a few minutes from one IP. **Any new code
+  that opens a seat must go through the pacer**, or parallelism silently
+  multiplies the login rate.
+- **`progress` and `on_account` are serialised behind one lock** inside
+  `run_tournament` (`emit()` / `account_update()`). Neither callback was
+  written to be re-entered — `tournament_runner`'s `progress` flushes rows to
+  the Google Sheet, and gspread is not thread-safe.
+- Log lines are tagged `[g3] …` when more than one lane is running; without
+  that the interleaved output reads like one very confused group.
+- `run_one_group()` returns its outcome instead of writing into `summary`; the
+  main thread merges each group as its lane finishes (`as_completed`), so the
+  state file and sheet keep up with a long stage. `stage_rec["groups"]` is
+  re-sorted into group order afterwards, since lanes finish out of order.
+- **A group that raises no longer aborts the tournament.** `group_failed()`
+  logs it, records a problem, and carries that group's accounts into the next
+  stage untouched — the same rule as everywhere else here: nothing leaves the
+  bracket except an account that was actually drained.
+
+**Why not just raise `group_size` instead?** It looks free (one hand covers
+every pair either way) but a bigger group needs more hands to drain down to one
+winner, and `MAX_GROUP_HANDS` (60) is sized for ~10. Raising group size without
+raising that cap makes groups end unresolved. Lanes don't have that problem.
+
 ### Seating: retried, and never a silent drop
 
 `seat_accounts()` opens a browser + live table per account, retrying failures

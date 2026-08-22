@@ -54,8 +54,9 @@ own TOTAL BET counter before the hand is allowed to run.
 from __future__ import annotations
 
 import json
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -148,6 +149,21 @@ SEAT_BLOCK_WAIT_SECS = 300
 # so it fixes things an in-group replay cannot -- worth doing more than once
 # before declaring the bracket unfinishable.
 MAX_STALLED_STAGES = 3
+
+# How many GROUPS play at the same time. Every pair inside one group already
+# plays the SAME hand simultaneously (see play_hand), so this is the only
+# serial part left: groups used to be played strictly one after another, which
+# is where a 100-account run spent its 6-7 hours -- ~40 minutes of live hands
+# per group, ten groups, nothing overlapping.
+#
+# The cost is browsers and logins, not risk: each lane is a completely separate
+# set of seats, so N lanes means N x group_size Chromiums on this machine, and
+# N groups all wanting to log in at once. The login rate is the dangerous half
+# -- the site hard-blocks (bare 403, ~20 min) at roughly 20 logins in a few
+# minutes from one IP -- so every lane books its login slots through the SAME
+# _LoginPacer below. Total logins per minute therefore stay exactly where they
+# were before parallelism; only the playing overlaps.
+DEFAULT_PARALLEL_GROUPS = 1
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +537,32 @@ class Seat:
 # assumptions. main.run_paired_hedge retries this case; here it must not, since
 # by the late rounds a single unhedged hand is most of the pot.
 # ---------------------------------------------------------------------------
+
+class _LoginPacer:
+    """One global gate on how often a login may START.
+
+    seat_accounts used to sleep `login_spacing` between its own seat opens,
+    which was enough while exactly one group ran at a time. With several groups
+    playing at once each of them would pace only itself, so the site would see
+    N logins per slot instead of one. Every lane shares one of these instead:
+    a slot is reserved under the lock and the waiting happens outside it, so
+    lanes queue up in order without blocking each other."""
+
+    def __init__(self, spacing):
+        self.spacing = float(spacing or 0)
+        self._lock = threading.Lock()
+        self._next = 0.0
+
+    def wait(self):
+        if self.spacing <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            delay = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self.spacing
+        if delay:
+            time.sleep(delay)
+
 
 def _resolve(fut, timeout=60, default=None):
     try:
@@ -983,7 +1025,7 @@ def chunk(items, size):
 
 
 def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
-                  attempts=SEAT_ATTEMPTS):
+                  attempts=SEAT_ATTEMPTS, pacer=None):
     """Open a browser + live table for every account in `group`, retrying the
     ones that fail.
 
@@ -994,8 +1036,13 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
     re-driving the existing page: the observed failure ("could not open the
     'Baccarat A' table") leaves a half-loaded frame that nothing short of a new
     context recovers. Retries also land on the NEXT proxy in the rotation,
-    since a rate-limited exit IP is one of the ways this fails."""
+    since a rate-limited exit IP is one of the ways this fails.
+
+    `pacer` is the shared _LoginPacer every concurrently-playing group books
+    its login slots through, so the site sees the same logins-per-minute no
+    matter how many groups are running."""
     progress = progress or (lambda _s: None)
+    pacer = pacer or _LoginPacer(login_spacing)
     ready = []
     pending = list(group)
     last_error = {}
@@ -1014,9 +1061,8 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
         # bare-403 rate block.
         futs = []
         for s in seats:
+            pacer.wait()
             futs.append(s.open_async(progress=lambda msg: progress(f"   {msg}")))
-            if login_spacing:
-                time.sleep(login_spacing)
 
         still = []
         for acct, s, f in zip(pending, seats, futs):
@@ -1110,21 +1156,47 @@ def diagnose_account(username, password, site_url=None, proxy=None):
 def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                    table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
                    progress=None, dry_run=False, login_spacing=0,
-                   state_path=None, on_account=None):
+                   state_path=None, on_account=None,
+                   parallel_groups=DEFAULT_PARALLEL_GROUPS):
     """Run the whole knockout.
 
     `roster` is [{"username", "password"}, ...]. `group_size` is how many
-    browsers run at once -- each entry needs its own Chromium, so this is a
+    browsers one group uses -- each entry needs its own Chromium, so this is a
     machine-capacity limit, not a tuning knob.
+
+    `parallel_groups` is how many groups play at the same time; the machine
+    ends up running `group_size * parallel_groups` browsers at once. Their
+    logins are paced through one shared _LoginPacer, so the site still sees the
+    same logins per minute no matter how many lanes are running.
 
     Returns a summary dict, also written to `state_path` after every group so a
     crash mid-tournament still leaves a record of who held what."""
     progress = progress or (lambda _s: None)
     proxies = list(proxies or [None])
+    parallel_groups = max(1, int(parallel_groups or 1))
+    pacer = _LoginPacer(login_spacing)
+
+    # Groups run on their own threads, and both callbacks reach out of this
+    # module -- `progress` writes the log and, in tournament_runner, flushes
+    # rows to the Google Sheet; `on_account` buffers those rows. Neither caller
+    # was ever written to be called from two threads at once, so every call
+    # goes through this one lock and they stay strictly one-at-a-time.
+    cb_lock = threading.Lock()
+    _progress = progress
+
+    def emit(msg):
+        with cb_lock:
+            _progress(msg)
+
+    def account_update(*args, **kwargs):
+        if on_account:
+            with cb_lock:
+                on_account(*args, **kwargs)
 
     summary = {
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "entrants": len(roster), "group_size": group_size,
+        "parallel_groups": parallel_groups,
         "dry_run": dry_run, "stages": [], "winner": None,
         "eliminated": [], "problems": [], "ended_at": None,
     }
@@ -1151,28 +1223,54 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
     while len(contenders) > 1:
         stage += 1
         groups = chunk(contenders, group_size)
-        progress(f"\n=== STAGE {stage}: {len(contenders)} account(s) in "
-                 f"{len(groups)} group(s) of up to {group_size} ===")
+        lanes = max(1, min(parallel_groups, len(groups)))
+        emit(f"\n=== STAGE {stage}: {len(contenders)} account(s) in "
+             f"{len(groups)} group(s) of up to {group_size}"
+             + (f", {lanes} playing at the same time" if lanes > 1 else "")
+             + " ===")
         stage_rec = {"stage": stage, "entrants": len(contenders),
-                     "groups": [], "winners": []}
+                     "parallel_groups": lanes, "groups": [], "winners": []}
         next_round = []
+        advancing_by_group = {}
 
-        for gi, group in enumerate(groups, 1):
+        def run_one_group(gi, group, lanes=lanes, stage=stage):
+            """Seat one group, play it down to a winner, tear it down.
+
+            Everything the bracket needs comes back in the returned dict rather
+            than being written into `summary` here: with lanes > 1 several of
+            these run on their own threads at once, and the caller merges them
+            one at a time on its own thread, so the record can never be caught
+            half-written."""
+            tag = f"[g{gi}] " if lanes > 1 else ""
+
+            def gp(msg):
+                # Lines from different groups interleave once lanes > 1, so say
+                # which group each came from -- without this the log reads like
+                # one very confused group.
+                if tag and isinstance(msg, str):
+                    lead = ""
+                    while msg.startswith("\n"):
+                        lead, msg = lead + "\n", msg[1:]
+                    msg = lead + tag + msg
+                emit(msg)
+
+            out = {"group": gi, "advancing": [], "eliminated": [],
+                   "problems": [], "group_rec": None, "winner_rec": None}
             if len(group) == 1:
-                progress(f"\n-- group {gi}: only {group[0]['username']} -- "
-                         "advances unplayed")
-                next_round.append(group[0])
-                stage_rec["groups"].append({"group": gi,
-                                            "accounts": [group[0]["username"]],
-                                            "winner": group[0]["username"],
-                                            "note": "single entrant, walkover"})
-                continue
+                gp(f"\n-- group {gi}: only {group[0]['username']} -- "
+                   "advances unplayed")
+                out["advancing"].append(dict(group[0]))
+                out["group_rec"] = {"group": gi,
+                                    "accounts": [group[0]["username"]],
+                                    "winner": group[0]["username"],
+                                    "note": "single entrant, walkover"}
+                return out
 
-            progress(f"\n-- group {gi}/{len(groups)}: "
-                     + ", ".join(a["username"] for a in group))
+            gp(f"\n-- group {gi}/{len(groups)}: "
+               + ", ".join(a["username"] for a in group))
             ready, failures = seat_accounts(
                 group, gi, site_url, proxies, login_spacing=login_spacing,
-                progress=progress)
+                progress=gp, pacer=pacer)
 
             try:
                 # An account that never seated must NOT just vanish from the
@@ -1189,10 +1287,10 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                         # is NOT eliminated and its money is NOT stranded -- the
                         # run simply could not reach the site. It goes back in
                         # the bracket and the next stage tries again.
-                        progress(f"   XX {f['username']}: the site is rate-"
-                                 "limiting logins, so it was never really "
-                                 "checked -- it stays in the bracket")
-                        summary["problems"].append(
+                        gp(f"   XX {f['username']}: the site is rate-"
+                           "limiting logins, so it was never really "
+                           "checked -- it stays in the bracket")
+                        out["problems"].append(
                             {"account": f["username"], "stage": stage,
                              "problem": "login rate-limited (the edge blocked "
                                         "it, the site never saw it), so this "
@@ -1203,10 +1301,10 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                         continue
 
                     if state == "rejected":
-                        progress(f"   XX {f['username']}: the site refused "
-                                 f"these credentials ({f['detail']}) -- check "
-                                 "the username/password")
-                        summary["problems"].append(
+                        gp(f"   XX {f['username']}: the site refused "
+                           f"these credentials ({f['detail']}) -- check "
+                           "the username/password")
+                        out["problems"].append(
                             {"account": f["username"], "stage": stage,
                              "problem": f"the site refused this login: "
                                         f"{f['detail']}. Credentials look "
@@ -1214,17 +1312,17 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         f"be reached."})
                         note = "could not log in; credentials refused"
                     elif bal is not None and bal < table_min:
-                        progress(f"   .. {f['username']} could not open a table "
-                                 f"but holds {bal} (< table min {table_min}) -- "
-                                 "already out, nothing stranded")
+                        gp(f"   .. {f['username']} could not open a table "
+                           f"but holds {bal} (< table min {table_min}) -- "
+                           "already out, nothing stranded")
                         note = ("could not be seated; was already below the "
                                 "table minimum, so nothing is stranded")
                     else:
                         held = "an unreadable balance" if bal is None else str(bal)
-                        progress(f"   XX {f['username']} could not open a table "
-                                 f"after {SEAT_ATTEMPTS} tries and holds {held} "
-                                 "-- that money stays put")
-                        summary["problems"].append(
+                        gp(f"   XX {f['username']} could not open a table "
+                           f"after {SEAT_ATTEMPTS} tries and holds {held} "
+                           "-- that money stays put")
+                        out["problems"].append(
                             {"account": f["username"], "stage": stage,
                              "balance": bal,
                              "problem": f"could not be seated after "
@@ -1233,10 +1331,9 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         f"could not move"})
                         note = "could not be seated; balance left stranded"
 
-                    if on_account:
-                        on_account(f["username"], bal, "eliminated", stage,
+                    account_update(f["username"], bal, "eliminated", stage,
                                    start_balance=None)
-                    summary["eliminated"].append(
+                    out["eliminated"].append(
                         {"account": f["username"], "stage": stage,
                          "balance": bal, "note": note})
 
@@ -1244,37 +1341,37 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                 seated = [a for a in group if a["username"] in keep]
 
                 if len(ready) < 2:
-                    progress("   XX fewer than two seats came up -- skipping "
-                             "this group, its seated accounts stay in the "
-                             "bracket")
-                    next_round.extend(seated)
-                    continue
+                    gp("   XX fewer than two seats came up -- skipping "
+                       "this group, its seated accounts stay in the "
+                       "bracket")
+                    out["advancing"].extend(dict(a) for a in seated)
+                    return out
 
                 # Stake sizing depends entirely on the rail. Check it against
                 # a real seat before any money moves.
                 ok, seen, msg = ready[0].call(
                     verify_table_chips, ready[0].frame).result(timeout=180)
-                progress(f"   rail: {msg}")
+                gp(f"   rail: {msg}")
                 if not ok:
-                    summary["problems"].append(
+                    out["problems"].append(
                         {"stage": stage, "group": gi,
                          "problem": f"chip rail check failed: {msg}"})
-                    progress("   XX refusing to bet in this group")
-                    next_round.extend(seated)
-                    continue
+                    gp("   XX refusing to bet in this group")
+                    out["advancing"].extend(dict(a) for a in seated)
+                    return out
 
                 winner, history, still_alive = play_group(
                     ready, table_min=table_min, table_max=table_max,
-                    progress=progress, dry_run=dry_run)
+                    progress=gp, dry_run=dry_run)
 
-                stage_rec["groups"].append(
-                    {"group": gi, "accounts": [s.username for s in ready],
-                     "winner": winner.username if winner else None,
-                     "hands": [hand_record(h) for h in history]})
+                out["group_rec"] = {
+                    "group": gi, "accounts": [s.username for s in ready],
+                    "winner": winner.username if winner else None,
+                    "hands": [hand_record(h) for h in history]}
 
                 for h in history:
                     if h["status"] in ("unhedged", "error"):
-                        summary["problems"].append(
+                        out["problems"].append(
                             {"stage": stage, "group": gi,
                              "pair": list(h["pair"]), "problem": h["message"]})
 
@@ -1286,7 +1383,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                 advancing = [winner] if winner else [
                     s for s in still_alive if (s.balance or 0) >= table_min]
                 if not winner and advancing:
-                    summary["problems"].append(
+                    out["problems"].append(
                         {"stage": stage, "group": gi,
                          "problem": "group ended without a single winner; "
                                     + ", ".join(f"{s.username} holds "
@@ -1299,11 +1396,10 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                     result = ("winner" if (winner and s is winner)
                               else "playing on" if keeps_playing
                               else "eliminated")
-                    if on_account:
-                        on_account(s.username, s.balance, result, stage,
+                    account_update(s.username, s.balance, result, stage,
                                    start_balance=s._start_balance)
                     if not keeps_playing:
-                        summary["eliminated"].append(
+                        out["eliminated"].append(
                             {"account": s.username, "stage": stage,
                              "balance": s.balance})
 
@@ -1311,40 +1407,94 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                     row = dict(next(a for a in group
                                     if a["username"] == s.username))
                     row["balance"] = s.balance
-                    next_round.append(row)
+                    out["advancing"].append(row)
 
                 # Rate-limited accounts were never actually tried, so they keep
                 # their place in the bracket for the next stage to retry.
                 for name in blocked:
-                    next_round.append(dict(next(a for a in group
-                                                if a["username"] == name)))
+                    out["advancing"].append(dict(next(a for a in group
+                                                      if a["username"] == name)))
 
                 if winner:
-                    stage_rec["winners"].append(
-                        {"account": winner.username, "balance": winner.balance})
-                    progress(f"   ** group {gi} winner: {winner.username} "
-                             f"(bal {winner.balance})")
+                    out["winner_rec"] = {"account": winner.username,
+                                         "balance": winner.balance}
+                    gp(f"   ** group {gi} winner: {winner.username} "
+                       f"(bal {winner.balance})")
                 elif advancing:
-                    progress(f"   .. group {gi} unresolved -- "
-                             + ", ".join(f"{s.username} ({s.balance})"
+                    gp(f"   .. group {gi} unresolved -- "
+                       + ", ".join(f"{s.username} ({s.balance})"
                                          for s in advancing)
-                             + " play on next stage")
+                       + " play on next stage")
             finally:
                 # Seats that never came up were already closed inside
                 # seat_accounts(); these are the ones that played.
                 for s in ready:
                     s.close()
 
+            return out
+
+        def merge(out):
+            """Fold one finished group into the bracket, on the main thread."""
+            if out.get("group_rec"):
+                stage_rec["groups"].append(out["group_rec"])
+            if out.get("winner_rec"):
+                stage_rec["winners"].append(out["winner_rec"])
+            summary["eliminated"].extend(out["eliminated"])
+            summary["problems"].extend(out["problems"])
+            advancing_by_group[out["group"]] = out["advancing"]
             save()
+
+        def group_failed(gi, group, exc):
+            """A group that blew up must not take its accounts down with it.
+
+            Same rule as everywhere else in here: nothing leaves the bracket
+            except an account that was actually drained. The other lanes carry
+            on -- before this, one group raising took the whole tournament
+            with it."""
+            emit(f"   XX group {gi} stopped with an error: {exc} -- its "
+                 "accounts stay in the bracket for the next stage")
+            summary["problems"].append(
+                {"stage": stage, "group": gi,
+                 "problem": f"the group ended with an error ({exc}); its "
+                            "accounts were carried into the next stage "
+                            "untouched, so nothing is stranded"})
+            advancing_by_group[gi] = [dict(a) for a in group]
+            save()
+
+        if lanes == 1:
+            for gi, group in enumerate(groups, 1):
+                try:
+                    merge(run_one_group(gi, group))
+                except Exception as exc:
+                    group_failed(gi, group, exc)
+        else:
+            with ThreadPoolExecutor(max_workers=lanes,
+                                    thread_name_prefix="group") as pool:
+                futs = {pool.submit(run_one_group, gi, group): (gi, group)
+                        for gi, group in enumerate(groups, 1)}
+                # Merge as each lane finishes rather than at the end of the
+                # stage, so the state file and the sheet keep up with a long
+                # stage instead of landing in one lump.
+                for fut in as_completed(futs):
+                    gi, group = futs[fut]
+                    try:
+                        merge(fut.result())
+                    except Exception as exc:
+                        group_failed(gi, group, exc)
+
+        # Lanes finish out of order; the record is written in group order.
+        stage_rec["groups"].sort(key=lambda g: g.get("group", 0))
+        for gi in sorted(advancing_by_group):
+            next_round.extend(advancing_by_group[gi])
 
         summary["stages"].append(stage_rec)
         save()
 
         if dry_run:
-            progress("\n(dry run -- stopping after the first stage's shape)")
+            emit("\n(dry run -- stopping after the first stage's shape)")
             break
         if not next_round:
-            progress("\nXX no accounts survived this stage")
+            emit("\nXX no accounts survived this stage")
             break
 
         # A stage that eliminated nobody is retried rather than ending the
@@ -1360,18 +1510,18 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
             continue
         stalled_stages += 1
         if stalled_stages >= MAX_STALLED_STAGES:
-            progress(f"\nXX {stalled_stages} stages in a row without a single "
-                     "elimination -- stopping rather than looping forever")
+            emit(f"\nXX {stalled_stages} stages in a row without a single "
+                 "elimination -- stopping rather than looping forever")
             break
-        progress(f"\n.. nobody was eliminated this stage -- re-seating every "
-                 f"account and playing it again "
-                 f"({stalled_stages}/{MAX_STALLED_STAGES})")
+        emit(f"\n.. nobody was eliminated this stage -- re-seating every "
+             f"account and playing it again "
+             f"({stalled_stages}/{MAX_STALLED_STAGES})")
 
     if len(contenders) == 1 and not dry_run:
         summary["winner"] = contenders[0]["username"]
         summary["winner_balance"] = contenders[0].get("balance")
-        progress(f"\n*** TOURNAMENT WINNER: {contenders[0]['username']} "
-                 f"(bal {contenders[0].get('balance')}) ***")
+        emit(f"\n*** TOURNAMENT WINNER: {contenders[0]['username']} "
+             f"(bal {contenders[0].get('balance')}) ***")
     elif not dry_run:
         # No single account holds the pot. Say exactly who is still holding
         # what, so it can be finished by hand -- this is the state that
@@ -1387,7 +1537,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
         summary["problems"].append(
             {"problem": f"tournament ended with no single winner; still to be "
                         f"settled between {held}"})
-        progress(f"\nXX NO WINNER -- still to be settled between {held}")
+        emit(f"\nXX NO WINNER -- still to be settled between {held}")
     summary["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()
     return summary
