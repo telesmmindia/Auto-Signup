@@ -1045,10 +1045,28 @@ of ~7.
   stage untouched — the same rule as everywhere else here: nothing leaves the
   bracket except an account that was actually drained.
 
-**Why not just raise `group_size` instead?** It looks free (one hand covers
-every pair either way) but a bigger group needs more hands to drain down to one
-winner, and `MAX_GROUP_HANDS` (60) is sized for ~10. Raising group size without
-raising that cap makes groups end unresolved. Lanes don't have that problem.
+**`group_size` is the better lever when the machine can take it.** One big
+group is strictly faster than several parallel ones: everybody is seated ONCE,
+there is no second stage, and a hand still covers every pair at the table
+regardless of how many there are. Lanes exist for when the box cannot hold
+every seat at once.
+
+The worry that a bigger group would blow through `MAX_GROUP_HANDS` (60) does
+not survive measurement. Simulating the real `pair_up()` and drain rule over
+200 seeds:
+
+| accounts in one group | hands, balances equal | hands, ±50% apart (worst) |
+|---|---|---|
+| 10 | 5 | 7 (14) |
+| 20 | 6 | 10 (24) |
+| 50 | 9 | 12 (21) |
+| 100 | 11 | 14 (29) |
+
+So the cap has margin even at 100. Hand count grows with log(N), not N,
+because every pair plays the same hand. **Starting balances matter more than
+group size**: equal balances make every stake `min(a,b)` drain the loser
+outright, while spread-out balances leave remainders that have to be replayed —
+worth 30-40% of the hands.
 
 ### Seating: retried, and never a silent drop
 
