@@ -114,8 +114,18 @@ WINDOW_POLL_SECS = 0.4
 # after the first seat sees a window before calling the silent ones blind.
 CROSS_SEAT_GRACE_SECS = 60
 # How long to wait for a fresh betting window to OPEN. The live cycle measured
-# ~35s (window open ~15s), so this spans several cycles.
-WINDOW_WAIT_SECS = 240
+# ~35s (window open ~15s), so this spans three of them.
+#
+# It was 240s (six cycles) until 2026-08-22, on the reasoning that a longer
+# wait can only help. It cannot: probe_seat_decay.py measured that a seat's
+# grip on the table DECAYS with age -- the first-opened of ten seats saw a
+# fifth as many betting windows as the last-opened, only two minutes older --
+# so every second spent waiting makes every seat in the group worse, and when
+# the wait finally fails the group ends and is re-seated anyway. Waiting four
+# minutes to reach the one repair that works (a fresh seat) cost the run four
+# minutes AND aged every other seat by four minutes. Three cycles is enough to
+# distinguish "we missed the edge" from "this table is not dealing to us".
+WINDOW_WAIT_SECS = 100
 # After betting closes, how long to wait for the hand to resolve and balances
 # to update.
 SETTLE_MAX_SECS = 150

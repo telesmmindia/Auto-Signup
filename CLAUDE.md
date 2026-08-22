@@ -961,6 +961,53 @@ has genuinely stopped helping:
   that would report a winner who doesn't hold the money. A run that can't finish
   sets `summary["unfinished"]` and a problem naming exactly who holds what.
 
+### Seat decay: a seat is only reliable while it is young
+
+**Measured on starexch 2026-08-22 with `probe_seat_decay.py`, and it explains
+every "no betting window opened in time" report.** Ten seats on one table,
+opened 15s apart, sampled once a second for ~3 minutes:
+
+| seat, in the order it was opened | 1st | 2nd | 3rd | 4th | 5th | 6th | 7th | 8th | 9th | 10th |
+|---|---|---|---|---|---|---|---|---|---|---|
+| betting windows seen (of 175) | 16 | 31 | 32 | 48 | 45 | 46 | 60 | 64 | 63 | 80 |
+| video feed live (of 175) | 45 | 81 | 81 | 121 | 121 | 121 | 157 | 157 | 157 | 174 |
+
+Perfectly monotonic in **open order**, with the video feed decaying in step.
+The oldest seat was about two minutes older than the youngest and saw a fifth
+as many windows. Extrapolated, a seat is useless after roughly 5-10 minutes —
+while a tournament wants to hold one for half an hour. That is the whole fault:
+hands 1-2 of a group land, then everything goes blind.
+
+**What it is NOT** — each ruled out by its own run, don't re-litigate:
+- *Tab visibility.* Every seat reports `document.visibilityState === "visible"`,
+  and `bring_to_front()` on half the seats changed nothing.
+- *The video stream.* `--noautoplay` and pausing every `<video>` changed nothing.
+- *An idle session.* `--poke` clicks a chip (not a bet) every 15s; no change.
+- *Machine CPU/RAM.* 32 cores at ~40%, 123GB free, and renderers never errored.
+- *Seat count.* 10 seats behave like 6; both work when freshly opened.
+- *The proxies.* The decay is monotonic in open order while proxies are handed
+  out round-robin, so seats 1 and 6 share an exit IP and do **not** match.
+- *The site or the table.* Ten fresh seats on the very table a tournament had
+  just failed on saw windows ~40% of samples, exactly the ~15s-open-of-~35s
+  cycle.
+
+**Reloading the game tab does not repair a decayed seat** — it loses the frame
+outright (`find_game_frame` returns nothing), and reloading five seats at once
+knocked out the other five as well. Only a fresh seat helps.
+
+**What follows from it**, and what the code now does:
+- `WINDOW_WAIT_SECS` cut 240s → 100s. A long wait cannot help: when it fails
+  the group ends and is re-seated anyway, so four minutes of waiting bought the
+  one repair that works four minutes late *and* aged every other seat by four
+  minutes.
+- **Seat fast so every seat is young at hand 1.** With `TOURNAMENT_LOGIN_SPACING`
+  at 20s, ten seats take 200s to open — the first seat is ~4 minutes old before
+  the first bet, i.e. already half dead. Now that `_LoginPacer` queues **per
+  exit IP**, five proxies at 5s spacing is one login per IP every 25s — safer
+  than the old global 20s ever was, and the group is seated in 50s.
+- Keep groups small enough to seat quickly; a group that takes longer to seat
+  than a seat survives can never work.
+
 ### Speed: where a run's time actually goes
 
 Measured on the real state files, not estimated. The 2026-08-19 starexch run
@@ -1162,6 +1209,16 @@ Run them, read the dump, *then* write selectors — same precedent as
 - `probe_login_balance.py` — captures the login/getBalance network calls.
 - `verify_stockmarket.py <user> <pass>` — drives `_open_table_for(game=STOCKMARKET)`
   end to end. **Run before any `/run`.**
+- `probe_seat_decay.py --env F [--seats N] [--secs N] [--spacing N]` — the one
+  that found seat decay. Pulls accounts straight from the tournament's own
+  sheet (no credentials typed or printed), seats N of them and samples every
+  table once a second, printing per-seat window/video/visibility counts. **The
+  per-seat spread is the point** — every seat similar means the setup works,
+  nobody seeing a window means the site or egress, and first-opened seats
+  scoring far below last-opened ones is seat decay. Flags exist to re-run each
+  ruled-out cause: `--front` (visibility), `--noautoplay` (video), `--poke`
+  (idle session), `--reload` (does not repair, breaks the seat), `--direct`
+  (skip the proxies). Places no bets.
 - `probe_baccarat_window.py <user> <pass> [--env F] [--seats N] [--secs N]` —
   seats via `tournament.Seat` (the exact tournament path, proxies included) and
   samples the live table once a second: whether `circle-timer` is present, the
