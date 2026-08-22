@@ -961,6 +961,49 @@ has genuinely stopped helping:
   that would report a winner who doesn't hold the money. A run that can't finish
   sets `summary["unfinished"]` and a problem naming exactly who holds what.
 
+### Speed: where a run's time actually goes
+
+Measured on the real state files, not estimated. The 2026-08-19 starexch run
+(5 accounts, 3 stages, 11 hands) took **24 minutes**, split roughly:
+
+| cost | share | why |
+|---|---|---|
+| 2 × `no_window` hands | ~8 min | each burns the full `WINDOW_WAIT_SECS` (240s) |
+| re-seating for 3 stages | ~6 min | and both extra stages were *caused* by those two hands |
+| the 9 real hands | ~6 min | ~40s per baccarat cycle — the irreducible part |
+
+So on a small roster the tournament is mostly overhead, not gameplay, and the
+`no_window` path is the single biggest item. Two changes attack it:
+
+**Cross-seat blind detection (`_join_window_waits`).** Every seat in a group is
+at the SAME physical table and is dealt the SAME window at the same moment, so
+the other seats are a live control. Once one seat reports a fresh window and
+`CROSS_SEAT_GRACE_SECS` (60s, about 1.5 table cycles) passes, a seat that has
+still reported nothing is not unlucky — it is not being dealt to, i.e. `blind`.
+That verdict now lands in ~100s instead of 240s, and since a blind seat ends
+the group it saves the re-seat it would have triggered too. `should_stop` on
+`wait_for_window_open` is what makes the laggards return promptly — **it is not
+optional**: a thread still stuck in that poll loop holds its seat's executor,
+and therefore its Chromium, open past `close()`.
+
+This only ever decides to STOP EARLY — it can never cause a bet. A seat wrongly
+called blind costs one re-seat, not money. When *every* seat is blind there is
+no control to compare against and the full 240s is still spent, which is the
+case that deadline was earned for.
+
+**`_LoginPacer` queues per exit IP, not globally.** The block is per IP, so ten
+seats on one proxy still go out one per `login_spacing`, but ten seats over five
+proxies go out five at a time. This is the line that turns extra proxy IPs into
+actual seating speed — the thing CLAUDE.md keeps saying is the only real fix.
+
+**The floor.** A hand is one ~40s table cycle and a knockout needs ~log2(N)
+of them at best (7 for 100 accounts, 5 for 30), so ~4-6 minutes of play is the
+hard floor no code change touches, plus ~40s to load a table. Everything above
+that floor is seating, re-seating and stalls. A sub-10-minute run is reachable
+for a roster that fits in one group with no re-seat; it is not reachable for
+100 accounts on one machine, where the wall is how many live-video Chromiums
+the box can hold.
+
 ### Speed: groups play in parallel (`--parallel-groups`)
 
 **What was already parallel:** every pair inside a group bets on the SAME hand

@@ -56,7 +56,8 @@ from __future__ import annotations
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
+                                as_completed, wait as futures_wait)
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -106,6 +107,12 @@ CLICK_POLL_SECS = 0.15
 CLICK_RETRIES = 3             # consecutive dropped clicks before giving up
 
 WINDOW_POLL_SECS = 0.4
+# Every seat in a group sits at the SAME table, so they are all dealt the same
+# betting window at the same moment. Once ONE seat has reported a fresh window
+# and a whole table cycle has gone by, a seat that has still reported nothing
+# is not unlucky -- it is not being dealt to at all. This is how long to allow
+# after the first seat sees a window before calling the silent ones blind.
+CROSS_SEAT_GRACE_SECS = 60
 # How long to wait for a fresh betting window to OPEN. The live cycle measured
 # ~35s (window open ~15s), so this spans several cycles.
 WINDOW_WAIT_SECS = 240
@@ -232,7 +239,7 @@ DEAD_FRAME_POLLS = 25
 
 
 def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
-                         progress=None):
+                         progress=None, should_stop=None):
     """Block until a FRESH betting window opens. Returns True, False, "dead"
     or "blind".
 
@@ -260,7 +267,16 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
     difference between giving up in minutes and giving up in hours.
 
     False therefore now means only "windows are opening, we just missed the
-    edge in time" -- the genuinely retryable case."""
+    edge in time" -- the genuinely retryable case.
+
+    `should_stop` lets the caller end the wait early -- it is how the other
+    seats at the same table answer the "blind" question in a cycle instead of
+    in four minutes (see _join_window_waits). Being stopped is judged exactly
+    like running out of time: never having seen the window open is "blind",
+    having seen it but missed the edge is a plain retryable False. Checking it
+    every poll also matters for the seat's own health: the group ends the
+    moment a blind seat is found, and a thread still stuck in here would hold
+    its seat's executor -- and therefore its Chromium -- open past close()."""
     progress = progress or (lambda _s: None)
     deadline = time.time() + wait_secs
     saw_closed = False
@@ -268,6 +284,10 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
     silent = 0
     polls = 0
     while time.time() < deadline:
+        if should_stop and should_stop():
+            progress(f"   ⏹ window wait stopped after {polls} polls, "
+                     f"ever_open={ever_open}")
+            return False if ever_open else "blind"
         try:
             is_open = m._betting_open(frame, game)
             if _frame_gone(frame):
@@ -300,6 +320,71 @@ def wait_for_window_open(frame, game=BACCARAT, wait_secs=WINDOW_WAIT_SECS,
     progress(f"   ⏰ window timeout after {polls} polls, is_open={is_open}, "
              f"ever_open={ever_open}")
     return False if ever_open else "blind"
+
+
+def _join_window_waits(futs, progress=None, wait_secs=WINDOW_WAIT_SECS,
+                       grace=CROSS_SEAT_GRACE_SECS, stop=None):
+    """Join every seat's wait_for_window_open, and stop waiting on the silent
+    ones once the rest have plainly been dealt a window.
+
+    Returns the results in the order the futures were given.
+
+    Why this is not just `[f.result() for f in futs]`: every seat in a group is
+    at the SAME physical table and is dealt the SAME window at the same moment.
+    So the other seats are a live control. Once one of them reports a fresh
+    window and a whole table cycle has passed, a seat that has still reported
+    nothing is not merely unlucky -- it is not being dealt to, which is the
+    "blind" case that only a fresh seat can mend.
+
+    Learning that by letting the seat run out its own WINDOW_WAIT_SECS costs
+    four minutes, and because a blind seat ends the group it then costs a full
+    re-seat of everybody on top. Measured on the 2026-08-19 starexch run: two
+    of eleven hands went that way and burned roughly eight of its twenty-four
+    minutes, and the two extra stages they forced burned most of the rest.
+    Here the same conclusion is reached about a cycle after the first seat is
+    dealt in.
+
+    This only ever decides to STOP EARLY -- it can never cause a bet. A seat
+    wrongly called blind costs one re-seat, not money.
+    """
+    progress = progress or (lambda _s: None)
+    stop = stop or threading.Event()
+    out = [None] * len(futs)
+    pending = {f: i for i, f in enumerate(futs)}
+    deadline = time.time() + wait_secs + 30
+    cutoff = None
+
+    while pending and time.time() < deadline:
+        done, _ = futures_wait(list(pending), timeout=1.0,
+                               return_when=FIRST_COMPLETED)
+        for f in done:
+            i = pending.pop(f)
+            try:
+                out[i] = f.result()
+            except Exception:
+                out[i] = False
+
+        if cutoff is None and any(o is True for o in out):
+            cutoff = time.time() + grace
+        if cutoff and pending and time.time() >= cutoff:
+            progress(f"   ⏹ {len(pending)} seat(s) still have not seen a "
+                     f"betting window {grace:.0f}s after the others were dealt "
+                     "one -- they are not being dealt to, so stopping the wait "
+                     "now instead of running out the clock")
+            stop.set()
+            break
+
+    if pending:
+        # Whether we stopped them or simply ran out of time, give the threads a
+        # moment to notice and answer for themselves; only invent an answer for
+        # one that will not come back.
+        stop.set()
+        for f, i in pending.items():
+            try:
+                out[i] = f.result(timeout=30)
+            except Exception:
+                out[i] = "blind"
+    return out
 
 
 def _frame_gone(frame):
@@ -551,15 +636,26 @@ class _LoginPacer:
     def __init__(self, spacing):
         self.spacing = float(spacing or 0)
         self._lock = threading.Lock()
-        self._next = 0.0
+        self._next = {}
 
-    def wait(self):
+    def wait(self, key=None):
+        """Book the next login slot for `key` and sleep until it comes round.
+
+        The block being paced against is per EXIT IP, not per site, so the
+        queue is per proxy: ten seats on one proxy still go out one every
+        `spacing` seconds, but ten seats spread over five proxies go out five
+        at a time. That is why CLAUDE.md keeps saying real throughput needs
+        more proxy IPs rather than tuning -- this is the line that turns extra
+        IPs into actual seating speed. `key=None` (no proxy) is just another
+        queue: the machine's own IP.
+        """
         if self.spacing <= 0:
             return
         with self._lock:
             now = time.monotonic()
-            delay = max(0.0, self._next - now)
-            self._next = max(now, self._next) + self.spacing
+            nxt = self._next.get(key, 0.0)
+            delay = max(0.0, nxt - now)
+            self._next[key] = max(now, nxt) + self.spacing
         if delay:
             time.sleep(delay)
 
@@ -656,9 +752,11 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     # --- wait for a fresh window, on every seat at once ---------------
     progress("   ⏳ waiting for a fresh betting window…")
     seats = [s for L in live for s in (L["a"], L["b"])]
+    window_stop = threading.Event()
     wfuts = [s.call(wait_for_window_open, s.frame, BACCARAT,
-                     progress=progress) for s in seats]
-    opened = [_resolve(f, WINDOW_WAIT_SECS + 30, False) for f in wfuts]
+                    progress=progress, should_stop=window_stop.is_set)
+             for s in seats]
+    opened = _join_window_waits(wfuts, progress=progress, stop=window_stop)
     if not all(o is True for o in opened):
         # Name the real cause. A seat whose frame died needs a NEW seat, which
         # only a stage replay can give it -- replaying the hand against the
@@ -1039,8 +1137,8 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
     since a rate-limited exit IP is one of the ways this fails.
 
     `pacer` is the shared _LoginPacer every concurrently-playing group books
-    its login slots through, so the site sees the same logins-per-minute no
-    matter how many groups are running."""
+    its login slots through, so the site sees the same logins-per-minute per
+    exit IP no matter how many groups are running."""
     progress = progress or (lambda _s: None)
     pacer = pacer or _LoginPacer(login_spacing)
     ready = []
@@ -1061,7 +1159,7 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
         # bare-403 rate block.
         futs = []
         for s in seats:
-            pacer.wait()
+            pacer.wait(s.proxy)
             futs.append(s.open_async(progress=lambda msg: progress(f"   {msg}")))
 
         still = []
