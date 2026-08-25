@@ -1194,6 +1194,13 @@ of a fresh context recovers — and lands on the **next proxy** in the rotation,
 since a rate-limited exit IP is one way this fails. A failed seat is closed
 before the retry, or each attempt leaks a Chromium and a pproxy.
 
+**A below-minimum account is pulled from the retry loop after attempt 1.**
+A ₹0/below-min account cannot open a live table at all (confirmed 2026-08-18),
+so once the between-attempts HTTP diagnose reads its balance the remaining
+browser attempts are skipped — it still returns as a failure and is classified
+"already out, nothing stranded". Measured: six ₹0 accounts × 3 attempts was
+most of a 9-minute cleanup stage that played one hand.
+
 **Don't retry blind — ask the site why first.** `login()`'s timeout message
 ("credentials rejected **or** the login was throttled") cannot tell those apart,
 and they need opposite responses. Between seating attempts,

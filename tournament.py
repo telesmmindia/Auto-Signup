@@ -1171,7 +1171,8 @@ def chunk(items, size):
 
 
 def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
-                  attempts=SEAT_ATTEMPTS, pacer=None, game=None):
+                  attempts=SEAT_ATTEMPTS, pacer=None, game=None,
+                  table_min=DEFAULT_TABLE_MIN):
     """Open a browser + live table for every account in `group`, retrying the
     ones that fail.
 
@@ -1191,6 +1192,7 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
     pacer = pacer or _LoginPacer(login_spacing)
     ready = []
     pending = list(group)
+    gave_up = []       # below-table-min accounts pulled out of the retry loop
     last_error = {}
     seen = {}          # username -> (state, balance, detail) from diagnose
 
@@ -1237,7 +1239,34 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
             seen[a["username"]] = diagnose_account(
                 a["username"], a["password"], site_url,
                 proxies[gi % len(proxies)])
+
+        # An account below the table minimum cannot open a live table AT ALL
+        # (confirmed live 2026-08-18: the Rs 0 account failed both seat
+        # attempts while every funded one seated fine), so retrying it just
+        # burns ~40s of browser per attempt. Its elimination is already clean
+        # -- the caller classifies it "already out, nothing stranded" from the
+        # same diagnosis -- so stop seating it now. Cost measured on the
+        # cleanup dry run 2026-08-25: six Rs 0 accounts x 3 attempts each was
+        # most of a 9-minute stage that played one hand.
+        broke = [a for a in pending
+                 if (lambda d: d and d[0] == "ok" and d[1] is not None
+                     and d[1] < table_min)(seen.get(a["username"]))]
+        if broke:
+            for a in broke:
+                bal = seen[a["username"]][1]
+                progress(f"   .. {a['username']} holds {bal} (< table min "
+                         f"{table_min}) -- it cannot open a live table, not "
+                         "retrying its seat")
+            # They still come back as failures (classified cleanly by the
+            # caller from this same diagnosis) -- pulled from the RETRY loop,
+            # never from the record. Silently dropping an account is the
+            # stranding bug this file keeps warning about.
+            gave_up.extend(broke)
+            pending = [a for a in pending if a not in broke]
+
         kinds = {st for st, _, _ in seen.values() if st}
+        if not pending:
+            break
 
         if "blocked" in kinds:
             # Documented live: once tripped, the login block lasts ~20 minutes
@@ -1258,7 +1287,7 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
             time.sleep(SEAT_RETRY_WAIT_SECS)
 
     failures = []
-    for a in pending:
+    for a in pending + gave_up:
         state, bal, detail = seen.get(a["username"]) or diagnose_account(
             a["username"], a["password"], site_url,
             proxies[gi % len(proxies)])
@@ -1440,7 +1469,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                + ", ".join(a["username"] for a in group))
             ready, failures = seat_accounts(
                 group, gi, site_url, proxies, login_spacing=login_spacing,
-                progress=gp, pacer=pacer, game=game)
+                progress=gp, pacer=pacer, game=game, table_min=table_min)
 
             try:
                 # An account that never seated must NOT just vanish from the
