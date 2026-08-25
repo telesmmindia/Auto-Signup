@@ -3001,8 +3001,13 @@ def _open_via_provider_lobby(game_page, frame, game):
     while time.time() < deadline:
         for fr in game_page.frames:
             try:
-                if fr.evaluate("(r) => !!document.querySelector(`[data-role=\"${r}\"]`)",
-                               game.table_ready_role):
+                # Same dual lookup as _TAG_BET_SPOT_JS: roulette's spots are
+                # [data-bet-spot-id=...], not [data-role=...]. Without it this
+                # loop can never see an opened roulette table ready.
+                if fr.evaluate(
+                        "(r) => !!(document.querySelector(`[data-role=\"${r}\"]`)"
+                        " || document.querySelector(`[data-bet-spot-id=\"${r}\"]`))",
+                        game.table_ready_role):
                     return fr
             except Exception:
                 continue
