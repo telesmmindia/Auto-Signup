@@ -55,6 +55,8 @@ ap.add_argument("--open", default=None,
                 help="switch to this exact tile and sample it read-only")
 ap.add_argument("--secs", type=float, default=90,
                 help="how long to sample the opened table")
+ap.add_argument("--spots", action="store_true",
+                help="with --open: also dump every element that looks like an even-money bet spot (RED/BLACK etc.), with its attrs")
 ap.add_argument("--account", type=int, default=0,
                 help="which sheet row's account to seat (0 = first)")
 ap.add_argument("--direct", action="store_true",
@@ -170,6 +172,47 @@ def dump_searches(terms):
         print()
 
 
+# The even-money spots on a roulette layout do not follow the
+# bet-spot-<Name> convention baccarat and dragon tiger use, so find them by
+# what they SAY rather than by role: any smallish visible element whose own
+# text is exactly one of the outside-bet labels, dumped with every attribute
+# so the real selector can be read off the result.
+DUMP_SPOTS_JS = """() => {
+    const WANT = new Set(['RED','BLACK','EVEN','ODD','1-18','19-36',
+                          '1\u201318','19\u201336']);
+    const out = [];
+    for (const e of document.querySelectorAll('*')) {
+        const r = e.getBoundingClientRect();
+        if (r.width < 8 || r.height < 8 || r.width > 500) continue;
+        const own = Array.from(e.childNodes)
+            .filter(n => n.nodeType === 3)
+            .map(n => n.textContent.trim()).join('');
+        const txt = own || (e.innerText || '').trim();
+        if (!WANT.has(txt.toUpperCase())) continue;
+        const attrs = {};
+        for (const a of e.attributes || [])
+            attrs[a.name] = String(a.value).slice(0, 80);
+        // walk up to the nearest ancestor carrying a data-* attribute --
+        // the label is often a plain <span> inside the clickable spot
+        let anc = e.parentElement, ancDesc = null, hops = 0;
+        while (anc && hops < 6) {
+            const da = Array.from(anc.attributes || [])
+                .filter(a => a.name.startsWith('data-'));
+            if (da.length) {
+                ancDesc = anc.tagName.toLowerCase() + ' '
+                    + da.map(a => `${a.name}=${String(a.value).slice(0, 60)}`).join(' ');
+                break;
+            }
+            anc = anc.parentElement; hops++;
+        }
+        out.push({label: txt, tag: e.tagName.toLowerCase(),
+                  w: Math.round(r.width), h: Math.round(r.height),
+                  attrs, anc: ancDesc});
+    }
+    return out;
+}"""
+
+
 SAMPLE_TABLE_JS = """() => {
     const g = r => document.querySelector(`[data-role="${r}"]`);
     const txt = e => e ? (e.innerText || '').trim() : null;
@@ -210,6 +253,19 @@ def sample_table(tile, secs):
     seat.frame = m._open_via_provider_lobby(seat.game_page, seat.frame, game)
     tid = m._table_id(seat.game_page)
     print(f"   switched, table_id={tid}\n   sampling {secs:.0f}s…\n")
+
+    if args.spots:
+        print("   even-money spot candidates:")
+        try:
+            for sp in seat.frame.evaluate(DUMP_SPOTS_JS):
+                a = " ".join(f"{k}={v}" for k, v in sp["attrs"].items())
+                print(f"      {sp['label']:>6} <{sp['tag']} {sp['w']}x{sp['h']}"
+                      f"> {a}")
+                if sp.get("anc"):
+                    print(f"             ancestor: {sp['anc']}")
+        except Exception as exc:
+            print(f"      dump failed: {exc}")
+        print()
 
     windows = 0
     n = 0
