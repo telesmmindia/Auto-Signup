@@ -178,36 +178,29 @@ def dump_searches(terms):
 # text is exactly one of the outside-bet labels, dumped with every attribute
 # so the real selector can be read off the result.
 DUMP_SPOTS_JS = """() => {
-    const WANT = new Set(['RED','BLACK','EVEN','ODD','1-18','19-36',
-                          '1\u201318','19\u201336']);
+    // The board labels are not plain text nodes, so hunt by ATTRIBUTE: any
+    // element carrying an attribute whose name or value mentions an
+    // outside-bet identity (red/black/even/odd/low/high/18/36) or that looks
+    // like a generic bet-spot id. Dump attrs + geometry; selector is read
+    // off the result by a human.
+    const pat = /red|black|even|odd|low|high|1-18|19-36|18to|36|spot/i;
     const out = [];
+    const seen = new Set();
     for (const e of document.querySelectorAll('*')) {
+        const attrs = Array.from(e.attributes || []);
+        if (!attrs.length) continue;
+        const hit = attrs.some(a => (a.name.startsWith('data-') || a.name === 'class')
+                                    && pat.test(a.name + '=' + a.value));
+        if (!hit) continue;
         const r = e.getBoundingClientRect();
-        if (r.width < 8 || r.height < 8 || r.width > 500) continue;
-        const own = Array.from(e.childNodes)
-            .filter(n => n.nodeType === 3)
-            .map(n => n.textContent.trim()).join('');
-        const txt = own || (e.innerText || '').trim();
-        if (!WANT.has(txt.toUpperCase())) continue;
-        const attrs = {};
-        for (const a of e.attributes || [])
-            attrs[a.name] = String(a.value).slice(0, 80);
-        // walk up to the nearest ancestor carrying a data-* attribute --
-        // the label is often a plain <span> inside the clickable spot
-        let anc = e.parentElement, ancDesc = null, hops = 0;
-        while (anc && hops < 6) {
-            const da = Array.from(anc.attributes || [])
-                .filter(a => a.name.startsWith('data-'));
-            if (da.length) {
-                ancDesc = anc.tagName.toLowerCase() + ' '
-                    + da.map(a => `${a.name}=${String(a.value).slice(0, 60)}`).join(' ');
-                break;
-            }
-            anc = anc.parentElement; hops++;
-        }
-        out.push({label: txt, tag: e.tagName.toLowerCase(),
-                  w: Math.round(r.width), h: Math.round(r.height),
-                  attrs, anc: ancDesc});
+        if (r.width < 6 || r.height < 6 || r.width > 600) continue;
+        const desc = e.tagName.toLowerCase() + '|' + attrs.map(
+            a => `${a.name}=${String(a.value).slice(0, 70)}`).join(' ');
+        if (seen.has(desc)) continue;
+        seen.add(desc);
+        out.push(`<${e.tagName.toLowerCase()} ${Math.round(r.width)}x${Math.round(r.height)}> `
+                 + attrs.map(a => `${a.name}=${String(a.value).slice(0, 70)}`).join(' '));
+        if (out.length > 120) break;
     }
     return out;
 }"""
@@ -257,12 +250,8 @@ def sample_table(tile, secs):
     if args.spots:
         print("   even-money spot candidates:")
         try:
-            for sp in seat.frame.evaluate(DUMP_SPOTS_JS):
-                a = " ".join(f"{k}={v}" for k, v in sp["attrs"].items())
-                print(f"      {sp['label']:>6} <{sp['tag']} {sp['w']}x{sp['h']}"
-                      f"> {a}")
-                if sp.get("anc"):
-                    print(f"             ancestor: {sp['anc']}")
+            for line in seat.frame.evaluate(DUMP_SPOTS_JS):
+                print(f"      {line}")
         except Exception as exc:
             print(f"      dump failed: {exc}")
         print()
