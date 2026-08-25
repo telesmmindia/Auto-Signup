@@ -205,13 +205,21 @@ def verify_table_chips(frame, expected=BACCARAT_CHIPS, wait_secs=120):
 
     The rail only populates during a betting window, so this polls rather than
     reading once -- the exact mistake that produced the wrong
-    selectable_chips=False finding. Returns (ok, chips_seen, message)."""
+    selectable_chips=False finding. Returns (ok, chips_seen, message).
+
+    `expected=None` means "this table's rail is not known ahead of time --
+    read it and hand it back": ok as soon as ANY chips are readable, and the
+    caller sizes every stake from `chips_seen`. That is how a table other than
+    Baccarat A (a lower-minimum one found via the provider lobby) gets its
+    real denominations without anyone hard-coding them wrong."""
     deadline = time.time() + wait_secs
     seen = []
     while time.time() < deadline:
         rail = m.read_chips(frame)
         seen = sorted({c for c in (rail.get("chips") or []) if c > 0})
         if seen:
+            if expected is None:
+                return True, seen, f"rail read live: {seen}"
             missing = [c for c in expected if c not in seen]
             if missing:
                 return False, seen, (
@@ -411,7 +419,9 @@ def _frame_gone(frame):
         return True
 
 
-def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT):
+def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT,
+                chips=BACCARAT_CHIPS, table_min=DEFAULT_TABLE_MIN,
+                table_max=DEFAULT_TABLE_MAX):
     """Click `plan`'s chips onto one bet spot. Returns the TOTAL BET after.
 
     One seat only ever bets one spot, so TOTAL BET is that seat's stake and
@@ -442,7 +452,9 @@ def place_stake(frame, role, plan, target=None, attempts=3, game=BACCARAT):
         if short <= 0:
             break
         # First pass clicks the whole plan; later passes only the shortfall.
-        todo = plan if attempt == 0 and not placed else plan_stake(short)[1]
+        todo = (plan if attempt == 0 and not placed
+                else plan_stake(short, chips, table_min=table_min,
+                                table_max=table_max)[1])
         if not todo:
             break
 
@@ -534,6 +546,10 @@ class Seat:
     password: str
     site_url: str = None
     proxy: str = None
+    # Which live table to open. Defaults to Baccarat A; a tournament pointed
+    # at a lower-minimum table (via the provider lobby) passes its own
+    # GameProfile here and every seat follows it.
+    game: object = None
 
     _pw: object = field(default=None, repr=False)
     browser: object = field(default=None, repr=False)
@@ -558,12 +574,13 @@ class Seat:
         proxy_conf = m.parse_proxy(self.proxy) if self.proxy else None
         if proxy_conf:
             proxy_conf, self.bridge = m.maybe_bridge_proxy(proxy_conf)
+        game = self.game or BACCARAT
         self._pw, self.browser = m._launch_pw_browser()
         self.context, self.page, self.game_page, self.frame = m._open_table_for(
             self.browser, self.username, self.password, self.site_url,
-            BACCARAT.category, BACCARAT.tile_text,
+            game.category, game.tile_text,
             proxy_conf=proxy_conf, progress=progress, label=self.username,
-            game=BACCARAT)
+            game=game)
         self.table_id = m._table_id(self.game_page)
         self.balance = m.read_game_balance(self.frame)
         self._start_balance = self.balance
@@ -678,7 +695,8 @@ def _resolve(fut, timeout=60, default=None):
 
 
 def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
-              progress=None, dry_run=False):
+              progress=None, dry_run=False, game=BACCARAT,
+              chips=BACCARAT_CHIPS):
     """Play ONE hand covering every pair in `pairs` (a list of (seat_a, seat_b)).
 
     seat_a bets Banker, seat_b bets Player. Returns a list of per-pair result
@@ -727,7 +745,7 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
                             "winner": None, "loser": None, "status": "error",
                             "message": "could not read both balances"})
             continue
-        stake, plan = plan_stake(min(a.balance, b.balance),
+        stake, plan = plan_stake(min(a.balance, b.balance), chips,
                                  table_min=table_min, table_max=table_max)
         if not stake:
             # One side is under the table minimum: it cannot bet at all, so
@@ -747,9 +765,9 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         return results
 
     for L in live:
-        progress(f"   {L['a'].username} (Banker) vs {L['b'].username} "
-                 f"(Player) — ₹{L['stake']:,} each "
-                 f"[{'+'.join(str(c) for c in L['plan'])}]")
+        progress(f"   {L['a'].username} ({game.side_a_label}) vs "
+                 f"{L['b'].username} ({game.side_b_label}) — ₹{L['stake']:,} "
+                 f"each [{'+'.join(str(c) for c in L['plan'])}]")
 
     if dry_run:
         for L in live:
@@ -763,7 +781,7 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     progress("   ⏳ waiting for a fresh betting window…")
     seats = [s for L in live for s in (L["a"], L["b"])]
     window_stop = threading.Event()
-    wfuts = [s.call(wait_for_window_open, s.frame, BACCARAT,
+    wfuts = [s.call(wait_for_window_open, s.frame, game,
                     progress=progress, should_stop=window_stop.is_set)
              for s in seats]
     opened = _join_window_waits(wfuts, progress=progress, stop=window_stop)
@@ -807,8 +825,12 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
     progress(f"   🎲 placing {len(live)} pair(s) of bets…")
     pfuts = []
     for L in live:
-        fa = L["a"].call(place_stake, L["a"].frame, BACCARAT.side_a_role, L["plan"])
-        fb = L["b"].call(place_stake, L["b"].frame, BACCARAT.side_b_role, L["plan"])
+        fa = L["a"].call(place_stake, L["a"].frame, game.side_a_role, L["plan"],
+                         game=game, chips=chips, table_min=table_min,
+                         table_max=table_max)
+        fb = L["b"].call(place_stake, L["b"].frame, game.side_b_role, L["plan"],
+                         game=game, chips=chips, table_min=table_min,
+                         table_max=table_max)
         pfuts.append((L, fa, fb))
     for L, fa, fb in pfuts:
         L["tb_a"] = _resolve(fa, 60)
@@ -977,7 +999,8 @@ def pair_up(entries):
 
 
 def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
-               progress=None, dry_run=False, on_round=None):
+               progress=None, dry_run=False, on_round=None, game=BACCARAT,
+               chips=BACCARAT_CHIPS):
     """Play an already-seated group down to a single winner.
 
     Every seat is at the same table, so each hand covers every pair in the
@@ -1034,7 +1057,8 @@ def play_group(seats, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
         progress(f" -- group hand {hand_no}: {len(pairs)} pair(s)"
                  + (f", bye -> {bye.username}" if bye else ""))
         results = play_hand(pairs, table_min=table_min, table_max=table_max,
-                            progress=progress, dry_run=dry_run)
+                            progress=progress, dry_run=dry_run, game=game,
+                            chips=chips)
         history.extend(results)
         if on_round:
             on_round(hand_no, results, bye)
@@ -1133,7 +1157,7 @@ def chunk(items, size):
 
 
 def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
-                  attempts=SEAT_ATTEMPTS, pacer=None):
+                  attempts=SEAT_ATTEMPTS, pacer=None, game=None):
     """Open a browser + live table for every account in `group`, retrying the
     ones that fail.
 
@@ -1161,7 +1185,8 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
             break
 
         seats = [Seat(a["username"], a["password"], site_url=site_url,
-                      proxy=proxies[(i + gi + attempt) % len(proxies)])
+                      proxy=proxies[(i + gi + attempt) % len(proxies)],
+                      game=game)
                  for i, a in enumerate(pending)]
 
         # Open concurrently, but space the LOGIN starts: a burst of ~10
@@ -1265,7 +1290,8 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                    table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
                    progress=None, dry_run=False, login_spacing=0,
                    state_path=None, on_account=None,
-                   parallel_groups=DEFAULT_PARALLEL_GROUPS):
+                   parallel_groups=DEFAULT_PARALLEL_GROUPS,
+                   game=None, chips=None):
     """Run the whole knockout.
 
     `roster` is [{"username", "password"}, ...]. `group_size` is how many
@@ -1277,12 +1303,31 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
     logins are paced through one shared _LoginPacer, so the site still sees the
     same logins per minute no matter how many lanes are running.
 
+    `game` picks the live table (a GameProfile; default Baccarat A). `chips`
+    is that table's chip rail; leave it None to have the rail READ LIVE from
+    the first seated table and used for every stake -- the safe choice for any
+    table that is not Baccarat A, whose denominations decide both how fast a
+    loser drains and how much stays stranded under the smallest chip.
+
     Returns a summary dict, also written to `state_path` after every group so a
     crash mid-tournament still leaves a record of who held what."""
     progress = progress or (lambda _s: None)
     proxies = list(proxies or [None])
     parallel_groups = max(1, int(parallel_groups or 1))
     pacer = _LoginPacer(login_spacing)
+    game = game or BACCARAT
+    # What to demand of the live rail before betting: a configured chip list
+    # is verified exactly; Baccarat A keeps its captured constants; any OTHER
+    # table is read live (expected=None) and its real rail sizes every stake.
+    if chips:
+        chips = tuple(int(c) for c in chips)
+        expected_rail = chips
+    elif game is BACCARAT or (game.tile_text == BACCARAT.tile_text
+                              and not game.via_provider_lobby):
+        chips = BACCARAT_CHIPS
+        expected_rail = BACCARAT_CHIPS
+    else:
+        expected_rail = None    # read the rail live, per group
 
     # Groups run on their own threads, and both callbacks reach out of this
     # module -- `progress` writes the log and, in tournament_runner, flushes
@@ -1305,6 +1350,9 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
         "started_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "entrants": len(roster), "group_size": group_size,
         "parallel_groups": parallel_groups,
+        "table": (game.lobby_tile if game.via_provider_lobby
+                  else game.tile_text),
+        "chips": list(chips) if chips else "read live per group",
         "dry_run": dry_run, "stages": [], "winner": None,
         "eliminated": [], "problems": [], "ended_at": None,
     }
@@ -1378,7 +1426,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                + ", ".join(a["username"] for a in group))
             ready, failures = seat_accounts(
                 group, gi, site_url, proxies, login_spacing=login_spacing,
-                progress=gp, pacer=pacer)
+                progress=gp, pacer=pacer, game=game)
 
             try:
                 # An account that never seated must NOT just vanish from the
@@ -1458,8 +1506,12 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                 # Stake sizing depends entirely on the rail. Check it against
                 # a real seat before any money moves.
                 ok, seen, msg = ready[0].call(
-                    verify_table_chips, ready[0].frame).result(timeout=180)
+                    verify_table_chips, ready[0].frame,
+                    expected_rail).result(timeout=180)
                 gp(f"   rail: {msg}")
+                group_chips = chips or (tuple(seen) if seen else None)
+                if ok and not group_chips:
+                    ok, msg = False, "rail read produced no chips"
                 if not ok:
                     out["problems"].append(
                         {"stage": stage, "group": gi,
@@ -1470,7 +1522,8 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
 
                 winner, history, still_alive = play_group(
                     ready, table_min=table_min, table_max=table_max,
-                    progress=gp, dry_run=dry_run)
+                    progress=gp, dry_run=dry_run, game=game,
+                    chips=group_chips)
 
                 out["group_rec"] = {
                     "group": gi, "accounts": [s.username for s in ready],

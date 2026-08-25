@@ -68,6 +68,8 @@ else:
     load_dotenv()
 
 import tournament as T  # noqa: E402
+from dataclasses import replace as _dc_replace  # noqa: E402
+from sites.games import BACCARAT  # noqa: E402
 
 
 SPREADSHEET_ID = os.environ.get("TOURNAMENT_SPREADSHEET_ID", "")
@@ -98,6 +100,32 @@ LOGIN_SPACING = float(os.environ.get("TOURNAMENT_LOGIN_SPACING", "20"))
 CHECK_SPACING = float(os.environ.get("TOURNAMENT_CHECK_SPACING", "5"))
 TABLE_MIN = int(os.environ.get("TOURNAMENT_TABLE_MIN", str(T.DEFAULT_TABLE_MIN)))
 TABLE_MAX = int(os.environ.get("TOURNAMENT_TABLE_MAX", str(T.DEFAULT_TABLE_MAX)))
+
+# Hard ceiling on how many browsers (seats) may be open AT ONCE, across all
+# lanes. This exists because of the 2026-08-23 starexch run: 30 accounts with
+# PARALLEL_GROUPS=10 put 30 live-video Chromiums on the box at the same time,
+# and every full-size group went blind ("no betting window") for 94 minutes
+# while the one group holding just 3 seats played flawlessly and finished.
+# The box, not the site, is the ceiling -- so the runner clamps lanes to
+# whatever fits under this budget instead of trusting the knobs to be sane.
+MAX_SEATS = max(2, int(os.environ.get("TOURNAMENT_MAX_SEATS", "12")))
+
+# Play at a table other than Baccarat A: name a tile from Evolution's own
+# in-game lobby (found with probe_lobby_tables.py), e.g. a speed-baccarat
+# table whose minimum chip is Rs 10 rather than Rs 100. A smaller chip is the
+# whole game here: stakes stop being multiples of 100, so a loser is drained
+# to under the smallest chip in ONE hand (fewer hands = faster) and the
+# leftover an eliminated account keeps drops from as much as Rs 99 to Rs 9.
+# The chip rail of such a table is read LIVE off the first seat and verified
+# before any bet -- do not hard-code it.
+LOBBY_TILE = os.environ.get("TOURNAMENT_LOBBY_TILE", "").strip()
+# Optional exact rail override (comma-separated). Normally leave unset.
+CHIPS = tuple(int(x) for x in os.environ.get("TOURNAMENT_CHIPS", "")
+              .replace(",", " ").split()) or None
+
+GAME = (_dc_replace(BACCARAT, via_provider_lobby=True,
+                    lobby_search=LOBBY_TILE, lobby_tile=LOBBY_TILE)
+        if LOBBY_TILE else BACCARAT)
 
 HEADER = ["USERNAME", "PASSWORD", "START BALANCE", "BALANCE", "STAGE OUT", "RESULT"]
 
@@ -294,9 +322,33 @@ def check_roster(roster, site_url):
     return counts
 
 
+def clamp_lanes(args):
+    """Cap group_size x parallel_groups at MAX_SEATS, loudly.
+
+    The knobs multiply into concurrent live-video browsers, and past the
+    box's capacity every seat goes blind at once -- the 2026-08-23 run proved
+    a knob typo (10 lanes) costs 94 minutes and finishes nothing. Clamping
+    lanes (not group size) keeps the bracket the operator asked for and only
+    slows how much of it plays at once."""
+    if args.group_size > MAX_SEATS:
+        log(f"  !! group size {args.group_size} is over the "
+            f"TOURNAMENT_MAX_SEATS budget of {MAX_SEATS} browsers -- even one "
+            "group of this size can blind the whole table on this machine. "
+            "Lower TOURNAMENT_GROUP_SIZE or raise the budget knowingly.")
+    allowed = max(1, MAX_SEATS // max(1, args.group_size))
+    if args.parallel_groups > allowed:
+        log(f"  !! {args.parallel_groups} lanes x {args.group_size} seats = "
+            f"{args.parallel_groups * args.group_size} browsers at once, over "
+            f"the TOURNAMENT_MAX_SEATS budget of {MAX_SEATS} -- clamping to "
+            f"{allowed} lane(s). (30 browsers at once is exactly what turned "
+            "the 2026-08-23 run into 94 minutes of 'no betting window'.)")
+        args.parallel_groups = allowed
+
+
 def preflight(roster, site_url, args):
     proxies = current_proxies()
     rounds = max(1, (len(roster) - 1).bit_length())
+    clamp_lanes(args)
 
     log("")
     log(f"  site        : {site_url}")
@@ -306,7 +358,14 @@ def preflight(roster, site_url, args):
         f"({args.group_size * args.parallel_groups} browsers in total)")
     log(f"  proxies     : {len(proxies)} "
         f"({'direct' if proxies == [None] else 'configured'})")
-    log(f"  login pacing: {LOGIN_SPACING}s between seats")
+    log(f"  login pacing: {LOGIN_SPACING}s between seats (per exit IP)")
+    log(f"  table       : "
+        + (f"{LOBBY_TILE} (via Evolution's lobby)" if LOBBY_TILE
+           else GAME.tile_text))
+    log(f"  chips       : "
+        + (", ".join(str(c) for c in CHIPS) if CHIPS
+           else ("100/500/2500/10k/50k/100k (Baccarat A)" if not LOBBY_TILE
+                 else "read live off the first seat")))
     log(f"  table limits: {TABLE_MIN} – {TABLE_MAX} per bet")
     log(f"  click budget: {T.MAX_BET_CLICKS} chips per stake")
     log(f"  ~rounds     : {rounds} for one winner")
@@ -356,12 +415,14 @@ def play(ws, roster, site_url, args, on_stage=None):
             on_stage(msg.strip("= ").strip())
 
     t0 = time.time()
+    clamp_lanes(args)
     summary = T.run_tournament(
         roster, site_url=site_url, proxies=proxies,
         group_size=args.group_size, table_min=TABLE_MIN, table_max=TABLE_MAX,
         progress=progress, dry_run=args.dry_run,
         login_spacing=LOGIN_SPACING, state_path=STATE_FILE,
-        on_account=on_account, parallel_groups=args.parallel_groups)
+        on_account=on_account, parallel_groups=args.parallel_groups,
+        game=GAME, chips=CHIPS)
     flush()
 
     log("")

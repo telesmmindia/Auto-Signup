@@ -1051,6 +1051,47 @@ for a roster that fits in one group with no re-seat; it is not reachable for
 100 accounts on one machine, where the wall is how many live-video Chromiums
 the box can hold.
 
+### 30 browsers at once is a self-inflicted outage (`TOURNAMENT_MAX_SEATS`)
+
+The 2026-08-23 starexch run (30 accounts, `TOURNAMENT_PARALLEL_GROUPS=10`,
+i.e. 30 live-video Chromiums at once) spent **94 minutes finishing nothing**:
+every full-size group returned `no_window` on every hand across 7 stages,
+seats failed with "game tab opened but its UI frame never loaded", and the
+ONE group that happened to hold just 3 seats played 3 clean hands and produced
+its winner immediately. Same code, same site, same proxies — the only variable
+was concurrent browsers. The box is the ceiling, not the site.
+
+`tournament_runner.clamp_lanes()` therefore caps `group_size × lanes` at
+`TOURNAMENT_MAX_SEATS` (default 12) by reducing lanes, loudly. It never
+touches `group_size` (that changes the bracket the operator asked for). Raise
+the budget only after `probe_seat_decay.py` shows THIS machine holding more
+seats healthily.
+
+### Running on a cheaper table (`TOURNAMENT_LOBBY_TILE`, live chip rail)
+
+Baccarat A's smallest chip is ₹100, which is where both the leftovers and a
+lot of the hands come from: an account holding 160 can only stake 100, so
+draining it takes extra hands and knocks it out still holding up to ₹99. A
+table whose smallest chip is ₹10 drains a loser in ONE hand and strands at
+most ₹9 — the single biggest speed *and* cleanliness lever.
+
+- `TOURNAMENT_LOBBY_TILE=<tile name>` points the whole tournament at a table
+  in **Evolution's own in-game lobby** (same hop Stock Market uses:
+  Baccarat A → LOBBY button → search). The profile is a `replace()` of
+  `BACCARAT`, so bet spots/timer/balance selectors are unchanged — only pick
+  baccarat-family tables this way. Set `TOURNAMENT_TABLE_MIN` to match.
+- The table's chip rail is **read live off the first seat** of each group
+  (`verify_table_chips(expected=None)`) and every stake is planned from what
+  the rail actually offers; `TOURNAMENT_CHIPS` exists as an exact-verify
+  override but normally stays unset. `plan_stake`/`place_stake`/`play_hand`
+  all take `chips` now — the top-up path included, which used to silently
+  re-plan with the hard-coded ₹100 rail.
+- `probe_lobby_tables.py --env <F>` (read-only, one seat, no bets) is how a
+  table gets chosen: default mode dumps every lobby tile matching each search
+  term; `--open "<tile>" --secs 90` actually switches to the named table and
+  reports its real clickable rail, window cadence, and BET LIMITS text, then
+  prints the exact env lines to set.
+
 ### Speed: groups play in parallel (`--parallel-groups`)
 
 **What was already parallel:** every pair inside a group bets on the SAME hand
@@ -1219,6 +1260,10 @@ Run them, read the dump, *then* write selectors — same precedent as
   ruled-out cause: `--front` (visibility), `--noautoplay` (video), `--poke`
   (idle session), `--reload` (does not repair, breaks the seat), `--direct`
   (skip the proxies). Places no bets.
+- `probe_lobby_tables.py --env F [--open "<tile>"] [--secs N]` — finds a
+  cheaper table: dumps Evolution-lobby search results, or opens one named
+  table read-only and reports its live chip rail + bet limits, ending with
+  the exact `TOURNAMENT_LOBBY_TILE`/`TOURNAMENT_TABLE_MIN` lines to set.
 - `probe_baccarat_window.py <user> <pass> [--env F] [--seats N] [--secs N]` —
   seats via `tournament.Seat` (the exact tournament path, proxies included) and
   samples the live table once a second: whether `circle-timer` is present, the
