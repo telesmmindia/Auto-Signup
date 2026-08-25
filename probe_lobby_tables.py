@@ -182,12 +182,19 @@ SAMPLE_TABLE_JS = """() => {
         '[data-role*="bet-limit"],[data-role*="limits"]'))
         .map(e => (e.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 160))
         .filter(Boolean);
+    const roles = {};
+    for (const e of document.querySelectorAll('[data-role]')) {
+        const r = e.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0)
+            roles[e.getAttribute('data-role')] = true;
+    }
     return {
         timer: !!g('circle-timer'),
         chips,
         bal: txt(g('balance-label-value')),
         totalBet: txt(g('total-bet-label-value')),
         limits,
+        roles: Object.keys(roles),
     };
 }"""
 
@@ -204,6 +211,7 @@ def sample_table(tile, secs):
     n = 0
     rails = {}
     limits_seen = set()
+    roles_seen = {}
     deadline = time.time() + secs
     while time.time() < deadline:
         try:
@@ -221,6 +229,8 @@ def sample_table(tile, secs):
             rails[tuple(live)] = rails.get(tuple(live), 0) + 1
         for L in smp.get("limits") or []:
             limits_seen.add(L)
+        for r in smp.get("roles") or []:
+            roles_seen[r] = roles_seen.get(r, 0) + 1
         time.sleep(1)
 
     print(f"   samples          : {n}")
@@ -240,6 +250,10 @@ def sample_table(tile, secs):
         for L in sorted(limits_seen):
             print(f"      {L}")
     print(f"   balance readable : {smp.get('bal')!r}")
+    if roles_seen:
+        print("   data-roles seen (count of samples each was visible in):")
+        for r, cnt in sorted(roles_seen.items()):
+            print(f"      {cnt:>4}  {r}")
 
 
 try:
