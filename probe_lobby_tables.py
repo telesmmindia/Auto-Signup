@@ -273,7 +273,8 @@ def sample_table(tile, secs):
         if smp.get("timer"):
             windows += 1
         live = sorted({int(c["v"]) for c in smp.get("chips") or []
-                       if c.get("cur") == "pointer" and c.get("v")})
+                       if c.get("cur") == "pointer" and c.get("v")
+                       and int(c["v"]) > 0})
         if live:
             rails[tuple(live)] = rails.get(tuple(live), 0) + 1
         for L in smp.get("limits") or []:

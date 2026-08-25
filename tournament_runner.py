@@ -123,9 +123,20 @@ LOBBY_TILE = os.environ.get("TOURNAMENT_LOBBY_TILE", "").strip()
 CHIPS = tuple(int(x) for x in os.environ.get("TOURNAMENT_CHIPS", "")
               .replace(",", " ").split()) or None
 
-GAME = (_dc_replace(BACCARAT, via_provider_lobby=True,
-                    lobby_search=LOBBY_TILE, lobby_tile=LOBBY_TILE)
-        if LOBBY_TILE else BACCARAT)
+# TOURNAMENT_GAME picks the whole game profile: "baccarat" (default) or
+# "roulette" (Auto-Roulette, min Rs 10 -- the CLEANUP game; see sites/games).
+# TOURNAMENT_LOBBY_TILE on top of it re-points the profile at a differently
+# named tile in Evolution's lobby.
+GAME_KEY = os.environ.get("TOURNAMENT_GAME", "baccarat").strip().lower()
+if GAME_KEY == "roulette":
+    from sites.games import ROULETTE
+    GAME = (_dc_replace(ROULETTE, lobby_search=LOBBY_TILE,
+                        lobby_tile=LOBBY_TILE) if LOBBY_TILE else ROULETTE)
+elif LOBBY_TILE:
+    GAME = _dc_replace(BACCARAT, via_provider_lobby=True,
+                       lobby_search=LOBBY_TILE, lobby_tile=LOBBY_TILE)
+else:
+    GAME = BACCARAT
 
 HEADER = ["USERNAME", "PASSWORD", "START BALANCE", "BALANCE", "STAGE OUT", "RESULT"]
 
@@ -360,12 +371,13 @@ def preflight(roster, site_url, args):
         f"({'direct' if proxies == [None] else 'configured'})")
     log(f"  login pacing: {LOGIN_SPACING}s between seats (per exit IP)")
     log(f"  table       : "
-        + (f"{LOBBY_TILE} (via Evolution's lobby)" if LOBBY_TILE
-           else GAME.tile_text))
+        + (f"{GAME.lobby_tile} (via Evolution's lobby)"
+           if GAME.via_provider_lobby else GAME.tile_text)
+        + (f" [{GAME_KEY}]" if GAME_KEY != "baccarat" else ""))
     log(f"  chips       : "
         + (", ".join(str(c) for c in CHIPS) if CHIPS
-           else ("100/500/2500/10k/50k/100k (Baccarat A)" if not LOBBY_TILE
-                 else "read live off the first seat")))
+           else ("100/500/2500/10k/50k/100k (Baccarat A)"
+                 if GAME is BACCARAT else "read live off the first seat")))
     log(f"  table limits: {TABLE_MIN} – {TABLE_MAX} per bet")
     log(f"  click budget: {T.MAX_BET_CLICKS} chips per stake")
     log(f"  ~rounds     : {rounds} for one winner")

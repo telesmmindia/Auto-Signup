@@ -1092,6 +1092,34 @@ most ₹9 — the single biggest speed *and* cleanliness lever.
   reports its real clickable rail, window cadence, and BET LIMITS text, then
   prints the exact env lines to set.
 
+### The cleanup run: leftovers die on Auto-Roulette (`TOURNAMENT_GAME=roulette`)
+
+The main knockout stays on baccarat (cheapest mover of money), but its ₹100
+smallest chip means every eliminated id keeps up to ₹99. The fix is a SECOND
+knockout over the same sheet with `TOURNAMENT_GAME=roulette` +
+`TOURNAMENT_TABLE_MIN=10` (`.env.starexch.cleanup`): Evolution's
+**Auto-Roulette**, min/chip ₹10, the pairs betting **red vs black**. Same
+engine, same bracket rules — everything funnels into one account and each id
+ends below ₹10.
+
+Mapped read-only on starexch 2026-08-25 (`probe_lobby_tables.py --open
+"Auto-Roulette" --spots`):
+- The board is an SVG; spots carry `data-bet-spot-id="red"/"black"/…`, NOT
+  baccarat's `data-role="bet-spot-…"`. `_TAG_BET_SPOT_JS` and
+  `wait_for_live_table` now resolve both vocabularies (role names never
+  collide).
+- `circle-timer` (30/75 samples ≈ a 40%-open cycle), `balance-label-value`,
+  `total-bet-label-value` and the `data-role="chip"` rail
+  (10/50/100/500/2500/10000) all match the engine unchanged. RED/BLACK limits
+  ₹10–200,000.
+- **Zero (2.7% of spins) takes BOTH stakes** — destroyed, not moved. That is
+  pennies on ₹10–90 cleanup stakes and exactly why roulette must never carry
+  the main pot. `play_hand` classifies "both balances went down" as a replay
+  (`tie` status), covering roulette's zero and dragon tiger's half-tie.
+- Dragon Tiger (min ₹50, `bet-spot-dragon`/`bet-spot-tiger`, timer works,
+  rail 50/100/…, tie takes half at 7.4%) was mapped too and works with a
+  profile if ever needed — roulette beats it for cleanup (₹10 floor vs ₹50).
+
 ### Speed: groups play in parallel (`--parallel-groups`)
 
 **What was already parallel:** every pair inside a group bets on the SAME hand

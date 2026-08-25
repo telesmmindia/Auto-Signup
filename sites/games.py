@@ -180,7 +180,43 @@ STOCKMARKET = GameProfile(
     settle_secs=90,
 )
 
-GAMES = {g.key: g for g in (BACCARAT, STOCKMARKET)}
+# Evolution Auto-Roulette, mapped read-only on starexch 2026-08-25 with
+# probe_lobby_tables.py --open "Auto-Roulette" --spots. Exists for the
+# CLEANUP run: its Rs 10 minimum and Rs 10 chip drain the sub-100 leftovers a
+# baccarat knockout cannot touch (baccarat's smallest chip is Rs 100), so a
+# second knockout on this table funnels every remainder into one account and
+# leaves at most Rs 9 behind per id.
+#
+# NOT for the MAIN tournament: a zero (2.7% of spins) takes BOTH red and
+# black stakes -- money destroyed, not moved. On cleanup stakes (Rs 10-90)
+# that expected cost is pennies; on a full pot it is a catastrophe risk.
+#
+# Captured live: the board is an SVG whose spots carry
+# [data-bet-spot-id="red"/"black"/"even"/"odd"/"from1to18"/"from19to36"]
+# rather than baccarat's [data-role="bet-spot-..."] -- main._TAG_BET_SPOT_JS
+# and wait_for_live_table resolve both vocabularies. circle-timer,
+# balance-label-value, total-bet-label-value and the chip rail
+# (10/50/100/500/2500/10000, data-role="chip") all match the engine as-is.
+# RED/BLACK limits on this table: Rs 10 - 200,000, payout 1:1.
+ROULETTE = GameProfile(
+    key="roulette",
+    category="Baccarat",          # the door in: any Evolution game will do
+    tile_text="Baccarat A",
+    via_provider_lobby=True,
+    lobby_search="Auto-Roulette",
+    lobby_tile="Auto-Roulette",
+    side_a_role="red",
+    side_b_role="black",
+    side_a_label="RED",
+    side_b_label="BLACK",
+    side_a_icon="🔴",
+    side_b_icon="⚫",
+    table_ready_role="red",
+    window_mode="timer",
+    selectable_chips=True,
+)
+
+GAMES = {g.key: g for g in (BACCARAT, STOCKMARKET, ROULETTE)}
 
 
 def game_for(key):

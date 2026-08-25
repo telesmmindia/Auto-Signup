@@ -2329,7 +2329,13 @@ def find_game_frame(game_page, host_hint, min_nodes=50, timeout_ms=15000):
 # different bet.
 _TAG_BET_SPOT_JS = """(role) => {
     document.querySelectorAll('[data-pw-spot]').forEach(e => e.removeAttribute('data-pw-spot'));
-    const el = document.querySelector(`[data-role="${role}"]`);
+    // Two vocabularies, probed live: baccarat/dragon-tiger/stock-market spots
+    // are [data-role="bet-spot-..."], while roulette's board is an SVG whose
+    // spots carry [data-bet-spot-id="red"/"black"/...] instead (captured on
+    // starexch's Auto-Roulette 2026-08-25). Role names never collide across
+    // the two, so try both.
+    const el = document.querySelector(`[data-role="${role}"]`)
+            || document.querySelector(`[data-bet-spot-id="${role}"]`);
     if (!el) return false;
     el.setAttribute('data-pw-spot', role);
     return true;
@@ -2450,7 +2456,10 @@ def wait_for_live_table(frame, game_page, timeout_ms=30000, game=None):
             st = frame.evaluate("""(readyRole) => {
                 const l = document.querySelector('[data-role="loading-screen"]');
                 const loadingVisible = l && l.getBoundingClientRect().height > 0;
-                const spot = document.querySelector(`[data-role="${readyRole}"]`);
+                // data-bet-spot-id is roulette's spot vocabulary -- see
+                // _TAG_BET_SPOT_JS.
+                const spot = document.querySelector(`[data-role="${readyRole}"]`)
+                    || document.querySelector(`[data-bet-spot-id="${readyRole}"]`);
                 return {loadingVisible: !!loadingVisible, hasSpot: !!spot};
             }""", game.table_ready_role)
             if st["hasSpot"] and not st["loadingVisible"]:

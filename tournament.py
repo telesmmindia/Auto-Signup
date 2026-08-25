@@ -952,6 +952,20 @@ def play_hand(pairs, table_min=DEFAULT_TABLE_MIN, table_max=DEFAULT_TABLE_MAX,
             win, lose = a, b
         elif d_b > 0 and d_a < 0:
             win, lose = b, a
+        elif d_a < 0 and d_b < 0:
+            # The table took BOTH stakes: roulette's zero (2.7% of spins,
+            # full stake) or dragon tiger's tie (half of each). Money was
+            # destroyed, not moved, so nothing about the matchup is decided
+            # -- both accounts stay in with their real (smaller) balances and
+            # the pair replays. This is why those games are only for the
+            # small-stake CLEANUP run, never the main pot.
+            results.append({"pair": (a.username, b.username), "stake": stake,
+                            "winner": None, "loser": None, "status": "tie",
+                            "message": (f"the table took both stakes "
+                                        f"({a.username} {d_a:+}, {b.username} "
+                                        f"{d_b:+}) — nobody advanced, "
+                                        "replaying with what is left")})
+            continue
         else:
             results.append({"pair": (a.username, b.username), "stake": stake,
                             "winner": None, "loser": None, "status": "error",
