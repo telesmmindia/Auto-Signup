@@ -200,8 +200,12 @@ SAMPLE_TABLE_JS = """() => {
 
 
 def sample_table(tile, secs):
+    # table_ready_role: the balance label exists in every Evolution game,
+    # unlike bet-spot-Banker -- this probe opens tables whose spots are
+    # unknown (that is the point), so readiness must key on something common.
     game = replace(BACCARAT, via_provider_lobby=True,
-                   lobby_search=tile, lobby_tile=tile)
+                   lobby_search=tile, lobby_tile=tile,
+                   table_ready_role="balance-label-value")
     print(f"-- switching to {tile!r} via the lobby…")
     seat.frame = m._open_via_provider_lobby(seat.game_page, seat.frame, game)
     tid = m._table_id(seat.game_page)
