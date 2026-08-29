@@ -723,19 +723,65 @@ def is_waf_captcha(captured):
     return "gokuProps" in (captured.get("body") or "")
 
 
+def normalize_phone(phone, site_url=None):
+    """Reduce a typed phone number to the digits the site's mobile field can
+    actually hold. Returns the cleaned number (or the original text if there
+    is nothing sensible to do with it).
+
+    This exists because the failure it prevents is INVISIBLE. The register
+    form's mobile <input> carries maxlength, so a browser silently drops
+    anything past it: 919304199756 typed into winclash's 10-character field
+    becomes 9193041997. Confirmed live 2026-08-29. The consequences all look
+    like something else --
+      * the site never reports "this mobile number is already in use",
+        because the truncated number genuinely isn't registered;
+      * the OTP is sent to a number nobody is holding, so the signup dies at
+        the OTP step as "wrong/expired code";
+      * a phone POOL stops rotating usefully, since every entry maps to a
+        different wrong number;
+      * and the database records what was ASKED for, not what landed, so
+        none of it shows up in the logs.
+    Strips separators, a leading +country code, and a trunk 0."""
+    prof = profile_for(site_url or SITE_URL)
+    digits = re.sub(r"\D", "", str(phone or ""))
+    want = prof.phone_digits or 0
+    cc = prof.phone_country_code or ""
+    if want and len(digits) > want:
+        if cc and digits.startswith(cc) and len(digits) - len(cc) == want:
+            digits = digits[len(cc):]
+        elif digits.startswith("0") and len(digits) - 1 == want:
+            digits = digits[1:]
+    return digits or str(phone or "")
+
+
 def fill_register_form(page, acct):
     """Fill the 4 register fields and ensure the T&C box is checked. Assumes
     the register form/modal is already open. Shared by the initial fill and the
     post-WAF-solve refill so they can't drift."""
     prof = profile_for(page.url)
+    phone = normalize_phone(acct["phone"], page.url)
     for sel, value in [(prof.sel["username"], acct["username"]),
                        (prof.sel["email"], acct["email"]),
                        (prof.sel["password"], acct["password"]),
-                       (prof.sel["phone"], str(acct["phone"]))]:
+                       (prof.sel["phone"], str(phone))]:
         field = page.locator(sel)
         field.click()
         field.press_sequentially(value, delay=30)
         field.blur()
+    # Read the phone back. A maxlength on the field silently truncates a
+    # too-long number, and every downstream symptom of that points somewhere
+    # else (see normalize_phone). Refusing here costs one attempt; not
+    # refusing sends an OTP to a stranger's phone and looks like a bad code.
+    try:
+        landed = page.input_value(prof.sel["phone"])
+    except Exception:
+        landed = str(phone)
+    if landed != str(phone):
+        raise ValueError(
+            f"the signup form would not accept the phone number: asked for "
+            f"{phone}, the field kept {landed!r} (it holds "
+            f"{prof.phone_digits} digits). Enter the number without a country "
+            f"code.")
     if prof.has_terms_checkbox:
         try:
             cb = page.locator(prof.sel["terms"])
@@ -1885,7 +1931,7 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
         # different phone number."
         phone_err = check_phone_taken(page) or "; ".join(msgs) or "That number is taken."
         print(f"\n{phone_err} Try a different phone number.")
-        acct["phone"] = prompt_phone()
+        acct["phone"] = prompt_phone(site_url)
         prof = profile_for(page.url)
         phone_field = page.locator(prof.sel["phone"])
         phone_field.fill("")
@@ -2177,7 +2223,7 @@ def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=
         if http_is_phone_taken(resp_json) and interactive and attempts < 5:
             attempts += 1
             print(f"\n{resp_json.get('message')} Try a different phone number.")
-            acct["phone"] = prompt_phone()
+            acct["phone"] = prompt_phone(site_url)
             continue
 
         result["ok"] = False
@@ -4620,12 +4666,14 @@ def _screenshot_pair(gp_b, gp_p, summary, tag, player_exec):
     return
 
 
-def prompt_phone():
-    """Ask for the phone number interactively."""
+def prompt_phone(site_url=None):
+    """Ask for the phone number interactively. Normalised before it is
+    returned, so a number typed with a country code is stored and reported as
+    the number the form will actually carry -- see normalize_phone()."""
     while True:
         phone = input("Enter phone number for this signup: ").strip()
         if phone.isdigit() and 7 <= len(phone) <= 15:
-            return phone
+            return normalize_phone(phone, site_url)
         print("  Please enter digits only (7-15 characters).")
 
 
@@ -4652,7 +4700,8 @@ def load_accounts(args):
         acct["email"] = args.email
     if args.password:
         acct["password"] = args.password
-    acct["phone"] = args.phone or prompt_phone()
+    acct["phone"] = (normalize_phone(args.phone, args.url) if args.phone
+                     else prompt_phone(args.url))
     acct["proxy"] = args.proxy
     acct["url"] = args.url
     acct["referral_code"] = extract_referral_code(acct["url"] or SITE_URL)

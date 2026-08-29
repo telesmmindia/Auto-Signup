@@ -436,6 +436,36 @@ three `password_*` fields, `phone_taken_texts` and `user_agent`.
   `supports_login` is now **True** (see the next section for what unblocked
   it), and `supports_casino` with it.
 
+### A country-coded phone number is silently truncated (all sites)
+
+Found 2026-08-29 on a live winclash run, and it is worth knowing because
+**every symptom points somewhere else**. The register form's mobile `<input>`
+carries `maxlength="10"`, so the browser silently drops anything past it:
+typing `919304199756` leaves **`9193041997`** in the field — a different,
+wrong number. What that looks like from outside:
+
+- The site **never says "this mobile number is already in use"**, because the
+  truncated number genuinely isn't registered. (Reported as "it is not telling
+  number already taken" — the bot was right, the number wasn't taken.)
+- The OTP goes to a phone nobody is holding, so the signup dies at the OTP
+  step as **"wrong/expired code"**.
+- A `/setphone` **pool stops rotating usefully** — every entry maps to a
+  different wrong number.
+- `accounts.db` records what was **asked for**, not what landed, so none of it
+  appears in the logs. Rows 2820/2821 stored `919304199756`.
+
+`normalize_phone(phone, site_url)` strips separators, a leading `+`/country
+code and a trunk `0`, driven by `SiteProfile.phone_digits` (10) and
+`phone_country_code` ("91"). It runs where a number ENTERS — the CLI's
+`--phone` and `prompt_phone()`, and the bot's `_submit_phone()` **before** the
+row is inserted — so the database, the chat and the form all carry the same
+number.
+
+`fill_register_form()` then **reads the phone back** and raises if the field
+kept something different. That guard is the general fix: no site may ever
+silently sign up a number other than the one asked for. It costs one attempt;
+not having it sent an OTP to a stranger's phone and looked like a bad code.
+
 ### winclash's live casino: no lobby, a launch URL instead
 
 Mapped live 2026-08-29 on a real account. winclash is not the Laravel

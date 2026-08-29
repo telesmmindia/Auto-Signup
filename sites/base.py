@@ -141,6 +141,19 @@ class SiteProfile:
     #                           the provider is already in the lobby URL.
     casino_tile_mode: str = "text_click"
 
+    # How many digits this site's mobile field holds. Its <input> carries
+    # maxlength, so anything longer is SILENTLY TRUNCATED by the browser --
+    # typing a country-coded 919304199756 into winclash's 10-character field
+    # leaves 9193041997, a different and entirely wrong number. The site then
+    # (correctly) never says "already in use", and sends the OTP to a phone
+    # nobody is holding, so the signup dies at the OTP step with no clue why.
+    # normalize_phone() uses this to strip a leading country code / trunk 0
+    # before anything is typed. 10 suits every site here (all Indian).
+    phone_digits: int = 10
+
+    # Country dialling code stripped from an over-long number, without the +.
+    phone_country_code: str = "91"
+
     # Path the login form reliably lives on, relative to the site root, or
     # "" for "the homepage has it" (every site but winclash).
     #

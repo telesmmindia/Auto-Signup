@@ -158,7 +158,7 @@ from main import (
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
     ensure_waf_cleared, new_site_context, open_signup_form, open_signup_modal,
-    parse_proxy, read_result,
+    normalize_phone, parse_proxy, read_result,
     run_paired_hedge, save_screenshot, stop_bridge,
     submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
@@ -2332,6 +2332,11 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
     message instead, since that prompt is skipped entirely when a fixed phone
     is set."""
     loop = asyncio.get_running_loop()
+    # Normalise BEFORE the row is inserted and before anything is reported,
+    # so the database, the chat message and the form all carry the same
+    # number. A country-coded number would otherwise be silently truncated by
+    # the form's maxlength into a different one -- see main.normalize_phone.
+    phone = normalize_phone(phone, session.site_url or BOT_SITE_URL)
     session.acct["phone"] = phone
     session.acct["proxy"] = session.proxy
     session.acct["url"] = session.site_url
