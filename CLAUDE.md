@@ -517,10 +517,34 @@ YOUR BETS n" → "NEXT GAME SOON" exactly as `window_mode="instruction"`
 expects. `verify_stockmarket.py --url https://winclash.com/` **PASSES**:
 table ready in ~37s, 4 betting windows in 90s.
 
-**One login in four timed out** during this work and the same credentials
-worked on the retry, so treat a lone "session never became authenticated" here
-as the velocity throttle the other sites show, not as a wrong password.
-`_open_table_with_retry` already re-seats from a fresh context.
+**The WAF also gates the login CALL, not just navigation** — and this is the
+one that will bite in production. After a stretch of logins from one IP,
+`POST /api2/v2/login` starts answering **405 + `x-amzn-waf-action: captcha`**,
+and the site renders its generic **"Something went wrong"** toast for it. From
+the page alone that is indistinguishable from a real rejection, so a WAF block
+was being reported as bad credentials. `login()` now watches for that header
+and returns a distinct **`"waf"`** outcome; `_open_table_for` answers it the
+only way that works — mint a token and retry from a **fresh context**. An XHR
+block leaves the page itself unwalled (nothing to read `gokuProps` from), so
+`ensure_waf_cleared(force=True)` re-navigates first to surface the wall. It
+retries **once**: if the wall survives a solve, the IP is flagged and more
+attempts only spend CapSolver credit. **This is per-IP and behavioural — real
+throughput needs more proxy IPs, not tuning**, same as everywhere else here.
+
+**Two smaller faults, both found on the production server and invisible on a
+laptop** (slower hydration, datacenter IP):
+- The homepage's header login bar **does not always finish rendering**
+  (`#user_login` never became visible, which read as "could not find the LOGIN
+  button"). `/join-now` carries the login form as part of the page, so
+  `SiteProfile.login_path` points there and `login_url_for()` is what every
+  pre-navigating caller uses.
+- An in-page click can land **before the site binds its own handler**, doing
+  nothing at all — no request, no error, no message. The js-mode submit
+  re-fires up to 3 times while the session still isn't authenticated; a
+  duplicate login POST is idempotent.
+
+`verify_stockmarket.py --url https://winclash.com/` passes on **both** the
+laptop (~37s) and the server through its residential proxy (~78s).
 
 ⚠️ **No bet has ever been placed on winclash.** The only account available
 held ₹0.00, so everything above is a *read*. Placing, settling and the hedge
