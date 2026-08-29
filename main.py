@@ -1833,7 +1833,12 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     attempts = 0
     while outcome == "phone_taken" and interactive and attempts < 5:
         attempts += 1
-        phone_err = check_phone_taken(page)
+        # check_phone_taken() only answers on sites with a dedicated element
+        # for it; sites classified by toast TEXT (phone_taken_texts) return
+        # None there, and their real wording is in `msgs`. Falling back
+        # through both is what stops the prompt reading literally "None Try a
+        # different phone number."
+        phone_err = check_phone_taken(page) or "; ".join(msgs) or "That number is taken."
         print(f"\n{phone_err} Try a different phone number.")
         acct["phone"] = prompt_phone()
         prof = profile_for(page.url)
@@ -1850,7 +1855,9 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     result["shot"] = save_screenshot(page, result_shot)
 
     if outcome == "phone_taken":
-        phone_err = check_phone_taken(page)
+        # Same fallback order as above, so a text-matched site records what
+        # the site actually said instead of a generic stand-in.
+        phone_err = check_phone_taken(page) or "; ".join(msgs)
         result["ok"] = False
         result["messages"] = [phone_err or "The mobile number has already been taken."]
         if attempts:
@@ -1866,7 +1873,12 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     # outcome == "otp" -> the site sent an SMS OTP; handle the verify step.
     result = enter_otp(page, acct, result)
 
-    if result.get("ok") and free_number:
+    # Only attempt the phone swap where the site actually has that endpoint.
+    # Checking the profile HERE rather than only inside free_phone_number()
+    # keeps an inapplicable site from reporting "Free-number FAILED: <site>
+    # does not support freeing the signup phone number" on every successful
+    # signup -- nothing failed, the step simply doesn't exist there.
+    if result.get("ok") and free_number and profile_for(page.url).supports_free_number:
         ok, new_phone, msg = free_phone_number(page, site_url or SITE_URL)
         result["freed_phone"] = new_phone if ok else None
         result["messages"].append(f"Free-number: {msg}" if ok else f"Free-number FAILED: {msg}")

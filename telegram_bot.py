@@ -724,7 +724,13 @@ def _blocking_fill_and_register(session, phone):
     result_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-result.png")
 
     if outcome == "phone_taken":
-        return {"ok": False, "phone_taken": True, "message": check_phone_taken(page),
+        # check_phone_taken() answers only on sites with a dedicated element;
+        # sites classified by toast TEXT return None there and carry their
+        # real wording in msgs, so fall through both rather than reporting a
+        # bare None.
+        return {"ok": False, "phone_taken": True,
+                "message": (check_phone_taken(page) or "; ".join(msgs)
+                            or "The mobile number has already been taken."),
                 "shot": result_shot}
 
     if outcome in ("error", "timeout"):
@@ -788,7 +794,10 @@ def _blocking_verify_otp(session, otp):
 
     message = "OTP verified — account registered."
     freed_phone = None
-    if session.free_number:
+    # Gate on the profile too, so a site without this endpoint doesn't tack
+    # "Free-number FAILED: ..." onto every successful signup for a step that
+    # never applied to it.
+    if session.free_number and profile_for(session.site_url or BOT_SITE_URL).supports_free_number:
         ok, new_phone, fn_msg = free_phone_number(session.page, session.site_url or BOT_SITE_URL)
         freed_phone = new_phone if ok else None
         message += f" | Free-number: {fn_msg}" if ok else f" | Free-number FAILED: {fn_msg}"

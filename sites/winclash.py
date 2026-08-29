@@ -70,22 +70,32 @@ PROFILE = SiteProfile(
     user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/126.0.0.0 Safari/537.36"),
-    # NOT yet observed live -- the exact server wording for a re-used mobile
-    # number is unknown until a signup actually hits one. Until then a taken
-    # number surfaces as a plain `error` carrying the site's own message,
-    # which is correct if less specific. Add the real substring here (lower
-    # case) once seen, and the loop starts treating it as `phone_taken`.
-    phone_taken_texts=[],
+    # OBSERVED LIVE 2026-08-29: registering a second account on a number
+    # already used comes back as the snackbar "The mobile number is already
+    # in use." (rejected at the register POST, before any SMS is sent, so
+    # nothing is spent finding out).
+    #
+    # Matched on the phone-specific phrase rather than a bare "already in
+    # use": if this site words a taken EMAIL the same way, the looser string
+    # would misfile that as a phone problem and the continuous loop would
+    # rotate to the next number for a fault a new number cannot fix. The
+    # second entry is cricmatch's phrasing, harmless here and correct if
+    # this site ever uses it.
+    phone_taken_texts=["mobile number is already in use",
+                       "mobile number has already been taken"],
     # notify() is Snackbar.show(..., pos: "top-right", duration: 3000) --
     # confirmed live by reading notify.toString() in the page. Same markup
     # spin24star uses, and the same 3s auto-dismiss, so callers must use the
     # messages wait_for_register_outcome() captured rather than re-reading.
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
     tracking_param="btag",
-    # Not inspected: the casino markup and the login/getBalance calls. The
-    # login selectors below are the real ones off /join-now (that page hosts
-    # the login form too) but nothing has been driven end to end yet, so the
-    # flags stay off and login()/balance/casino refuse cleanly.
+    # supports_login stays False even though the login SELECTORS below are
+    # confirmed working: main.login() does not stop at the logged-in marker,
+    # it verifies real auth through http_balance_path (/api2/v2/getBalance),
+    # and that endpoint is unverified here. winclash does expose other
+    # /api2/v2/* routes (sendLoginOtp, confirmSignupOtp), so it very likely
+    # exists -- but "likely" is not what this flag means. Confirm getBalance
+    # live, then flip this. The casino markup is entirely uninspected.
     supports_casino=False,
     supports_login=False,
     supports_http_fast=False,
@@ -118,11 +128,23 @@ PROFILE = SiteProfile(
         # to "/" -- while read_result() still scrapes the snackbar for the
         # human-readable reason either way.
         "otp_error": None,
-        # ---- login: observed on /join-now, NOT yet driven end to end ----
+        # ---- login: these four DRIVEN LIVE 2026-08-29 (logged into a real
+        # account created by this engine and landed on the account view).
+        # The login form is hosted on /join-now itself, alongside signup.
         "open_login": "button.clsLoginClick",
         "login_username": "#user_login",
         "login_password": "#pass_eye_user",
         "login_submit": "button.btnLogin",
-        "logged_in_indicator": "#acctSec",
+        # NOT #acctSec. That is the cricmatch/starexch marker and it does not
+        # exist here at all -- checked while genuinely logged in and it
+        # counted 0, so inheriting it would have made every winclash login
+        # look failed. The header's own username element is the real one.
+        "logged_in_indicator": ".headUserName",
+        # Header wallet figure. .wallet_balance exists here (1 node);
+        # cricmatch's .total_balance does NOT, so don't carry that over.
+        # Present, but never yet read for a real figure -- an account with a
+        # non-zero balance is needed to confirm it fills the way cricmatch's
+        # does (empty at load, filled by the site's own later call).
+        "wallet_balance": ".wallet_balance",
     },
 )

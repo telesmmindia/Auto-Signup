@@ -405,10 +405,42 @@ three `password_*` fields, `phone_taken_texts` and `user_agent`.
 - Login selectors (`#user_login`/`#pass_eye_user`/`button.btnLogin`, all on
   `/join-now`) were **observed but never driven**, so `supports_login` and
   `supports_casino` stay off. Casino/stockmarket markup is uninspected.
-- The exact wording for a re-used mobile number has **not been seen yet**, so
-  `phone_taken_texts` is empty and a taken number surfaces as a plain `error`
-  carrying the site's own message. Add the real substring there once observed
-  and the loop starts treating it as the terminal-but-expected `phone_taken`.
+- **A re-used mobile number comes back as the snackbar "The mobile number is
+  already in use."** (observed live 2026-08-29), rejected at the register POST
+  **before any SMS is sent**. `phone_taken_texts` matches on the
+  phone-specific phrase, not a bare "already in use": if this site ever words
+  a taken EMAIL the same way, the looser string would misfile it as a phone
+  problem and the continuous loop would rotate to a new number for a fault a
+  new number can't fix.
+- `check_phone_taken()` answers **only** on sites with a dedicated element for
+  it (cricmatch's `.err_phone`). Text-matched sites return `None` there and
+  carry their real wording in the `msgs` from `wait_for_register_outcome()`,
+  so both the CLI and the bot fall through `check_phone_taken() or msgs or
+  <generic>` — without that the operator prompt literally read "None Try a
+  different phone number."
+- **Verified end to end live 2026-08-29** on a real number: WAF cleared →
+  form filled → register accepted → SMS OTP entered → account registered, and
+  then **independently confirmed by logging into it** (the account view showed
+  the username, email, mobile and a real User ID). This is the whole flow, not
+  just the parts before the SMS.
+- `supports_free_number` is False and there is no such endpoint here. Both the
+  CLI and the bot now check the profile **before** calling it, so a successful
+  winclash signup no longer appends a misleading "Free-number FAILED: winclash
+  does not support freeing the signup phone number" — nothing failed, the step
+  doesn't exist. That gate applies to every site lacking the endpoint.
+- **Login selectors are driven and confirmed** (`#user_login` /
+  `#pass_eye_user` / `button.btnLogin`, all on `/join-now`, which hosts the
+  login form alongside signup). Two inherited selectors were **wrong** and are
+  corrected: the logged-in marker is **`.headUserName`, NOT `#acctSec`** —
+  `#acctSec` counted **0 while genuinely logged in**, so carrying cricmatch's
+  over would have made every winclash login look failed — and the wallet is
+  **`.wallet_balance`, NOT `.total_balance`**, which doesn't exist here.
+  `supports_login` still stays **False**: `login()` doesn't stop at the
+  marker, it verifies real auth through `/api2/v2/getBalance`, and that
+  endpoint is unverified here. winclash does expose other `/api2/v2/*` routes
+  (`sendLoginOtp`, `confirmSignupOtp`) so it very likely exists — but
+  "likely" is not what the flag means. Confirm getBalance live, then flip it.
+  That is the first step for the stockmarket/casino work.
 
 ### winclash's AWS WAF wall is on NAVIGATION, not just the POST
 
