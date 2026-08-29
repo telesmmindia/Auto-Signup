@@ -141,6 +141,38 @@ class SiteProfile:
     #                           the provider is already in the lobby URL.
     casino_tile_mode: str = "text_click"
 
+    # How the login form's submit button is clicked.
+    #   "click" -- an ordinary Playwright click (every site but winclash).
+    #   "js"    -- call the element's own .click() from inside the page.
+    # winclash needs "js" and force=True is NOT a substitute: a full-page
+    # <div class="overlay overlay--active"> (the backdrop of its cashback
+    # popup, z-index 201) sits over the header login bar, and a forced click
+    # still dispatches at those coordinates, so the OVERLAY receives it and
+    # the login silently never fires -- confirmed live 2026-08-29 by watching
+    # the network: a forced click produced no request at all, while an
+    # in-page .click() produced POST /api2/v2/login -> 200 immediately.
+    login_click_mode: str = "click"
+
+    # Whether an in-page fetch() of http_balance_path is a trustworthy proof
+    # that the browser session is really logged in. This is deliberately
+    # SEPARATE from supports_http_login, which means something stricter --
+    # "a bare requests.Session can do this too". winclash's balance endpoint
+    # answers perfectly from inside the page but is unreachable to `requests`
+    # (its AWS WAF walls any client that hasn't run challenge.js), so it needs
+    # exactly one of the two flags and not the other. login() accepts either,
+    # so no existing site changes.
+    verify_auth_in_page: bool = False
+
+    # Lower-cased substrings that appear in this site's result/snackbar
+    # elements but are NOT failures -- progress text the site shows while a
+    # request is in flight. login() scrapes those same elements to surface a
+    # real rejection ("Invalid Username or Password") promptly, so without
+    # this a loader would be reported as the reason the login failed.
+    # winclash renders "Please wait" the moment the login button is clicked,
+    # which made every login fail with that as its message. Empty everywhere
+    # else, so no existing site's judgement changes.
+    benign_texts: list = field(default_factory=list)
+
     # Whether the LOGIN selectors alone are inspected. Split out from
     # supports_casino 2026-08-19: starexch's login is verified live while its
     # casino navigation is not (different markup), and the two used to be one
@@ -148,6 +180,42 @@ class SiteProfile:
     # login() accepts either flag, so every existing site keeps working
     # unchanged with just supports_casino set.
     supports_login: bool = False
+
+    # Whether this site walls ordinary page NAVIGATION behind an AWS WAF
+    # interstitial (winclash: a plain GET of the homepage answers 202 with
+    # x-amzn-waf-action: challenge, and /join-now can answer 405 + captcha).
+    # When True, every flow that drives a browser here clears the wall before
+    # looking for anything on the page -- otherwise login() spends its whole
+    # timeout hunting a LOGIN button on an interstitial and reports "could not
+    # find the LOGIN button", which is true but useless. False everywhere
+    # else, where the check would be a pointless page evaluation.
+    waf_on_navigation: bool = False
+
+    # How a live-table game is launched.
+    #   "lobby"            -- cricmatch/starexch: open the Live Casino lobby,
+    #                         then click the game's tile.
+    #   "direct_game_url"  -- winclash: navigate straight to the site's own
+    #                         launch redirect, skipping the lobby entirely.
+    # winclash uses the direct route for two reasons, both confirmed live
+    # 2026-08-29. First, its lobby tile is a <p class="playBtn casinoLink">
+    # that only becomes visible on hover and is paginated behind a search box,
+    # so clicking it is far more fragile than a URL. Second -- and this is the
+    # money one -- the tile's own click handler REFUSES to launch anything
+    # when the account's balance is zero (it opens an "add money" popup
+    # instead), while the redirect URL below launches the table regardless.
+    casino_launch_mode: str = "lobby"
+
+    # URL template used only when casino_launch_mode == "direct_game_url".
+    # Formatted with {id} and {provider}; read straight out of winclash's own
+    # .casinoLink click handler.
+    casino_launch_path: str = "/casinoRedirect?q={id}&provider={provider}&type=casino"
+
+    # Provider slug and per-table numeric ids for the direct route above, as
+    # the site's own /casinoGamesList returns them. Only the tables this
+    # engine actually drives are listed -- add one by reading its id out of
+    # that endpoint, never by guessing.
+    casino_provider: str = "evolution"
+    casino_game_ids: dict = field(default_factory=dict)
 
     # Whether this site's register endpoint has been confirmed (live, via a
     # captured network trace + a raw curl replay -- see CLAUDE.md) to be a

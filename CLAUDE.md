@@ -428,19 +428,108 @@ three `password_*` fields, `phone_taken_texts` and `user_agent`.
   winclash signup no longer appends a misleading "Free-number FAILED: winclash
   does not support freeing the signup phone number" — nothing failed, the step
   doesn't exist. That gate applies to every site lacking the endpoint.
-- **Login selectors are driven and confirmed** (`#user_login` /
-  `#pass_eye_user` / `button.btnLogin`, all on `/join-now`, which hosts the
-  login form alongside signup). Two inherited selectors were **wrong** and are
+- **Login is driven and confirmed live** (`#user_login` / `#pass_eye_user` /
+  `button.btnLogin`). Two inherited selectors were **wrong** and are
   corrected: the logged-in marker is **`.headUserName`, NOT `#acctSec`** —
-  `#acctSec` counted **0 while genuinely logged in**, so carrying cricmatch's
-  over would have made every winclash login look failed — and the wallet is
+  `#acctSec` counted **0 while genuinely logged in** — and the wallet is
   **`.wallet_balance`, NOT `.total_balance`**, which doesn't exist here.
-  `supports_login` still stays **False**: `login()` doesn't stop at the
-  marker, it verifies real auth through `/api2/v2/getBalance`, and that
-  endpoint is unverified here. winclash does expose other `/api2/v2/*` routes
-  (`sendLoginOtp`, `confirmSignupOtp`) so it very likely exists — but
-  "likely" is not what the flag means. Confirm getBalance live, then flip it.
-  That is the first step for the stockmarket/casino work.
+  `supports_login` is now **True** (see the next section for what unblocked
+  it), and `supports_casino` with it.
+
+### winclash's live casino: no lobby, a launch URL instead
+
+Mapped live 2026-08-29 on a real account. winclash is not the Laravel
+white-label, so the login/balance/casino route all differ — but **the table
+at the end of it is the same Evolution client this engine already drives**,
+so nothing downstream of "open the table" changed.
+
+**The endpoints are not the ones every other site here uses.**
+- Login is `POST /api2/v2/login` → `{"status":200,"id":<user id>,
+  "message":"Login Success"}`, then a redirect to `/?redirecting=<id>`.
+- Balance is **`POST /api/getBalance`**. `/api2/v2/getBalance` **404s** —
+  and it is a real application 404 (`{"message": ""}`), not a WAF block;
+  the site's own JS asks for it and gets the same 404. Don't read that as
+  "the endpoint is blocked".
+- `supports_http_login` stays **False** and `verify_auth_in_page` is True
+  instead. The two used to be one flag. A bare `requests.Session` cannot
+  reach any winclash URL (the WAF only passes a client that has run
+  `challenge.js`), but an **in-page** `fetch()` of the balance endpoint
+  works perfectly and is what `login()` now verifies real auth with.
+
+**A full-page overlay eats every click, and `force=True` does not help.**
+`div.overlay.overlay--active` (z-index 201, the backdrop of a cashback
+popup) covers the header login bar. A forced click still dispatches at those
+coordinates, so the *overlay* receives it: confirmed by watching the network
+— a forced click produced **no request at all**, while an in-page
+`element.click()` produced `POST /api2/v2/login` → 200 immediately. Hence
+`login_click_mode="js"`, which also switches field entry to `fill()`
+(`fill` sets the value without a pointer event; `click()` + type does not).
+
+**The login form is inline in the header, and its LOGIN button is also the
+opener.** `button.clsLoginClick` and `button.btnLogin` are the *same
+element*, so `login()`'s "click the opener first" step would have submitted
+an empty form. `login()` now skips that step whenever the username field is
+already visible — correct for every site, and required here.
+
+**The snackbar carries progress and success text, not just errors.** It
+renders "Please wait" the instant login is clicked and "Login Success" the
+instant it works, both into the element `login()` scrapes for a real
+rejection — so each in turn got reported as the reason the login *failed*.
+`SiteProfile.benign_texts` filters them. Same trait as `otp_error=None`
+above; assume any winclash toast may be good news.
+
+**`login()` must not re-navigate on a WAF-walled site.** It used to always
+`page.goto(site_url)` first. On winclash that re-arms the interstitial, and
+a hard `captcha` never clears itself — so a caller that had just spent a
+CapSolver token got it thrown away and failed on "Human Verification".
+`login(..., already_loaded=True)` skips the load; `_open_table_for` clears
+the wall itself (rebinding `context`, since a solved token only works in a
+fresh one) and passes it for any profile with `waf_on_navigation`.
+
+**Tables are opened by URL, not by clicking a tile** —
+`casino_launch_mode="direct_game_url"`, read straight out of the site's own
+`.casinoLink` click handler, which builds
+`/casinoRedirect?q=<id>&provider=<prov>&type=casino` and hands it to
+`window.open(..., "_blank")`. Two reasons, and the second is the important
+one:
+- The tile (`<p class="playBtn casinoLink" data-link data-provider>`) is
+  only visible on hover and is paginated behind the lobby's own search box
+  (`/live-casino?q=` and `?p=` in the markup are **ignored** — the filter
+  lives in JS state, `ftrName`/`ftrProvider` + `loadGames()`).
+- **That handler refuses to launch anything when the real and bonus
+  balances are both zero** — it opens an "add money" popup instead. The
+  redirect URL launches the table regardless, which is the only reason any
+  of this was mappable on an empty account.
+
+Game ids come from the site's own `POST /casinoGamesList` (273 Evolution
+titles; **Stock Market is id 1027 and is in winclash's own catalogue**, so
+unlike cricmatch there is **no provider-lobby hop** — `via_provider_lobby`
+is skipped on the direct route). `casino_game_ids` records only the tables
+actually driven; add one by reading its id from that endpoint, never by
+guessing.
+
+**The table itself needed zero engine changes**, verified by pointing the
+existing readers at a live Stock Market table: `_table_id` →
+`StockMarket00001`, `find_game_frame` → found, `wait_for_live_table` → True,
+`read_game_balance`/`_read_total_bet`/`read_portfolio` all read, chip rail
+`[10, 50, 100, 200, 500, 2500]`, and the instruction banner cycling "PLACE
+YOUR BETS n" → "NEXT GAME SOON" exactly as `window_mode="instruction"`
+expects. `verify_stockmarket.py --url https://winclash.com/` **PASSES**:
+table ready in ~37s, 4 betting windows in 90s.
+
+**One login in four timed out** during this work and the same credentials
+worked on the retry, so treat a lone "session never became authenticated" here
+as the velocity throttle the other sites show, not as a wrong password.
+`_open_table_with_retry` already re-seats from a fresh context.
+
+⚠️ **No bet has ever been placed on winclash.** The only account available
+held ₹0.00, so everything above is a *read*. Placing, settling and the hedge
+itself are unverified here, and so is **which key of `/api/getBalance`
+carries the real figure** — `wallet` and `main_balance`/`totalBalance` all
+read `0.00` on an empty account, which cannot tell them apart. Fund two
+accounts, re-run `verify_stockmarket.py`, then do one `/run <pair> 10 1`
+(table minimum ₹10) and read `/runlog` before scaling.
+
 
 ### winclash's AWS WAF wall is on NAVIGATION, not just the POST
 
@@ -565,7 +654,8 @@ longer serialize).
 Production layout: `.env.cricmatch` (signup), `.env.spin24star` (signup),
 `.env.khelofun.signup` (signup), `.env.winclash` (signup), `.env.gameplay`
 (gameplay), `.env.stockmarket` (stockmarket), `.env.khelofun.stockmarket`
-(stockmarket), `.env.password` (password).
+(stockmarket), `.env.winclash.stockmarket` (stockmarket), `.env.password`
+(password).
 
 **`--env` is parsed from `sys.argv` at module level and loaded with
 `load_dotenv(_env_file, override=True)`. The `override=True` is load-bearing:**
@@ -1449,6 +1539,11 @@ Run them, read the dump, *then* write selectors — same precedent as
   ruled-out cause: `--front` (visibility), `--noautoplay` (video), `--poke`
   (idle session), `--reload` (does not repair, breaks the seat), `--direct`
   (skip the proxies). Places no bets.
+- `probe_winclash_games.py <user> <pass> [--find baccarat]` — lists
+  winclash's live-casino catalogue from the site's own `/casinoGamesList`,
+  so a new table gets added to `casino_game_ids` by its REAL id. winclash
+  launches tables by URL, so the id is the only thing needed. Read-only,
+  opens no table.
 - `probe_lobby_tables.py --env F [--open "<tile>"] [--secs N]` — finds a
   cheaper table: dumps Evolution-lobby search results, or opens one named
   table read-only and reports its live chip rail + bet limits, ending with

@@ -42,6 +42,55 @@ below so a generated identity can't be bounced by the form's own JS:
             password must not equal the username or the mobile number, nor
             appear as a substring of the email
   mobile    10 digits matching ^(0|91)?[6-9][0-9]{9}$
+Live casino / Stock Market, all mapped live 2026-08-29 on a real account:
+
+* Login is POST /api2/v2/login -> {"status":200,"id":<user id>,
+  "message":"Login Success"}, followed by a redirect to /?redirecting=<id>.
+  The header then renders .headUserName with the username and .wallet_balance
+  with the figure. Balance is POST /api/getBalance ->
+  {"status":200,"balance":{...,"wallet":0,"main_balance":"0.00",
+  "totalBalance":"0.00",...}}.
+  WARNING, not yet resolvable: the only account available for this work held
+  0.00, so it is NOT known whether http_check_account_balance's preferred
+  "wallet" key carries the real figure here or is always 0 with the money in
+  main_balance/totalBalance. Both read 0.00, which is correct but tells the
+  two apart not at all. Confirm on a FUNDED account before trusting a
+  winclash balance reading.
+
+* A table is launched by /casinoRedirect?q=<id>&provider=<prov>&type=casino,
+  read straight out of the site's own .casinoLink click handler, which hands
+  that URL to window.open(..., "_blank"). Navigating there directly lands on
+  ezugi.evo-games.com/frontend/evo/r2/#...&table_id=StockMarket00001 -- the
+  SAME Evolution client this engine already drives everywhere else.
+
+* The lobby tile is deliberately NOT used. It is <p class="playBtn
+  casinoLink" data-link="<id>" data-provider="<prov>">, which is only visible
+  on hover and is paginated behind the lobby's own search box; worse, its
+  click handler REFUSES to launch when both the real and bonus balances are
+  zero (it opens an "add money" popup instead). The redirect URL launches the
+  table regardless, which is what made this mappable at all on an empty
+  account.
+
+* The Evolution table needs NO engine changes. Verified by pointing the
+  existing readers at it on a live Stock Market table:
+      _table_id            -> "StockMarket00001"
+      find_game_frame      -> found (evo-games.com)
+      wait_for_live_table  -> True (STOCKMARKET profile)
+      read_game_balance    -> 0        _read_total_bet -> 0
+      read_portfolio       -> 0
+      read_chips           -> [10, 50, 100, 200, 500, 2500], selected 10
+      betting window       -> open in 21 of 50 samples over 100s, the
+                              instruction banner cycling "PLACE YOUR BETS n"
+                              -> "NEXT GAME SOON" exactly as sites/games.py's
+                              window_mode="instruction" expects
+  Chip rail and table minimum match cricmatch's Stock Market (Rs 10), so
+  sites/games.py's STOCKMARKET profile applies unchanged.
+
+* NOT verified, and it cannot be until an account here holds money: placing
+  an actual bet, and therefore a real hedge round. Everything above is a
+  read. The site's own handler proves a zero-balance account is refused a
+  table through the UI, so a funded account is needed for any real run.
+
 """
 from .base import SiteProfile
 from .cricmatch import GENERIC_RESULT_SELECTORS
@@ -89,25 +138,63 @@ PROFILE = SiteProfile(
     # messages wait_for_register_outcome() captured rather than re-reading.
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
     tracking_param="btag",
-    # supports_login stays False even though the login SELECTORS below are
-    # confirmed working: main.login() does not stop at the logged-in marker,
-    # it verifies real auth through http_balance_path (/api2/v2/getBalance),
-    # and that endpoint is unverified here. winclash does expose other
-    # /api2/v2/* routes (sendLoginOtp, confirmSignupOtp), so it very likely
-    # exists -- but "likely" is not what this flag means. Confirm getBalance
-    # live, then flip this. The casino markup is entirely uninspected.
-    supports_casino=False,
-    supports_login=False,
+    # This site's snackbar carries progress AND success text, not just
+    # errors -- the same trait that makes otp_error deliberately None above.
+    # "Please wait" appears the instant the login button is clicked and
+    # "Login Success" the instant it works, and both land in the very element
+    # login() scrapes to surface a real rejection, so each one in turn was
+    # reported as the reason the login failed. Neither is a failure.
+    benign_texts=["please wait", "login success"],
+    # Login and the live casino are both DRIVEN LIVE (2026-08-29) -- see the
+    # "Live casino" notes at the bottom of this file.
+    supports_login=True,
+    supports_casino=True,
+    # The balance endpoint is NOT /api2/v2/getBalance. That path 404s here
+    # (a real application 404 -- {"message": ""} -- not a WAF block; the
+    # site's own JS asks for it too and gets the same 404, evidently a
+    # leftover). The live one is /api/getBalance, captured off the wire on a
+    # real logged-in session.
+    http_login_path="/api2/v2/login",
+    http_balance_path="/api/getBalance",
+    # An in-page fetch of that endpoint IS a trustworthy proof of login, so
+    # login() verifies real auth here rather than trusting the header marker.
+    # supports_http_login stays False all the same: a bare requests.Session
+    # cannot reach any of this, because the AWS WAF wall in front of every
+    # winclash URL only lets through a client that has run challenge.js.
+    verify_auth_in_page=True,
+    supports_http_login=False,
+    # A full-page overlay eats both plain and forced clicks on the login
+    # button -- see SiteProfile.login_click_mode.
+    login_click_mode="js",
+    # Every page load here can be met by an AWS WAF interstitial, so browser
+    # flows clear it before looking for page content.
+    waf_on_navigation=True,
+    # No lobby, no tile: navigate straight to the site's own launch redirect.
+    casino_launch_mode="direct_game_url",
+    casino_provider="evolution",
+    # Ids as winclash's own /casinoGamesList returns them. Only tables this
+    # engine actually drives are listed; add one by reading its id from that
+    # endpoint, never by guessing.
+    casino_game_ids={
+        "Stock Market": "1027",
+        "Baccarat A": "86",
+        "Baccarat B": "87",
+        "Auto-Roulette": "220",
+    },
     supports_http_fast=False,
     supports_free_number=False,
     supports_change_password=False,
     sel={
         # ---- signup (all confirmed present and visible on /join-now) ----
-        # Nothing overlays the form on this site; the generic closers are
-        # kept because dismiss_popups() runs unconditionally and they are
-        # harmless no-ops when absent.
-        "close_popup": [".mnPopupClose", ".pgSoftClsBtn", ".support_popup_close",
-                        ".areSurecancelBtn", "button:has-text('Close')"],
+        # Nothing overlays the signup form, but a cashback popup DOES cover
+        # the header once logged in -- its backdrop
+        # (div.overlay.overlay--active, z-index 201) intercepts every click
+        # on the page. .modalClose is that popup's own close button. The rest
+        # are generic closers kept because dismiss_popups() runs
+        # unconditionally and they are harmless no-ops when absent.
+        "close_popup": [".modalClose", ".mnPopupClose", ".pgSoftClsBtn",
+                        ".support_popup_close", ".areSurecancelBtn",
+                        "button:has-text('Close')"],
         "username": "#userName",
         "email": "#email",
         "password": "#password",
@@ -142,9 +229,11 @@ PROFILE = SiteProfile(
         "logged_in_indicator": ".headUserName",
         # Header wallet figure. .wallet_balance exists here (1 node);
         # cricmatch's .total_balance does NOT, so don't carry that over.
-        # Present, but never yet read for a real figure -- an account with a
-        # non-zero balance is needed to confirm it fills the way cricmatch's
-        # does (empty at load, filled by the site's own later call).
+        # Read live on a logged-in account: it renders "0.00" and also
+        # carries data-actual / data-wager / data-mode attributes, which the
+        # site's own tile handler uses to decide real vs bonus chips. Still
+        # unconfirmed against a NON-ZERO balance -- see the note at the
+        # bottom of this file.
         "wallet_balance": ".wallet_balance",
     },
 )

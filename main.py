@@ -1282,7 +1282,11 @@ def run_free_account_number(username, password, site_url=None, proxy=None):
         except RuntimeError as e:
             result["messages"] = [f"Proxy bridge failed to start: {e}"]
             return result
-        context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        # new_site_context, not a bare new_context: winclash's WAF flat-403s
+        # headless Chromium's default user agent, so a login-based feature on
+        # that site never even reaches the page without the profile's UA. A
+        # no-op for every site that sets no user_agent.
+        context = new_site_context(browser, site_url or SITE_URL, proxy_conf=proxy_conf)
         try:
             page = context.new_page()
             result = free_account_number(page, username, password, site_url=site_url)
@@ -1437,7 +1441,11 @@ def run_change_account_password(username, current_password, new_password, site_u
         except RuntimeError as e:
             result["messages"] = [f"Proxy bridge failed to start: {e}"]
             return result
-        context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        # new_site_context, not a bare new_context: winclash's WAF flat-403s
+        # headless Chromium's default user agent, so a login-based feature on
+        # that site never even reaches the page without the profile's UA. A
+        # no-op for every site that sets no user_agent.
+        context = new_site_context(browser, site_url or SITE_URL, proxy_conf=proxy_conf)
         try:
             page = context.new_page()
             result = change_account_password_via_login(
@@ -1563,7 +1571,11 @@ def run_balance_check(username, password, site_url=None, proxy=None):
         except RuntimeError as e:
             result["messages"] = [f"Proxy bridge failed to start: {e}"]
             return result
-        context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        # new_site_context, not a bare new_context: winclash's WAF flat-403s
+        # headless Chromium's default user agent, so a login-based feature on
+        # that site never even reaches the page without the profile's UA. A
+        # no-op for every site that sets no user_agent.
+        context = new_site_context(browser, site_url or SITE_URL, proxy_conf=proxy_conf)
         try:
             page = context.new_page()
             result = check_account_balance(page, username, password, site_url=site_url)
@@ -2315,18 +2327,36 @@ def _browser_login_authenticated(page, site_url):
     return None  # -1 (fetch threw) or anything else => unknown, keep polling
 
 
-def login(page, username, password, site_url=None):
+def login(page, username, password, site_url=None, already_loaded=False):
     """Log into an EXISTING account (not signup). Returns (outcome, messages)
-    where outcome is "ok", "error", or "timeout"."""
+    where outcome is "ok", "error", or "timeout".
+
+    `already_loaded=True` means the caller has ALREADY navigated this page to
+    the site and dealt with whatever stands in front of it. That matters on a
+    WAF-walled site (winclash): navigating again re-arms the interstitial, and
+    a hard `captcha` action does not clear itself, so a caller that spent a
+    CapSolver token getting through would have it thrown away here and the
+    login would fail on a "Human Verification" page. Callers that have not
+    navigated leave this False and get the original behaviour."""
     prof = profile_for(site_url or SITE_URL)
     if not (prof.supports_login or prof.supports_casino):
         return "error", [f"Login is not supported for {prof.key} "
                          "(its login selectors are not inspected)."]
-    try:
-        page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
-    except PWError as e:
-        return "error", [f"Couldn't load the site (check the proxy?): {str(e)[:150]}"]
-    page.wait_for_timeout(4000)
+    if not already_loaded:
+        try:
+            page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        except PWError as e:
+            return "error", [f"Couldn't load the site (check the proxy?): {str(e)[:150]}"]
+        page.wait_for_timeout(4000)
+        if prof.waf_on_navigation:
+            # Ride out the soft challenge, which clears itself for free once
+            # the page's own challenge.js has run. A hard captcha needs a
+            # token and a fresh context, which only a caller owning the
+            # context can do -- it surfaces below as "could not find the
+            # LOGIN button", with the interstitial's own text attached.
+            wait_out_waf_wall(page, 20)
+    else:
+        page.wait_for_timeout(1000)
 
     # Retry finding the LOGIN button over a longer window, dismissing popups
     # each pass. On a slow/remote (prod) machine the homepage can take longer to
@@ -2334,8 +2364,18 @@ def login(page, username, password, site_url=None):
     # fails. If it never appears, capture what the page actually is -- a WAF/403
     # block page (served to datacenter IPs) has no login button at all.
     clicked = False
+    # Some sites render the login fields inline in the header rather than
+    # behind a button, so there is nothing to open. On winclash that button is
+    # the very same element as the form's SUBMIT (button.clsLoginClick is also
+    # button.btnLogin), so clicking it here would submit an empty form and the
+    # real attempt would land on a site already complaining. If the username
+    # field is on screen, the form is open -- go straight to filling it.
+    try:
+        clicked = page.locator(prof.sel["login_username"]).first.is_visible()
+    except Exception:
+        clicked = False
     deadline = time.time() + 20
-    while time.time() < deadline:
+    while not clicked and time.time() < deadline:
         dismiss_popups(page)
         if click_first_visible(page, [prof.sel["open_login"]], timeout=3000):
             clicked = True
@@ -2353,13 +2393,28 @@ def login(page, username, password, site_url=None):
         return "timeout", [f"Login form did not appear. {_page_debug_info(page)}"
                            f"{_login_debug_shot(page, username)}"]
 
-    user_field = page.locator(prof.sel["login_username"])
-    user_field.click()
-    user_field.press_sequentially(username, delay=30)
-    pass_field = page.locator(prof.sel["login_password"])
-    pass_field.click()
-    pass_field.press_sequentially(password, delay=30)
-    page.locator(prof.sel["login_submit"]).click(timeout=5000)
+    dismiss_popups(page)
+    if prof.login_click_mode == "js":
+        # Overlay-covered UI (see SiteProfile.login_click_mode): fill() sets
+        # the value without a pointer event, so it is unaffected by the
+        # backdrop that makes click() -- even a forced one -- unusable here.
+        page.fill(prof.sel["login_username"], username)
+        page.fill(prof.sel["login_password"], password)
+    else:
+        user_field = page.locator(prof.sel["login_username"])
+        user_field.click()
+        user_field.press_sequentially(username, delay=30)
+        pass_field = page.locator(prof.sel["login_password"])
+        pass_field.click()
+        pass_field.press_sequentially(password, delay=30)
+    if prof.login_click_mode == "js":
+        # See SiteProfile.login_click_mode: on winclash a full-page overlay
+        # eats both a normal AND a forced click, so the button is clicked from
+        # inside the page, which bypasses hit-testing entirely.
+        page.evaluate("(sel) => { const e = document.querySelector(sel);"
+                      " if (e) e.click(); }", prof.sel["login_submit"])
+    else:
+        page.locator(prof.sel["login_submit"]).click(timeout=5000)
 
     # Wait for a DEFINITIVE outcome. Order matters: check for a site error
     # message first (so a rejected login reports the real reason -- e.g.
@@ -2368,13 +2423,14 @@ def login(page, username, password, site_url=None):
     # link (logged_in_indicator) is NOT a reliable success signal on its own:
     # it's present when logged out too, so relying on it made login() return
     # "ok" for failed/throttled logins (see _browser_login_authenticated).
-    can_verify_auth = prof.supports_http_login
+    can_verify_auth = prof.supports_http_login or prof.verify_auth_in_page
     # The verified-auth path needs to ride out the post-login redirect (which
     # briefly destroys the page context) plus residential-proxy latency, so
     # give it a longer window than the plain indicator check.
     deadline = time.time() + (20 if can_verify_auth else 12)
     while time.time() < deadline:
-        msgs = read_result(page)
+        msgs = [m for m in read_result(page)
+                if not any(b in m.lower() for b in prof.benign_texts)]
         if msgs:
             return "error", msgs
         if can_verify_auth:
@@ -3366,6 +3422,61 @@ def _open_via_provider_lobby(game_page, frame, game):
     raise RuntimeError(f"{game.lobby_tile} opened but its frame never appeared")
 
 
+def _open_game_direct(page, prof, tile_text, site_url=None):
+    """Open a live table by navigating straight to the site's own game-launch
+    redirect, skipping the lobby and its tile entirely. Returns the new page
+    (the game tab) or raises RuntimeError.
+
+    Used only where SiteProfile.casino_launch_mode == "direct_game_url"
+    (winclash). Mapped live 2026-08-29 by reading winclash's own .casinoLink
+    click handler: it builds
+        /casinoRedirect?q=<game id>&provider=<provider>&type=casino
+    and hands it to window.open(url, "_blank"). Doing the navigation directly
+    is both steadier than the tile (which is hover-only and paginated behind a
+    search box) and strictly more capable: the handler bails out to an "add
+    money" popup when the account's balance is zero, whereas the redirect
+    still launches the table.
+
+    A NEW TAB is opened rather than navigating the current one, so the caller
+    keeps its logged-in main page -- every other route here yields a separate
+    game tab too, and _open_table_for's callers close the two independently."""
+    game_id = prof.casino_game_ids.get(tile_text)
+    if not game_id:
+        known = ", ".join(sorted(prof.casino_game_ids)) or "none"
+        raise RuntimeError(
+            f"{prof.key} has no game id recorded for {tile_text!r} "
+            f"(known tables: {known}) -- read its id from the site's own "
+            f"/casinoGamesList and add it to the profile")
+    parts = urlsplit(site_url or SITE_URL)
+    path = prof.casino_launch_path.format(id=game_id, provider=prof.casino_provider)
+    url = f"{parts.scheme}://{parts.netloc}{path}"
+    game_page = page.context.new_page()
+    try:
+        game_page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except PWError as e:
+        try:
+            game_page.close()
+        except Exception:
+            pass
+        raise RuntimeError(f"could not open the {tile_text!r} table: {str(e)[:150]}")
+    # The redirect lands on the provider's own host; give it a moment to
+    # actually get there before the caller starts hunting for the game frame.
+    for _ in range(20):
+        game_page.wait_for_timeout(1000)
+        if "evo-games.com" in (game_page.url or ""):
+            return game_page
+    # Still on the operator's own domain -> the launch was refused. Say what
+    # the page shows, since that is where the real reason lives (a zero
+    # balance, a blocked account, a game that is off).
+    try:
+        why = (game_page.inner_text("body") or "").strip()[:200].replace("\n", " ")
+    except Exception:
+        why = ""
+    raise RuntimeError(
+        f"the {tile_text!r} launch did not reach the game provider "
+        f"(still at {game_page.url[:120]}){': ' + why if why else ''}")
+
+
 def _open_table_for(browser, username, password, site_url, category, tile_text,
                     proxy_conf=None, progress=None, label="", game=None):
     """Log a fresh context into `username` and open the given live table.
@@ -3381,94 +3492,136 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     game = game or BACCARAT
     tag = f" ({label})" if label else ""
     progress(f"🔑 Logging in{tag}…")
-    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+    prof = profile_for(site_url or SITE_URL)
+    # new_site_context, not a bare new_context: winclash's WAF flat-403s
+    # headless Chromium's default user agent, so without the profile's UA the
+    # login below never even gets served a page. No-op for the other sites.
+    context = new_site_context(browser, site_url or SITE_URL, proxy_conf=proxy_conf)
     page = context.new_page()
-    outcome, msgs = login(page, username, password, site_url=site_url)
+    if prof.waf_on_navigation:
+        # Get past the navigation interstitial FIRST. login() would otherwise
+        # spend its whole timeout hunting a LOGIN button on a "Human
+        # Verification" page. Note ensure_waf_cleared can hand back a page in
+        # a brand-new context (a solved token only works in a fresh one), so
+        # `context` is rebound to whatever the page ends up in -- the caller
+        # closes that, and the old one is already closed for us.
+        try:
+            page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        except PWError as e:
+            context.close()
+            raise RuntimeError(f"could not load the site for {username}: {str(e)[:150]}")
+        page, waf_ok, waf_msg = ensure_waf_cleared(
+            page, site_url or SITE_URL, proxy_conf=proxy_conf)
+        context = page.context
+        if not waf_ok:
+            context.close()
+            raise RuntimeError(f"blocked before login for {username}: {waf_msg}")
+    outcome, msgs = login(page, username, password, site_url=site_url,
+                          already_loaded=prof.waf_on_navigation)
     if outcome != "ok":
         context.close()
         raise RuntimeError(f"login failed for {username}: {'; '.join(msgs) or outcome}")
-    progress(f"🎰 Opening the Live Casino{tag}…")
-    # The Live Casino nav is intermittently flaky in stretches (site-side; see
-    # open_casino_lobby's docstring). Recovery ladder: (1) the SPA click loop,
-    # (2) a direct goto to /live-casino -- documented risk is landing on a
-    # logged-out view, so (3) detect that and re-login in place, then one more
-    # click loop. On top of this, _open_table_with_retry() retries the whole
-    # thing from a fresh context.
-    if not open_casino_lobby(page, timeout_ms=20000):
-        prof = profile_for(site_url or SITE_URL)
-        parts = urlsplit(site_url or SITE_URL)
-        # Follow the site's own lobby path, not a bare /live-casino: on
-        # starexch the provider in the query string is what separates the
-        # Evolution tables this engine can drive from a third-party baccarat
-        # it cannot. Readiness is likewise checked the way that site's lobby
-        # actually renders -- an <a>Baccarat</a> exists only on cricmatch's.
+    game_page = None
+    if prof.casino_launch_mode == "direct_game_url":
+        # winclash: no lobby, no tile -- the site's own launch redirect opens
+        # the table directly. See SiteProfile.casino_launch_mode for why this
+        # is preferred there (a hover-only tile, and a click handler that
+        # refuses to launch on a zero balance).
+        # The direct route goes straight to the FINAL table. Games that reach
+        # their table through the provider's in-game lobby (Stock Market on
+        # cricmatch) name the entry game in tile_text and the real one in
+        # lobby_tile; here that second hop is unnecessary, so the real one is
+        # what gets launched.
+        want = game.lobby_tile if (game.via_provider_lobby and game.lobby_tile) else tile_text
+        progress(f"🃏 Opening {want}{tag}…")
         try:
-            page.goto(f"{parts.scheme}://{parts.netloc}{prof.casino_lobby_path}"
-                      if prof.casino_lobby_mode == "direct_url"
-                      else f"{parts.scheme}://{parts.netloc}/live-casino",
-                      wait_until="domcontentloaded", timeout=30000)
-            page.wait_for_timeout(3000)
-            dismiss_popups(page)
-        except Exception:
-            pass
-        lobby_ok = False
-        try:
-            if prof.casino_tile_mode == "go_to_casino_live":
-                lobby_ok = page.locator("[onclick*='goToCasinoLive']").count() > 0
-            else:
-                lobby_ok = page.locator("a:has-text('Baccarat')").first.is_visible()
-        except Exception:
-            pass
-        if not lobby_ok:
-            logged_in = False
+            game_page = _open_game_direct(page, prof, want, site_url)
+        except RuntimeError as e:
+            context.close()
+            raise RuntimeError(f"{e} (for {username})")
+
+    if game_page is None:
+        progress(f"🎰 Opening the Live Casino{tag}…")
+        # The Live Casino nav is intermittently flaky in stretches (site-side; see
+        # open_casino_lobby's docstring). Recovery ladder: (1) the SPA click loop,
+        # (2) a direct goto to /live-casino -- documented risk is landing on a
+        # logged-out view, so (3) detect that and re-login in place, then one more
+        # click loop. On top of this, _open_table_with_retry() retries the whole
+        # thing from a fresh context.
+        if not open_casino_lobby(page, timeout_ms=20000):
+            parts = urlsplit(site_url or SITE_URL)
+            # Follow the site's own lobby path, not a bare /live-casino: on
+            # starexch the provider in the query string is what separates the
+            # Evolution tables this engine can drive from a third-party baccarat
+            # it cannot. Readiness is likewise checked the way that site's lobby
+            # actually renders -- an <a>Baccarat</a> exists only on cricmatch's.
             try:
-                logged_in = page.locator(prof.sel["logged_in_indicator"]).first.is_visible()
+                page.goto(f"{parts.scheme}://{parts.netloc}{prof.casino_lobby_path}"
+                          if prof.casino_lobby_mode == "direct_url"
+                          else f"{parts.scheme}://{parts.netloc}/live-casino",
+                          wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
+                dismiss_popups(page)
             except Exception:
                 pass
-            if not logged_in:
-                outcome, _ = login(page, username, password, site_url=site_url)
-                if outcome != "ok":
-                    _setup_fail(context, page, username, "relogin",
-                                f"casino lobby nav failed and re-login also failed for {username}")
-            lobby_ok = open_casino_lobby(page, timeout_ms=20000)
-        if not lobby_ok:
-            _setup_fail(context, page, username, "lobby",
-                        f"could not open the casino lobby for {username}")
-    progress(f"🃏 Joining {tile_text}{tag}…")
-    game_page = None
-    for _ in range(3):
-        game_page = search_and_open_game(page, category, tile_text)
-        if game_page:
-            break
-        page.wait_for_timeout(2000)
-    if not game_page:
-        # Distinguish "the site dropped the login session" from generic tile
-        # flakiness. Confirmed live 2026-07-19: some accounts (password
-        # accepted, login() returns ok) get silently kicked back to a
-        # logged-out view within seconds -- the live-casino page then renders
-        # the guest lobby, which simply doesn't list the live tables, so the
-        # tile click can never succeed. Account-level on the site's side
-        # (reproduced identically with and without a proxy, from two IPs,
-        # while another account worked end-to-end through the same code and
-        # proxy at the same moment) -- retrying won't help, and the operator
-        # needs to know it's the account, not the connection.
-        session_dropped = False
-        try:
-            session_dropped = page.evaluate(
-                """() => Array.from(document.querySelectorAll('a,button')).some(e => {
-                    const r = e.getBoundingClientRect();
-                    return r.height > 0 && (e.innerText || '').trim() === 'LOGIN';
-                })""")
-        except Exception:
-            pass
-        context.close()
-        if session_dropped:
-            raise RuntimeError(
-                f"the site dropped {username}'s login session right after login "
-                f"(casino page renders logged-out, so live tables are hidden) -- "
-                f"this is an account-level restriction/throttle on the site's "
-                f"side, not a connection problem; retrying won't fix it")
-        raise RuntimeError(f"could not open the {tile_text!r} table for {username}")
+            lobby_ok = False
+            try:
+                if prof.casino_tile_mode == "go_to_casino_live":
+                    lobby_ok = page.locator("[onclick*='goToCasinoLive']").count() > 0
+                else:
+                    lobby_ok = page.locator("a:has-text('Baccarat')").first.is_visible()
+            except Exception:
+                pass
+            if not lobby_ok:
+                logged_in = False
+                try:
+                    logged_in = page.locator(prof.sel["logged_in_indicator"]).first.is_visible()
+                except Exception:
+                    pass
+                if not logged_in:
+                    outcome, _ = login(page, username, password, site_url=site_url)
+                    if outcome != "ok":
+                        _setup_fail(context, page, username, "relogin",
+                                    f"casino lobby nav failed and re-login also failed for {username}")
+                lobby_ok = open_casino_lobby(page, timeout_ms=20000)
+            if not lobby_ok:
+                _setup_fail(context, page, username, "lobby",
+                            f"could not open the casino lobby for {username}")
+        progress(f"🃏 Joining {tile_text}{tag}…")
+        game_page = None
+        for _ in range(3):
+            game_page = search_and_open_game(page, category, tile_text)
+            if game_page:
+                break
+            page.wait_for_timeout(2000)
+        if not game_page:
+            # Distinguish "the site dropped the login session" from generic tile
+            # flakiness. Confirmed live 2026-07-19: some accounts (password
+            # accepted, login() returns ok) get silently kicked back to a
+            # logged-out view within seconds -- the live-casino page then renders
+            # the guest lobby, which simply doesn't list the live tables, so the
+            # tile click can never succeed. Account-level on the site's side
+            # (reproduced identically with and without a proxy, from two IPs,
+            # while another account worked end-to-end through the same code and
+            # proxy at the same moment) -- retrying won't help, and the operator
+            # needs to know it's the account, not the connection.
+            session_dropped = False
+            try:
+                session_dropped = page.evaluate(
+                    """() => Array.from(document.querySelectorAll('a,button')).some(e => {
+                        const r = e.getBoundingClientRect();
+                        return r.height > 0 && (e.innerText || '').trim() === 'LOGIN';
+                    })""")
+            except Exception:
+                pass
+            context.close()
+            if session_dropped:
+                raise RuntimeError(
+                    f"the site dropped {username}'s login session right after login "
+                    f"(casino page renders logged-out, so live tables are hidden) -- "
+                    f"this is an account-level restriction/throttle on the site's "
+                    f"side, not a connection problem; retrying won't fix it")
+            raise RuntimeError(f"could not open the {tile_text!r} table for {username}")
     frame = find_game_frame(game_page, "evo-games.com")
     if frame is None:
         context.close()
@@ -3477,7 +3630,8 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
     # Games the operator's own lobby doesn't carry (Stock Market Live) need a
     # second hop through the PROVIDER's in-game lobby -- see
     # _open_via_provider_lobby.
-    if game.via_provider_lobby:
+    # Skipped on the direct route, which already landed on the real table.
+    if game.via_provider_lobby and prof.casino_launch_mode != "direct_game_url":
         progress(f"🔎 Switching to {game.lobby_tile} via Evolution's lobby{tag}…")
         try:
             frame = _open_via_provider_lobby(game_page, frame, game)
