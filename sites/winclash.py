@@ -163,6 +163,10 @@ PROFILE = SiteProfile(
     # winclash URL only lets through a client that has run challenge.js.
     verify_auth_in_page=True,
     supports_http_login=False,
+    # The login form lives on /join-now alongside signup. The homepage has a
+    # header login bar too, but it does not always finish rendering -- see
+    # SiteProfile.login_path.
+    login_path="/join-now",
     # A full-page overlay eats both plain and forced clicks on the login
     # button -- see SiteProfile.login_click_mode.
     login_click_mode="js",

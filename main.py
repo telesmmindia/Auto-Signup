@@ -594,7 +594,7 @@ def waf_wall_showing(page):
 
 
 def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12,
-                       proxy_conf=None):
+                       proxy_conf=None, force=False):
     """Get past an AWS WAF interstitial served on page LOAD, and return the
     page to carry on with. Returns (page, ok, message).
 
@@ -618,6 +618,19 @@ def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12,
     retry starts from a clean context. Callers MUST switch to the returned
     page: when it is a new one, the original context has been closed here."""
     site = site_url or SITE_URL
+
+    if force:
+        # The caller was blocked on an XHR (405 + x-amzn-waf-action: captcha),
+        # which leaves the PAGE untouched -- so there is no interstitial in
+        # front of us to read challenge parameters from, and the check below
+        # would answer "all clear" while every API call stays blocked. A
+        # fresh navigation is what surfaces the wall (and, if the soft
+        # challenge answers instead, mints the token the XHR was missing).
+        try:
+            page.goto(site, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(3000)
+        except PWError:
+            pass
 
     deadline = time.time() + settle_secs
     while time.time() < deadline:
@@ -2327,6 +2340,20 @@ def _browser_login_authenticated(page, site_url):
     return None  # -1 (fetch threw) or anything else => unknown, keep polling
 
 
+_WAF_LOGIN_MSG = ("AWS WAF refused the login request itself (HTTP {status}, "
+                  "action=captcha) -- the site never saw these credentials")
+
+
+def login_url_for(site_url=None):
+    """Where this site's login form is. Usually the homepage; winclash needs
+    /join-now, whose header login bar renders every time (the homepage's does
+    not -- see SiteProfile.login_path). Callers that pre-navigate must use
+    this, or login() will be looking for the form on the wrong page."""
+    base = site_url or SITE_URL
+    prof = profile_for(base)
+    return urljoin(base, prof.login_path) if prof.login_path else base
+
+
 def login(page, username, password, site_url=None, already_loaded=False):
     """Log into an EXISTING account (not signup). Returns (outcome, messages)
     where outcome is "ok", "error", or "timeout".
@@ -2344,7 +2371,8 @@ def login(page, username, password, site_url=None, already_loaded=False):
                          "(its login selectors are not inspected)."]
     if not already_loaded:
         try:
-            page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+            page.goto(login_url_for(site_url), wait_until="domcontentloaded",
+                      timeout=60000)
         except PWError as e:
             return "error", [f"Couldn't load the site (check the proxy?): {str(e)[:150]}"]
         page.wait_for_timeout(4000)
@@ -2407,14 +2435,43 @@ def login(page, username, password, site_url=None, already_loaded=False):
         pass_field = page.locator(prof.sel["login_password"])
         pass_field.click()
         pass_field.press_sequentially(password, delay=30)
-    if prof.login_click_mode == "js":
-        # See SiteProfile.login_click_mode: on winclash a full-page overlay
-        # eats both a normal AND a forced click, so the button is clicked from
-        # inside the page, which bypasses hit-testing entirely.
-        page.evaluate("(sel) => { const e = document.querySelector(sel);"
-                      " if (e) e.click(); }", prof.sel["login_submit"])
-    else:
+    def _submit_login():
+        """Fire the login. Returns False only if the button wasn't there."""
+        if prof.login_click_mode == "js":
+            # See SiteProfile.login_click_mode: on winclash a full-page
+            # overlay eats both a normal AND a forced click, so the button is
+            # clicked from inside the page, which bypasses hit-testing.
+            return bool(page.evaluate(
+                "(sel) => { const e = document.querySelector(sel);"
+                " if (!e) return false; e.click(); return true; }",
+                prof.sel["login_submit"]))
         page.locator(prof.sel["login_submit"]).click(timeout=5000)
+        return True
+
+    # Watch for the login/balance XHR being refused by AWS WAF rather than by
+    # the application. That comes back as 405 (or 403) carrying an
+    # x-amzn-waf-action header, and the site renders its generic "Something
+    # went wrong" toast for it -- indistinguishable, from the page alone,
+    # from a real rejection. Confirmed live 2026-08-29: winclash's WAF starts
+    # captcha-gating POST /api2/v2/login after a stretch of repeated logins
+    # from one IP, the same behavioural/rate pattern spin24star's register
+    # POST shows. The caller can fix this (clear the wall, retry from a fresh
+    # context); a wrong password it cannot, so the two must not be conflated.
+    waf_blocked = []
+
+    def _watch_waf(resp):
+        try:
+            if resp.headers.get("x-amzn-waf-action") and resp.status in (403, 405):
+                waf_blocked.append(resp.status)
+        except Exception:
+            pass
+
+    try:
+        page.context.on("response", _watch_waf)
+    except Exception:
+        pass
+
+    _submit_login()
 
     # Wait for a DEFINITIVE outcome. Order matters: check for a site error
     # message first (so a rejected login reports the real reason -- e.g.
@@ -2427,11 +2484,14 @@ def login(page, username, password, site_url=None, already_loaded=False):
     # The verified-auth path needs to ride out the post-login redirect (which
     # briefly destroys the page context) plus residential-proxy latency, so
     # give it a longer window than the plain indicator check.
-    deadline = time.time() + (20 if can_verify_auth else 12)
+    deadline = time.time() + (30 if can_verify_auth else 12)
+    retries, next_retry = 0, time.time() + 6
     while time.time() < deadline:
         msgs = [m for m in read_result(page)
                 if not any(b in m.lower() for b in prof.benign_texts)]
         if msgs:
+            if waf_blocked:
+                return "waf", [_WAF_LOGIN_MSG.format(status=waf_blocked[0])]
             return "error", msgs
         if can_verify_auth:
             authed = _browser_login_authenticated(page, site_url or SITE_URL)
@@ -2450,7 +2510,23 @@ def login(page, username, password, site_url=None, already_loaded=False):
                     return "ok", []
             except Exception:
                 pass
+        # An in-page click can land before the site has bound its own handler
+        # to the button, in which case nothing at all happens -- no request,
+        # no error, no message (observed on the production server, where the
+        # page hydrates more slowly than on a laptop). Re-firing costs
+        # nothing: a duplicate login POST is idempotent, and this only runs
+        # while the session still isn't authenticated.
+        if (prof.login_click_mode == "js" and time.time() >= next_retry
+                and retries < 3):
+            retries += 1
+            next_retry = time.time() + 6
+            try:
+                _submit_login()
+            except Exception:
+                pass
         page.wait_for_timeout(400)
+    if waf_blocked:
+        return "waf", [_WAF_LOGIN_MSG.format(status=waf_blocked[0])]
     if can_verify_auth:
         return "timeout", ["Login did not complete (session never became "
                            "authenticated -- credentials rejected or the login "
@@ -3506,7 +3582,8 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
         # `context` is rebound to whatever the page ends up in -- the caller
         # closes that, and the old one is already closed for us.
         try:
-            page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
+            page.goto(login_url_for(site_url), wait_until="domcontentloaded",
+                      timeout=60000)
         except PWError as e:
             context.close()
             raise RuntimeError(f"could not load the site for {username}: {str(e)[:150]}")
@@ -3518,6 +3595,27 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
             raise RuntimeError(f"blocked before login for {username}: {waf_msg}")
     outcome, msgs = login(page, username, password, site_url=site_url,
                           already_loaded=prof.waf_on_navigation)
+    if outcome == "waf":
+        # AWS WAF refused the login CALL, not the credentials. Only the owner
+        # of the context can fix that: mint a fresh token and start over in a
+        # clean context (a token injected into the context that was
+        # challenged is still refused -- see ensure_waf_cleared). Worth
+        # exactly one retry; if the wall is still up after a solve, the IP is
+        # flagged and another attempt just spends more CapSolver credit.
+        page, waf_ok, waf_msg = ensure_waf_cleared(
+            page, site_url or SITE_URL, proxy_conf=proxy_conf, force=True)
+        context = page.context
+        if waf_ok:
+            try:
+                page.goto(login_url_for(site_url), wait_until="domcontentloaded",
+                          timeout=60000)
+            except PWError:
+                pass
+            outcome, msgs = login(page, username, password, site_url=site_url,
+                                  already_loaded=True)
+        else:
+            msgs = [f"{msgs[0] if msgs else 'AWS WAF blocked the login'}; "
+                    f"clearing it failed too: {waf_msg}"]
     if outcome != "ok":
         context.close()
         raise RuntimeError(f"login failed for {username}: {'; '.join(msgs) or outcome}")

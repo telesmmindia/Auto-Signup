@@ -141,6 +141,18 @@ class SiteProfile:
     #                           the provider is already in the lobby URL.
     casino_tile_mode: str = "text_click"
 
+    # Path the login form reliably lives on, relative to the site root, or
+    # "" for "the homepage has it" (every site but winclash).
+    #
+    # winclash renders a login bar in the homepage header, but NOT
+    # dependably: on a slower machine/link the same homepage load sometimes
+    # finishes without #user_login ever becoming visible, which read as
+    # "could not find the LOGIN button" and made the login look rejected.
+    # /join-now carries the login form as part of the page itself, so it is
+    # there every time. Confirmed live 2026-08-29 on both a laptop and the
+    # production server.
+    login_path: str = ""
+
     # How the login form's submit button is clicked.
     #   "click" -- an ordinary Playwright click (every site but winclash).
     #   "js"    -- call the element's own .click() from inside the page.
