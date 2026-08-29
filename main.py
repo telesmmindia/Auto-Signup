@@ -330,6 +330,28 @@ def stop_bridge(proc):
         proc.kill()
 
 
+def _context_proxy_conf(proxy, proxy_conf=None):
+    """The proxy dict a REPLACEMENT browser context should be given.
+
+    Prefer `proxy_conf`, the config the caller is already running on. It
+    matters that this is not re-derived from the raw proxy string: for a
+    SOCKS5 proxy with credentials the caller's conf points at a local pproxy
+    bridge (maybe_bridge_proxy), because **Chromium cannot authenticate to
+    SOCKS5 at all**. Re-parsing the raw string would hand the new context the
+    upstream SOCKS5 URL that Chromium can't use, so a WAF retry would break
+    on exactly the proxies the bridge exists for -- while looking fine on the
+    http:// proxy in use today.
+
+    Falls back to parsing the raw string when no conf was passed, which is
+    what every caller did before, so nothing regresses."""
+    if proxy_conf:
+        return proxy_conf
+    try:
+        return parse_proxy(proxy) if proxy else None
+    except ValueError:
+        return None
+
+
 def new_site_context(browser, site_url=None, proxy_conf=None):
     """Open a BrowserContext carrying whatever the target site needs, rather
     than a bare browser.new_context().
@@ -571,7 +593,8 @@ def waf_wall_showing(page):
         return False
 
 
-def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12):
+def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12,
+                       proxy_conf=None):
     """Get past an AWS WAF interstitial served on page LOAD, and return the
     page to carry on with. Returns (page, ok, message).
 
@@ -618,10 +641,7 @@ def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12):
 
     old_context = page.context
     browser = old_context.browser
-    try:
-        proxy_conf = parse_proxy(proxy) if proxy else None
-    except ValueError:
-        proxy_conf = None
+    proxy_conf = _context_proxy_conf(proxy, proxy_conf)
     new_context = new_site_context(browser, site, proxy_conf)
     apply_waf_token(new_context, site, token)
     new_page = new_context.new_page()
@@ -651,7 +671,7 @@ def wait_out_waf_wall(page, secs=15):
     return True
 
 
-def open_signup_form(page, site_url=None, proxy=None):
+def open_signup_form(page, site_url=None, proxy=None, proxy_conf=None):
     """Get the signup form on screen, clearing an AWS WAF wall on the way if
     one turns up. Returns (ok, page, message).
 
@@ -673,7 +693,7 @@ def open_signup_form(page, site_url=None, proxy=None):
     # settle_secs=0: open_signup_modal already waited this wall out, so it is
     # the hard "captcha" action, which never clears on its own.
     page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url, proxy=proxy,
-                                               settle_secs=0)
+                                               settle_secs=0, proxy_conf=proxy_conf)
     if not waf_ok:
         return False, page, waf_msg
     if open_signup_modal(page):
@@ -749,7 +769,7 @@ def click_register_and_wait(page):
     return outcome, msgs, captured
 
 
-def submit_register(page, acct, site_url, proxy=None):
+def submit_register(page, acct, site_url, proxy=None, proxy_conf=None):
     """Click REGISTER and, if the register POST is AWS WAF CAPTCHA-blocked and a
     CapSolver key is configured, solve it and resubmit in a FRESH browser
     context. Returns (outcome, msgs, captured, page) -- `page` is the same
@@ -777,10 +797,7 @@ def submit_register(page, acct, site_url, proxy=None):
 
         old_context = page.context
         browser = old_context.browser
-        try:
-            proxy_conf = parse_proxy(proxy) if proxy else None
-        except ValueError:
-            proxy_conf = None
+        proxy_conf = _context_proxy_conf(proxy, proxy_conf)
         new_context = new_site_context(browser, site_url, proxy_conf)
         apply_waf_token(new_context, site_url or SITE_URL, token)
         new_page = new_context.new_page()
@@ -1762,7 +1779,7 @@ def http_change_account_password(username, current_password, new_password,
 
 
 def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy=None,
-                free_number=False):
+                free_number=False, proxy_conf=None):
     """Run one signup attempt. Returns a result dict.
 
     If the site rejects the phone number as already registered and
@@ -1783,7 +1800,8 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     # no-op on every site that doesn't serve one. It can hand back a fresh
     # page in a fresh context, so rebind `page` and record it for the caller
     # to close -- same contract as submit_register() below.
-    page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url, proxy=proxy)
+    page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url, proxy=proxy,
+                                               proxy_conf=proxy_conf)
     result["page"] = page
     if not waf_ok:
         result["ok"] = False
@@ -1792,7 +1810,8 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     if waf_msg:
         result["messages"].append(waf_msg)
 
-    form_ok, page, form_msg = open_signup_form(page, site_url, proxy=proxy)
+    form_ok, page, form_msg = open_signup_form(page, site_url, proxy=proxy,
+                                               proxy_conf=proxy_conf)
     result["page"] = page
     if not form_ok:
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1827,7 +1846,8 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     # so every use below (screenshots, phone-taken retry, enter_otp) targets
     # whichever page is actually live, and stash it in `result` so the caller
     # knows which context to close (the original may already be closed).
-    outcome, msgs, _, page = submit_register(page, acct, site_url, proxy=proxy)
+    outcome, msgs, _, page = submit_register(page, acct, site_url, proxy=proxy,
+                                             proxy_conf=proxy_conf)
     result["page"] = page
 
     attempts = 0
@@ -4419,7 +4439,10 @@ def run_browser_account(browser, acct, args):
         res = signup_once(page, acct, submit=not args.no_submit,
                           interactive=not args.account_file,
                           site_url=acct.get("url"), proxy=acct.get("proxy"),
-                          free_number=args.free_number)
+                          free_number=args.free_number,
+                          # the BRIDGED conf, not the raw string -- see
+                          # _context_proxy_conf()
+                          proxy_conf=proxy_conf)
     except PWTimeout as e:
         res = {"account": acct.get("username", "?"), "ok": False,
                "messages": [f"Timeout: {str(e)[:120]}"], "shot": None}

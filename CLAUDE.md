@@ -487,6 +487,27 @@ that clears, so it is handled *before* the form is looked for.
   gets served, and repeated rapid automated loads from one IP escalate to the
   hard captcha (observed flapping between the two within one testing
   session). Volume needs more proxy IPs, not tuning.
+- **Proxies work here and are verified live** (2026-08-29): a proxied
+  `--no-submit` run cleared the WAF with a CapSolver token and filled the
+  form, and the exit IP was confirmed to be the proxy's rather than the
+  machine's. The CapSolver solve is routed through the same proxy, so the
+  token is minted from the egress IP it will be used from — AWS WAF tokens
+  can be IP-bound, which is what `_capsolver_proxy()` is for.
+
+**A replacement context must inherit the caller's proxy CONF, not re-parse
+the raw string.** `ensure_waf_cleared()` and `submit_register()` both build a
+fresh context after a solve, and both used to re-derive the proxy with
+`parse_proxy(proxy)`. That is wrong for **SOCKS5 with credentials**: the
+caller is running on a local pproxy bridge (`maybe_bridge_proxy`) precisely
+because *Chromium cannot authenticate to SOCKS5 at all*, so re-parsing hands
+the new context an upstream SOCKS5 URL Chromium can't use. The failure is
+invisible on the `http://` proxy in use today and only bites on the proxies
+the bridge exists for. `_context_proxy_conf()` now prefers the conf the
+caller passes down (`proxy_conf=`, threaded from `run_browser_account` and
+the bot's `_blocking_fill_and_register`) and only falls back to parsing when
+none was given. Note the raw string is still the right thing for CapSolver —
+a `127.0.0.1` bridge address means nothing to CapSolver's servers — so both
+are passed, deliberately.
 
 ### spin24star's AWS WAF CAPTCHA (known blocker, not a bug)
 

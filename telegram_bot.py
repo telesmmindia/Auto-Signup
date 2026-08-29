@@ -688,7 +688,8 @@ def _blocking_fill_and_register(session, phone):
     # new page in a new context, so resync the session onto it -- the old
     # context is already closed by then.
     page, waf_ok, waf_msg = ensure_waf_cleared(page, session.site_url or BOT_SITE_URL,
-                                               proxy=session.proxy)
+                                               proxy=session.proxy,
+                                               proxy_conf=proxy_conf)
     session.context, session.page = page.context, page
     if not waf_ok:
         return {"ok": False, "message": waf_msg}
@@ -697,7 +698,8 @@ def _blocking_fill_and_register(session, phone):
     # signup page itself gets solved rather than reported as a missing form.
     # It can swap in a fresh context, so resync the session again.
     form_ok, page, form_msg = open_signup_form(page, session.site_url or BOT_SITE_URL,
-                                               proxy=session.proxy)
+                                               proxy=session.proxy,
+                                               proxy_conf=proxy_conf)
     session.context, session.page = page.context, page
     if not form_ok:
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -718,7 +720,8 @@ def _blocking_fill_and_register(session, phone):
     # token, so the retry opens a new one and closes the old) -- sync
     # session.context/session.page so OTP verify and cleanup use the live one.
     outcome, msgs, captured, page = submit_register(page, acct, session.site_url,
-                                                     proxy=session.proxy)
+                                                     proxy=session.proxy,
+                                                     proxy_conf=proxy_conf)
     session.context, session.page = page.context, page
 
     result_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-result.png")
