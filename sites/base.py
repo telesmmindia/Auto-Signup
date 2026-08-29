@@ -28,6 +28,74 @@ class SiteProfile:
     # pre-checked and it isn't a real <input>, so there's nothing to click.)
     has_terms_checkbox: bool = True
 
+    # Path the signup form lives at, used only when register_trigger ==
+    # "page_url" (winclash: /join-now). Navigated to from the already-loaded
+    # homepage rather than fetched cold -- see open_signup_modal().
+    register_path: str = "/join-now"
+
+    # How the signup OTP is entered.
+    #   "digits" -- cricmatch/spin24star: N single-character boxes, one
+    #               element per digit, so the DOM itself says how long the
+    #               code is (len == locator.count()).
+    #   "single" -- winclash: ONE <input maxlength=6>. The element count is
+    #               1 regardless of code length, so otp_length below is the
+    #               only thing that knows how many digits to ask for.
+    otp_mode: str = "digits"
+
+    # How many digits the signup OTP has. Only consulted when
+    # otp_mode == "single" (in "digits" mode the box count is authoritative
+    # and this is ignored, so existing sites are unaffected).
+    otp_length: int = 6
+
+    # How long to wait for the OTP screen to resolve after clicking Verify.
+    # cricmatch verifies in ONE call, so 10s is ample. winclash needs two
+    # round trips (POST /api2/v2/confirmSignupOtp, then the page's own JS
+    # re-clicks SIGN UP to POST /sign-up with the code) plus a 1s timer and a
+    # full navigation to "/", so it gets a wider window.
+    otp_outcome_timeout_ms: int = 10000
+
+    # Longest username the site's register form accepts, or 0 for "no limit
+    # worth enforcing here". winclash's #userName carries
+    # pattern="...{5,12}$", so gen_account() has to build a SHORTER username
+    # than the first+last+tag default, which runs 13-15 characters.
+    username_max_len: int = 0
+
+    # Password rules, enforced by gen_password() so a generated password is
+    # never rejected by the form's own JS before a request is even sent.
+    # The defaults reproduce the original cricmatch policy (5-60 chars, at
+    # least one digit, one special, both cases) exactly, so every existing
+    # site keeps generating byte-identically shaped passwords.
+    # winclash caps the field at 12 characters and dropped its
+    # special-character rule (the check is commented out in its own JS), so
+    # it takes a shorter, letters+digits-only password.
+    password_min_len: int = 5
+    password_max_len: int = 60
+    password_needs_special: bool = True
+
+    # User-agent string every browser context for this site must send, or
+    # None to leave Playwright's own default in place (which is what every
+    # site here used before, so none of them change).
+    #
+    # winclash needs one. Headless Chromium announces itself as
+    # "...HeadlessChrome/..." in navigator.userAgent, and winclash's AWS WAF
+    # flat-403s that string outright -- confirmed live 2026-08-29 by running
+    # the same navigation twice, once with the default UA and once with a
+    # real Chrome UA: the default got "403 Forbidden" as the page title on
+    # the HOMEPAGE, never even reaching the signup form, while the real UA
+    # got served the site. This is not fingerprint-evasion cleverness; it is
+    # the one header that decides whether the site answers at all.
+    user_agent: str = None
+
+    # Lower-cased substrings that identify a "this mobile number is already
+    # registered" rejection when the site has no dedicated element for it
+    # (phone_taken_selector=None) and only says so through a toast. A match
+    # promotes a generic `error` to the distinct `phone_taken` outcome, which
+    # the continuous-signup loop treats as terminal-but-expected (record it,
+    # move to the next number) rather than as a failure. Empty -> the
+    # promotion never fires, which is every site that had this behaviour
+    # before.
+    phone_taken_texts: list = field(default_factory=list)
+
     # Selector for the inline "mobile number already taken" error, or None if
     # the site surfaces it (if at all) through the generic result scrape instead
     # of a dedicated element (Khelo). Drives the distinct `phone_taken` status.

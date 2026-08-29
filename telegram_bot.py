@@ -153,11 +153,13 @@ from main import (
     SHOTS_DIR, SITE_URL, _ANTI_THROTTLE_ARGS,
     capsolver_key, change_account_password_via_login, check_phone_taken,
     click_first_visible, extract_referral_code,
-    fill_register_form, free_account_number, free_phone_number, gen_account,
-    gen_password,
+    fill_otp, fill_register_form, free_account_number, free_phone_number,
+    gen_account, gen_password, otp_digit_count,
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
-    open_signup_modal, parse_proxy, read_result, run_paired_hedge, save_screenshot, stop_bridge,
+    ensure_waf_cleared, new_site_context, open_signup_form, open_signup_modal,
+    parse_proxy, read_result,
+    run_paired_hedge, save_screenshot, stop_bridge,
     submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
 from sites.games import BACCARAT, STOCKMARKET
@@ -667,7 +669,10 @@ def _blocking_fill_and_register(session, phone):
         proxy_conf, session.bridge_proc = maybe_bridge_proxy(proxy_conf)
     except RuntimeError as e:
         return {"ok": False, "message": f"Proxy bridge failed to start: {e}"}
-    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+    # new_site_context (not a bare new_context) so a site that needs a
+    # specific user agent gets one -- winclash's WAF flat-403s headless
+    # Chromium's default UA before serving any page.
+    context = new_site_context(browser, session.site_url or BOT_SITE_URL, proxy_conf)
     page = context.new_page()
     session.context, session.page = context, page
 
@@ -678,11 +683,26 @@ def _blocking_fill_and_register(session, phone):
         return {"ok": False, "message": f"Couldn't load the site (check the proxy?): {str(e)[:200]}"}
     page.wait_for_timeout(4000)
 
-    if not open_signup_modal(page):
+    # Clear an AWS WAF "Human Verification" wall if this site serves one in
+    # front of its homepage (winclash). No-op elsewhere. It may hand back a
+    # new page in a new context, so resync the session onto it -- the old
+    # context is already closed by then.
+    page, waf_ok, waf_msg = ensure_waf_cleared(page, session.site_url or BOT_SITE_URL,
+                                               proxy=session.proxy)
+    session.context, session.page = page.context, page
+    if not waf_ok:
+        return {"ok": False, "message": waf_msg}
+
+    # open_signup_form (not open_signup_modal) so an AWS WAF wall on the
+    # signup page itself gets solved rather than reported as a missing form.
+    # It can swap in a fresh context, so resync the session again.
+    form_ok, page, form_msg = open_signup_form(page, session.site_url or BOT_SITE_URL,
+                                               proxy=session.proxy)
+    session.context, session.page = page.context, page
+    if not form_ok:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         no_modal_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-no-modal.png")
-        return {"ok": False, "message": "Could not open the signup modal (JOIN button).",
-                "shot": no_modal_shot}
+        return {"ok": False, "message": form_msg, "shot": no_modal_shot}
 
     fill_register_form(page, acct)
 
@@ -722,7 +742,7 @@ def _blocking_fill_and_register(session, phone):
         return {"ok": False, "message": message,
                 "shot": result_shot}
 
-    digits = page.locator(profile_for(page.url).sel["otp_digits"]).count()
+    digits = otp_digit_count(page)
     if digits == 0:
         return {"ok": False, "message": "OTP screen detected but no digit inputs found.",
                 "shot": result_shot}
@@ -734,12 +754,9 @@ def _blocking_verify_otp(session, otp):
     page = session.page
     acct = session.acct
     prof = profile_for(page.url)
-    boxes = page.locator(prof.sel["otp_digits"])
-    for i, ch in enumerate(otp):
-        box = boxes.nth(i)
-        box.click()
-        box.press_sequentially(ch, delay=40)
-    page.wait_for_timeout(500)
+    if not fill_otp(page, otp):
+        return {"ok": False, "message": "Could not type the OTP into the form.",
+                "shot": None}
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
@@ -756,9 +773,11 @@ def _blocking_verify_otp(session, otp):
     if outcome == "error":
         err = ""
         try:
-            e = page.locator(prof.sel["otp_error"]).first
-            if e.count() and e.is_visible():
-                err = (e.inner_text() or "").strip()
+            err_sel = prof.sel.get("otp_error")
+            if err_sel:
+                e = page.locator(err_sel).first
+                if e.count() and e.is_visible():
+                    err = (e.inner_text() or "").strip()
         except Exception:
             pass
         return {"ok": False, "message": f"OTP rejected: {err}" if err else "OTP rejected.",
@@ -923,7 +942,7 @@ async def begin_signup(update, chat_id, sub_id):
     Shared by /newacc (each initial lane) and the continuous-mode
     auto-restart in handle_message() after that lane's signup finishes."""
     session = Session()
-    session.acct = gen_account()
+    session.acct = gen_account(profile_for(session.site_url or BOT_SITE_URL))
     # A master-set fixed password (/setpassword) overrides the random one
     # gen_account() just generated; /setpassword --random clears this so the
     # random default applies again.

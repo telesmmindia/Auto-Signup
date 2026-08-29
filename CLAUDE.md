@@ -355,6 +355,107 @@ and there is no reason to build one while the Evolution tables are right there.
 - A taken phone surfaces as a plain `failed`, not cricmatch's `phone_taken`
   (`.err_phone` is cricmatch-specific markup).
 
+**winclash** — added 2026-08-29, and the first site here that is **not** the
+cricmatch/khelofun/starexch white-label Laravel template. Everything below was
+read live out of the page's own inline JavaScript; no account was created
+during discovery. It is also the reason `SiteProfile` grew `register_path`,
+`otp_mode`, `otp_length`, `otp_outcome_timeout_ms`, `username_max_len`, the
+three `password_*` fields, `phone_taken_texts` and `user_agent`.
+
+- **Signup is its own PAGE, `/join-now`, not a modal** — `register_trigger=
+  "page_url"`, which navigates rather than hunting a JOIN button.
+- Fields `#userName`/`#email`/`#password`/`#mobileNumber`, submit
+  `#signUpButton`. **No T&C checkbox exists at all.**
+- **The register call is two POSTs to the same endpoint**, same shape as
+  cricmatch's `--fast` flow: `POST /sign-up` with
+  `{_token, user_name, email, password, confirm_password, mobile_number, otp}`
+  → `status 205` = OTP sent, → `status 1` = registered + `redirectTo`,
+  anything else = rejection in `data.msg`.
+- **The OTP is ONE `input.signup_verify_otp` (maxlength 6), not six boxes** —
+  hence `otp_mode="single"`. Counting elements would ask for a **1-digit**
+  OTP, which is exactly what happens if you point the old code at it.
+  `otp_digit_count()` / `fill_otp()` in `main.py` own this split and are
+  shared by the CLI and the bot so they can't drift.
+- **Verifying is two round trips**, which is why `otp_outcome_timeout_ms` is
+  30s here: `#confirmSignupOtpBtn_` POSTs `/api2/v2/confirmSignupOtp`, and
+  only on `statusCode 251` does the page's own JS re-click `#signUpButton` to
+  POST `/sign-up` with the code, wait 1s, and navigate to `/`. Success is
+  therefore "the OTP step went away", not an inline message.
+- **`otp_error` is deliberately `None`.** `notify()` is
+  `Snackbar.show(...)` (confirmed by reading `notify.toString()` live) and it
+  fires on the SUCCESS path too, so treating a visible `.snackbar-container`
+  as an OTP error would report every successful signup as a failure. Errors
+  are still scraped into the messages via `result_selectors`; they
+  auto-dismiss after 3s, so use the messages `wait_for_register_outcome()`
+  captured rather than re-reading.
+- Do **not** match `input.otpNumber` (the login-with-OTP widget on the same
+  page) or `#userOtp` (a dead `/otp-verify` dialog left in the markup).
+- **The form's own JS rejects a generated identity unless it is shaped for
+  this site**, before any request is sent — which surfaces as a mystery
+  snackbar, not a selector error. Username 5-12 chars, letters and digits
+  only (`pattern="...{5,12}$"`; the default first+last+tag runs 13-15).
+  Password 6-12 with a lowercase, an uppercase and a digit — the
+  special-character rule is **commented out** in their JS — and it must not
+  equal the username or the mobile number, nor be a substring of the email.
+  `gen_account(prof)`/`gen_password(prof)` read these off the profile;
+  called with no profile they produce the original cricmatch shape
+  byte-for-byte, so no existing site changed.
+- `supports_http_fast` stays **False**: `/sign-up` is behind the same WAF as
+  everything else, so a bare `requests.Session` has no token to present.
+- Login selectors (`#user_login`/`#pass_eye_user`/`button.btnLogin`, all on
+  `/join-now`) were **observed but never driven**, so `supports_login` and
+  `supports_casino` stay off. Casino/stockmarket markup is uninspected.
+- The exact wording for a re-used mobile number has **not been seen yet**, so
+  `phone_taken_texts` is empty and a taken number surfaces as a plain `error`
+  carrying the site's own message. Add the real substring there once observed
+  and the loop starts treating it as the terminal-but-expected `phone_taken`.
+
+### winclash's AWS WAF wall is on NAVIGATION, not just the POST
+
+Different from spin24star's block below, and it needs different handling:
+winclash walls **ordinary page loads**. Confirmed live 2026-08-29 in one
+session: `GET /` answered **202 + `x-amzn-waf-action: challenge`** and
+`GET /join-now` answered **405 + `x-amzn-waf-action: captcha`**, both
+rendering a "Human Verification" page. Nothing on the site is reachable until
+that clears, so it is handled *before* the form is looked for.
+
+- **Headless Chromium's default user agent is flat-403'd.** Confirmed by
+  running the same navigation twice, changing only the UA: the default
+  (`...HeadlessChrome/...`) got `403 Forbidden` as the page **title on the
+  homepage**, never reaching the form, while a real Chrome UA got served the
+  site. Hence `SiteProfile.user_agent` and `new_site_context()`, which is now
+  what the signup paths in both `main.py` and `telegram_bot.py` use instead
+  of a bare `browser.new_context()`. This is not fingerprint cleverness —
+  it's the one header that decides whether the site answers.
+- **The soft `challenge` action clears itself for free**, once the page's own
+  `challenge.js` has run (a few seconds). `wait_out_waf_wall()` waits it out,
+  and `ensure_waf_cleared()` waits before spending anything, so an ordinary
+  run costs no CapSolver credit.
+- **The hard `captcha` action never clears on its own** and needs
+  CapSolver — the same `parse_aws_waf_challenge()` / `solve_aws_waf_token()`
+  / `apply_waf_token()` machinery `submit_register()` already used for
+  spin24star's register POST, now reachable from navigation too via
+  `ensure_waf_cleared()`. **Set `CAPSOLVER_API_KEY` for this site** (unlike
+  cricmatch/khelofun, where it is unnecessary); without it a signup fails
+  with a clear message instead of hanging. Verified end to end: a run that
+  had been failing cleared the wall with a solved token and filled the form.
+- **The solved token goes into a FRESH context**, never the one that was
+  challenged — the same rule `submit_register()` established live (AWS WAF
+  tracks session state beyond the cookie). So `ensure_waf_cleared()` and
+  `open_signup_form()` can both hand back a **new page**, and every caller
+  must rebind to it; the old context is closed for them.
+- **`waf_wall_showing()` must check `window.gokuProps`, not only
+  `#captcha-container`.** The ids are injected by the interstitial's script,
+  so between `domcontentloaded` and that script running the wall reads as
+  "clear" — which is how a blocked signup got reported as a missing JOIN
+  button. `gokuProps` is inline, so it is readable immediately, and it
+  appears in **neither** saved copy of the genuine homepage or `/join-now`,
+  so it does not false-positive despite `challenge.js` loading site-wide.
+- Like spin24star's, the block is **behavioural/rate-based**: a fresh browser
+  gets served, and repeated rapid automated loads from one IP escalate to the
+  hard captcha (observed flapping between the two within one testing
+  session). Volume needs more proxy IPs, not tuning.
+
 ### spin24star's AWS WAF CAPTCHA (known blocker, not a bug)
 
 The register POST returns **HTTP 405 + `x-amzn-waf-action: captcha`** and a
@@ -409,9 +510,9 @@ its own token, site, worker thread and browser (signups for different sites no
 longer serialize).
 
 Production layout: `.env.cricmatch` (signup), `.env.spin24star` (signup),
-`.env.khelofun.signup` (signup), `.env.gameplay` (gameplay), `.env.stockmarket`
-(stockmarket), `.env.khelofun.stockmarket` (stockmarket), `.env.password`
-(password).
+`.env.khelofun.signup` (signup), `.env.winclash` (signup), `.env.gameplay`
+(gameplay), `.env.stockmarket` (stockmarket), `.env.khelofun.stockmarket`
+(stockmarket), `.env.password` (password).
 
 **`--env` is parsed from `sys.argv` at module level and loaded with
 `load_dotenv(_env_file, override=True)`. The `override=True` is load-bearing:**

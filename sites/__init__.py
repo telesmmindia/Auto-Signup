@@ -4,12 +4,12 @@ per-site details live in one file each rather than in comma-joined selectors."""
 from urllib.parse import urlsplit
 
 from .base import SiteProfile
-from . import cricmatch, spin24star, khelofun, starexch
+from . import cricmatch, spin24star, khelofun, starexch, winclash
 
 # Register each site here. To add one: create sites/<site>.py with a PROFILE and
 # append it below.
 PROFILES = [cricmatch.PROFILE, spin24star.PROFILE, khelofun.PROFILE,
-            starexch.PROFILE]
+            starexch.PROFILE, winclash.PROFILE]
 
 # Used when a URL matches nothing (None, about:blank before navigation, a WAF
 # challenge host, etc.) so no engine call site can crash on selector lookup.

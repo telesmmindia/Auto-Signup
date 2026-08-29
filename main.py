@@ -52,7 +52,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
 
 import requests
 from dotenv import load_dotenv
@@ -158,26 +158,54 @@ def save_screenshot(target, path):
     return None
 
 
-def gen_password():
+def gen_password(prof=None):
     """Build a password that satisfies the form policy:
-    5-60 chars, >=1 digit, >=1 special, upper and lower case."""
+    5-60 chars, >=1 digit, >=1 special, upper and lower case.
+
+    `prof` (a SiteProfile) narrows that to the site's own rule where it is
+    stricter. Called with no profile -- which is every pre-winclash call site
+    -- the result is byte-for-byte the same shape as before: 10 characters,
+    one of each class including a special. winclash caps the field at 12
+    characters and has no special-character rule (the check is commented out
+    in its own JS), so passing its profile drops the special and keeps the
+    length inside its window. Generating to the site's policy matters because
+    these forms validate in the browser: a password the JS rejects never
+    reaches the server at all, and surfaces as a mystery toast."""
+    needs_special = True if prof is None else prof.password_needs_special
+    lo = 5 if prof is None else prof.password_min_len
+    hi = 60 if prof is None else prof.password_max_len
+
     pools = [random.choice(string.ascii_uppercase),
              random.choice(string.ascii_lowercase),
-             random.choice(string.digits),
-             random.choice("!@#$%^&*")]
-    pools += random.choices(string.ascii_letters + string.digits, k=6)
+             random.choice(string.digits)]
+    if needs_special:
+        pools.append(random.choice("!@#$%^&*"))
+    target = max(lo, min(10, hi))
+    pools += random.choices(string.ascii_letters + string.digits,
+                            k=max(0, target - len(pools)))
     random.shuffle(pools)
     return "".join(pools)
 
 
-def gen_account():
-    """Generate a random test identity. Phone is filled in separately."""
+def gen_account(prof=None):
+    """Generate a random test identity. Phone is filled in separately.
+
+    `prof` (a SiteProfile) applies that site's field limits. Only the
+    username needs trimming: first+last+tag runs 13-15 characters, which is
+    fine everywhere except winclash, whose #userName carries
+    pattern="...{5,12}$" and would reject it in the browser. The random tag
+    is kept whole and the name part is what gets shortened, so usernames stay
+    as distinct as they were. The email is left at full length (its field
+    allows 60) so it remains unique even when two trimmed usernames collide."""
     first = random.choice(FIRST_NAMES)
     last = random.choice(LAST_NAMES)
     tag = random.randint(100, 9999)
     username = f"{first}{last}{tag}"
+    max_len = 0 if prof is None else prof.username_max_len
+    if max_len and len(username) > max_len:
+        username = f"{first}{last}"[:max_len - len(str(tag))] + str(tag)
     email = f"{first}.{last}{tag}@{EMAIL_DOMAIN}"
-    return {"username": username, "email": email, "password": gen_password()}
+    return {"username": username, "email": email, "password": gen_password(prof)}
 
 
 def gen_free_phone():
@@ -302,6 +330,26 @@ def stop_bridge(proc):
         proc.kill()
 
 
+def new_site_context(browser, site_url=None, proxy_conf=None):
+    """Open a BrowserContext carrying whatever the target site needs, rather
+    than a bare browser.new_context().
+
+    Today that is only the user agent, and only for sites whose profile sets
+    one (winclash: headless Chromium's default "HeadlessChrome" UA is
+    flat-403'd by its WAF before any page is served -- see
+    SiteProfile.user_agent). Sites that set nothing get exactly the context
+    they got before, so this is a no-op for cricmatch/khelofun/spin24star/
+    starexch. Kept as one function so a new site's context requirements are
+    added in one place instead of at each new_context() call site."""
+    kwargs = {}
+    if proxy_conf:
+        kwargs["proxy"] = proxy_conf
+    ua = profile_for(site_url or SITE_URL).user_agent
+    if ua:
+        kwargs["user_agent"] = ua
+    return browser.new_context(**kwargs)
+
+
 def dismiss_popups(page):
     """Close promo / support overlays that block the header buttons."""
     for sel in profile_for(page.url).sel["close_popup"]:
@@ -327,6 +375,39 @@ def open_signup_modal(page):
             return True
     except Exception:
         pass
+
+    # winclash: the signup form is its OWN PAGE (/join-now), so there is no
+    # JOIN button to hunt for -- navigate to it. This deliberately runs AFTER
+    # the caller has already loaded the homepage: the whole site sits behind
+    # an AWS WAF challenge, and it is that homepage load which runs
+    # challenge.js and mints the `aws-waf-token` cookie. Confirmed live --
+    # going straight to /join-now in a fresh context comes back a bare 403
+    # ("403 Forbidden" as the page title), while the same navigation after a
+    # homepage load renders the real form. The retry covers the token not
+    # being minted yet by the time we navigate.
+    if prof.register_trigger == "page_url":
+        target = urljoin(page.url or "", prof.register_path)
+        for attempt in range(2):
+            try:
+                page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                # An AWS WAF wall can land on THIS navigation even when the
+                # homepage came through clean -- confirmed live: winclash
+                # answered / with 202 and /join-now with 405
+                # `x-amzn-waf-action: captcha` in the same session. The soft
+                # "challenge" action clears itself once the page's own
+                # challenge.js has run, so wait it out before concluding the
+                # form is missing. The hard "captcha" action never clears on
+                # its own; that one is left to the caller
+                # (open_signup_form() -> ensure_waf_cleared()), which is why
+                # this returns False rather than raising.
+                wait_out_waf_wall(page)
+                page.wait_for_selector(prof.sel["username"], state="visible",
+                                       timeout=15000)
+                return True
+            except Exception:
+                if attempt == 0:
+                    page.wait_for_timeout(5000)
+        return False
 
     # Khelo platform (spin24star): several REGISTER buttons in the DOM, only
     # one visible; a game section overlays it, so the click must be forced --
@@ -462,6 +543,145 @@ def apply_waf_token(context, website_url, token):
                           "domain": host, "path": "/"}])
 
 
+def waf_wall_showing(page):
+    """True when the page currently displaying is AWS WAF's "Human
+    Verification" interstitial rather than the site.
+
+    Two signals, and BOTH are needed:
+
+    * window.gokuProps -- set by an inline <script> in the interstitial, so
+      it is readable the instant the document parses. Verified against saved
+      copies of the genuine winclash homepage and /join-now: the string
+      appears in neither, so it is specific to the wall despite the site
+      loading AWS WAF's challenge.js on every page.
+    * #captcha-container / #amzn-captcha-verify-button -- the interstitial's
+      own roots, injected later by its script.
+
+    Checking only the ids left a real false-negative window: right after
+    navigation the interstitial's HTML has arrived but its script has not run
+    yet, so the ids are absent and the wall reads as "clear" -- which is how
+    a walled signup got reported as a missing JOIN button rather than as a
+    block."""
+    try:
+        return bool(page.evaluate(
+            "() => !!(window.gokuProps"
+            " || document.getElementById('captcha-container')"
+            " || document.getElementById('amzn-captcha-verify-button'))"))
+    except Exception:
+        return False
+
+
+def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12):
+    """Get past an AWS WAF interstitial served on page LOAD, and return the
+    page to carry on with. Returns (page, ok, message).
+
+    This is a DIFFERENT wall from the one submit_register() handles. That one
+    arrives as the response to the register POST; this one is in front of
+    ordinary navigation -- winclash answers a plain GET of its homepage with
+    HTTP 202, `x-amzn-waf-action: challenge`, and a page whose only content
+    is "Let's confirm you are human". Nothing on the site is reachable until
+    it is cleared, so this runs before the signup form is ever looked for.
+
+    Usually nothing needs doing and nothing is spent: that action is designed
+    to be cleared silently by the site's own challenge.js, which a real
+    browser runs in a few seconds. So this WAITS and re-checks first, and
+    only reaches for a paid CapSolver solve if the wall is still up after
+    `settle_secs`.
+
+    `page` may come back as a NEW page in a NEW context. A solved token
+    injected into the very context that was challenged is still refused --
+    established live for the register-POST wall (see submit_register()'s
+    docstring); AWS WAF tracks session state beyond the cookie -- so the
+    retry starts from a clean context. Callers MUST switch to the returned
+    page: when it is a new one, the original context has been closed here."""
+    site = site_url or SITE_URL
+
+    deadline = time.time() + settle_secs
+    while time.time() < deadline:
+        if not waf_wall_showing(page):
+            return page, True, ""
+        page.wait_for_timeout(1000)
+    if not waf_wall_showing(page):
+        return page, True, "AWS WAF challenge cleared itself"
+
+    if not capsolver_key():
+        return page, False, ("AWS WAF is showing a Human Verification page and "
+                             "CAPSOLVER_API_KEY is not set, so it can't be solved")
+    try:
+        challenge = parse_aws_waf_challenge(page.content())
+        if not challenge:
+            return page, False, ("AWS WAF Human Verification page is up but its "
+                                 "challenge parameters could not be read")
+        token = solve_aws_waf_token(site, challenge, proxy=proxy)
+    except (RuntimeError, urllib.error.URLError, PWError) as e:
+        return page, False, f"AWS WAF solve failed: {str(e)[:200]}"
+
+    old_context = page.context
+    browser = old_context.browser
+    try:
+        proxy_conf = parse_proxy(proxy) if proxy else None
+    except ValueError:
+        proxy_conf = None
+    new_context = new_site_context(browser, site, proxy_conf)
+    apply_waf_token(new_context, site, token)
+    new_page = new_context.new_page()
+    try:
+        old_context.close()
+    except Exception:
+        pass
+
+    new_page.goto(site, wait_until="domcontentloaded", timeout=60000)
+    new_page.wait_for_timeout(4000)
+    if waf_wall_showing(new_page):
+        return new_page, False, ("AWS WAF still challenging after injecting a "
+                                 "solved token")
+    return new_page, True, "AWS WAF cleared with a CapSolver token"
+
+
+def wait_out_waf_wall(page, secs=15):
+    """Give AWS WAF's soft "challenge" action time to clear itself, which is
+    what happens once the page's own challenge.js finishes. Returns True if
+    no wall is showing by the end. Costs nothing on a site that never serves
+    one -- the first check already answers False."""
+    deadline = time.time() + secs
+    while waf_wall_showing(page):
+        if time.time() >= deadline:
+            return False
+        page.wait_for_timeout(1000)
+    return True
+
+
+def open_signup_form(page, site_url=None, proxy=None):
+    """Get the signup form on screen, clearing an AWS WAF wall on the way if
+    one turns up. Returns (ok, page, message).
+
+    Shared by the CLI (signup_once) and the Telegram bot
+    (_blocking_fill_and_register) so the two can't drift, same reasoning as
+    fill_register_form. `page` may be a NEW page in a NEW context -- see
+    ensure_waf_cleared() -- so callers MUST rebind to whatever comes back.
+
+    The order matters: try normally first, and only look at the WAF if that
+    failed. A site whose form simply isn't where the profile says still
+    reports the plain "couldn't open the form" message rather than a
+    misleading WAF one, and no CapSolver credit is ever spent on a
+    selector bug."""
+    if open_signup_modal(page):
+        return True, page, ""
+    if not waf_wall_showing(page):
+        return False, page, "Could not open the signup modal (JOIN button)."
+
+    # settle_secs=0: open_signup_modal already waited this wall out, so it is
+    # the hard "captcha" action, which never clears on its own.
+    page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url, proxy=proxy,
+                                               settle_secs=0)
+    if not waf_ok:
+        return False, page, waf_msg
+    if open_signup_modal(page):
+        return True, page, waf_msg
+    return False, page, ("Could not open the signup form even after clearing "
+                         "the AWS WAF Human Verification page.")
+
+
 def is_waf_captcha(captured):
     """True if the captured register response was an AWS WAF CAPTCHA block."""
     action = (captured.get("action") or "").lower()
@@ -561,7 +781,7 @@ def submit_register(page, acct, site_url, proxy=None):
             proxy_conf = parse_proxy(proxy) if proxy else None
         except ValueError:
             proxy_conf = None
-        new_context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
+        new_context = new_site_context(browser, site_url, proxy_conf)
         apply_waf_token(new_context, site_url or SITE_URL, token)
         new_page = new_context.new_page()
         try:
@@ -635,6 +855,27 @@ def _looks_like_otp_sent(msgs):
     return "otp" in joined and "sent" in joined
 
 
+def _otp_screen_showing(page):
+    """True when the signup OTP entry field is on screen."""
+    try:
+        return page.locator(profile_for(page.url).sel["otp_digits"]).first.is_visible()
+    except Exception:
+        return False
+
+
+def _looks_like_phone_taken(page, msgs):
+    """True when a toast-only site is really saying 'that mobile number is
+    already registered'. cricmatch has a dedicated element for this
+    (check_phone_taken); sites without one list the wording they use in
+    `phone_taken_texts`, and sites that list nothing -- every site that
+    predates this -- never match, so their behaviour is unchanged."""
+    texts = profile_for(page.url).phone_taken_texts
+    if not texts:
+        return False
+    joined = " ".join(msgs).lower()
+    return any(t.lower() in joined for t in texts)
+
+
 def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
     """After clicking REGISTER, poll for whichever outcome shows up first
     instead of blindly sleeping: the OTP screen, the phone-taken error, or any
@@ -650,29 +891,46 @@ def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
     while time.time() < deadline:
         if check_phone_taken(page):
             return "phone_taken", []
-        try:
-            if page.locator(profile_for(page.url).sel["otp_digits"]).first.is_visible():
-                return "otp", []
-        except Exception:
-            pass
+        if _otp_screen_showing(page):
+            return "otp", []
         msgs = read_result(page)
         if msgs and not _looks_like_otp_sent(msgs):
+            # One last look before calling it a rejection. On a site whose
+            # "we sent you a code" toast is worded so that
+            # _looks_like_otp_sent() misses it, the OTP screen itself is the
+            # authoritative signal -- and it renders in the same JS callback
+            # as the toast, so it is already there. This can only ever turn a
+            # would-be error into a real, visible OTP screen, never the
+            # reverse, so no existing site's behaviour changes.
+            if _otp_screen_showing(page):
+                return "otp", []
+            if _looks_like_phone_taken(page, msgs):
+                return "phone_taken", msgs
             return "error", msgs
         page.wait_for_timeout(poll_ms)
     return "timeout", []
 
 
-def wait_for_otp_outcome(page, timeout_ms=10000, poll_ms=250):
+def wait_for_otp_outcome(page, timeout_ms=None, poll_ms=250):
     """After clicking the OTP Verify button, poll for either the inline OTP
     error appearing or the OTP screen closing (success), instead of a flat
-    sleep."""
+    sleep.
+
+    `timeout_ms=None` takes the site's own budget (otp_outcome_timeout_ms,
+    10s by default, unchanged for every site that verifies in one call).
+    winclash needs far longer because one Verify click is two round trips
+    plus a navigation -- see its profile."""
+    if timeout_ms is None:
+        timeout_ms = profile_for(page.url).otp_outcome_timeout_ms
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         prof = profile_for(page.url)
         try:
-            e = page.locator(prof.sel["otp_error"]).first
-            if e.count() and e.is_visible():
-                return "error"
+            err_sel = prof.sel.get("otp_error")
+            if err_sel:
+                e = page.locator(err_sel).first
+                if e.count() and e.is_visible():
+                    return "error"
         except Exception:
             pass
         try:
@@ -710,6 +968,49 @@ def prompt_otp(digits):
         print(f"  Please enter exactly {digits} digits.")
 
 
+def otp_digit_count(page):
+    """How many digits the signup OTP has, or 0 if the OTP screen isn't up.
+
+    Two shapes, hence the profile flag: cricmatch/spin24star render one
+    single-character box PER DIGIT, so counting the elements IS the answer
+    and stays right even if a site changes code length. winclash renders ONE
+    <input maxlength=6>, where the element count is always 1 no matter how
+    long the code is -- counting there would ask the operator for a 1-digit
+    OTP. Shared by the CLI and the Telegram bot so the two can't drift."""
+    prof = profile_for(page.url)
+    try:
+        n = page.locator(prof.sel["otp_digits"]).count()
+    except Exception:
+        return 0
+    if not n:
+        return 0
+    return prof.otp_length if prof.otp_mode == "single" else n
+
+
+def fill_otp(page, otp):
+    """Type `otp` into whichever OTP widget this site uses. Returns True if
+    it went in. Typed rather than filled so the widget's own input handlers
+    fire (winclash's oninput="validateOTP(this)", cricmatch's auto-advance)."""
+    prof = profile_for(page.url)
+    boxes = page.locator(prof.sel["otp_digits"])
+    try:
+        if not boxes.count():
+            return False
+        if prof.otp_mode == "single":
+            box = boxes.first
+            box.click()
+            box.press_sequentially(str(otp), delay=40)
+        else:
+            for i, ch in enumerate(str(otp)):
+                box = boxes.nth(i)
+                box.click()
+                box.press_sequentially(ch, delay=40)
+    except Exception:
+        return False
+    page.wait_for_timeout(500)
+    return True
+
+
 def enter_otp(page, acct, result):
     """After REGISTER, wait for the signup OTP popup, ask the user for the code,
     fill the digit boxes, and click Verify. Mutates and returns `result`."""
@@ -721,8 +1022,7 @@ def enter_otp(page, acct, result):
                                    "(check the result screenshot).")
         return result
 
-    boxes = page.locator(prof.sel["otp_digits"])
-    n = boxes.count()
+    n = otp_digit_count(page)
     if n == 0:
         result["messages"].append("OTP screen detected but no digit inputs found.")
         return result
@@ -730,13 +1030,9 @@ def enter_otp(page, acct, result):
     print(f"\nOTP screen is up — an SMS code was sent to {acct.get('phone', 'your phone')}.")
     otp = prompt_otp(n)
 
-    # Type one digit per box; the widget auto-advances, but set focus explicitly
-    # so it works even if the auto-advance handler misbehaves.
-    for i, ch in enumerate(otp):
-        box = boxes.nth(i)
-        box.click()
-        box.press_sequentially(ch, delay=40)
-    page.wait_for_timeout(500)
+    if not fill_otp(page, otp):
+        result["messages"].append("Could not type the OTP into the form.")
+        return result
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
@@ -755,9 +1051,11 @@ def enter_otp(page, acct, result):
     err = ""
     if outcome == "error":
         try:
-            e = page.locator(prof.sel["otp_error"]).first
-            if e.count() and e.is_visible():
-                err = (e.inner_text() or "").strip()
+            err_sel = prof.sel.get("otp_error")
+            if err_sel:
+                e = page.locator(err_sel).first
+                if e.count() and e.is_visible():
+                    err = (e.inner_text() or "").strip()
         except Exception:
             pass
     still_open = outcome in ("error", "timeout")
@@ -1480,13 +1778,31 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(4000)
 
-    if not open_signup_modal(page):
+    # Some sites (winclash) put an AWS WAF wall in front of the homepage
+    # itself, so there is nothing to click until it's cleared. This is a
+    # no-op on every site that doesn't serve one. It can hand back a fresh
+    # page in a fresh context, so rebind `page` and record it for the caller
+    # to close -- same contract as submit_register() below.
+    page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url, proxy=proxy)
+    result["page"] = page
+    if not waf_ok:
+        result["ok"] = False
+        result["messages"] = [waf_msg]
+        return result
+    if waf_msg:
+        result["messages"].append(waf_msg)
+
+    form_ok, page, form_msg = open_signup_form(page, site_url, proxy=proxy)
+    result["page"] = page
+    if not form_ok:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         result["ok"] = False
-        result["messages"] = ["Could not open the signup modal (JOIN button)."]
+        result["messages"] = [form_msg]
         result["shot"] = save_screenshot(
             page, SHOTS_DIR / f"{acct.get('username', 'unknown')}-{stamp}-no-modal.png")
         return result
+    if form_msg:
+        result["messages"].append(form_msg)
 
     # Type (not fill) so the site's live validation/keyup handlers fire; blur
     # each field afterward to trigger any on-blur checks. Also ensures the
@@ -1499,7 +1815,10 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
 
     if not submit:
         result["ok"] = True
-        result["messages"] = ["--no-submit: form filled but not submitted."]
+        # Append, don't replace: anything already in here (e.g. "AWS WAF
+        # cleared with a CapSolver token") is exactly what a --no-submit dry
+        # run is for -- discarding it hid the one step worth reporting.
+        result["messages"].append("--no-submit: form filled but not submitted.")
         result["shot"] = save_screenshot(page, filled_shot)
         return result
 
@@ -4038,8 +4357,11 @@ def load_accounts(args):
             a["referral_code"] = extract_referral_code(a.get("url") or SITE_URL)
         return accts
 
-    # Default: generate a random identity, keep any explicit overrides.
-    acct = gen_account()
+    # Default: generate a random identity, keep any explicit overrides. The
+    # target site's profile shapes it -- username length and password policy
+    # differ per site, and a value the form's own JS rejects never reaches
+    # the server (see gen_account()).
+    acct = gen_account(profile_for(args.url or SITE_URL))
     if args.username:
         acct["username"] = args.username
     if args.email:
@@ -4075,8 +4397,11 @@ def run_browser_account(browser, acct, args):
         return {"account": acct.get("username", "?"), "ok": False,
                 "messages": [str(e)], "shot": None}
 
-    context = browser.new_context(proxy=proxy_conf) if proxy_conf else None
-    page = context.new_page() if context else browser.new_page()
+    # Always go through a context now (rather than browser.new_page() when
+    # there's no proxy): the target site may require a user agent, which can
+    # only be set at context level.
+    context = new_site_context(browser, acct.get("url"), proxy_conf)
+    page = context.new_page()
     res = None
     try:
         res = signup_once(page, acct, submit=not args.no_submit,
