@@ -436,6 +436,37 @@ three `password_*` fields, `phone_taken_texts` and `user_agent`.
   `supports_login` is now **True** (see the next section for what unblocked
   it), and `supports_casino` with it.
 
+### Reusing a solved WAF token (the biggest cost in a winclash signup)
+
+Measured on the production server before any of this: **50 seconds** from
+start to a filled winclash form, of which **33 seconds was the AWS WAF
+solve** — and CapSolver is billed for every one of them. Three changes, all
+measured, take a repeat signup to **~14s** with the solve paid **once per few
+minutes** instead of once per signup:
+
+- **Solved tokens are cached and reused.** AWS WAF tokens live for minutes,
+  not for a single request, so `cache_waf_token()` /`cached_waf_token()` keep
+  one and `restart_with_waf_token()` (the fresh-context trick, factored out
+  of the two places that open-coded it) replays it. Keyed by host **and the
+  egress it was minted from** — tokens can be IP-bound, the same reason
+  `_capsolver_proxy()` exists, so a proxy change misses the cache rather than
+  reusing another IP's token. `WAF_TOKEN_TTL_SECS` (240) bounds it. A stale
+  token is **self-healing**: the wall shows again and a real solve runs, so
+  the worst case is one extra page load. `submit_register()` caches what it
+  solves too, so both WAF paths share one token.
+- **No settle wait when a token is already in hand.** `ensure_waf_cleared()`
+  waits up to `settle_secs` to see whether a wall clears itself for free —
+  pointless when a usable token is already cached, so it breaks out at once.
+- **The `page_url` form open stops fighting a wall it cannot clear.** It used
+  to wait the wall out, then spend a 15s selector wait, then do the whole
+  thing a second time — ~45s of pure waiting per signup against a page that
+  could never become the form. A wall still up after `wait_out_waf_wall()` is
+  the hard `captcha` action, so it now returns immediately and lets
+  `open_signup_form()` solve or reuse.
+
+Measured after, three signups in one process: **29.2s** (cold, real solve),
+then **13.7s** and **14.3s** on the reused token.
+
 ### A country-coded phone number is silently truncated (all sites)
 
 Found 2026-08-29 on a live winclash run, and it is worth knowing because

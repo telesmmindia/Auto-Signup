@@ -47,6 +47,7 @@ import socket
 import string
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -422,7 +423,14 @@ def open_signup_modal(page):
                 # its own; that one is left to the caller
                 # (open_signup_form() -> ensure_waf_cleared()), which is why
                 # this returns False rather than raising.
-                wait_out_waf_wall(page)
+                # A wall still up after waiting it out is the hard
+                # "captcha" action, which never clears on its own. Hand back
+                # at once so open_signup_form() can solve (or reuse a token)
+                # instead of burning the selector wait and a second attempt
+                # against a page that cannot become the form -- measured at
+                # ~45s of pure waiting per signup.
+                if not wait_out_waf_wall(page):
+                    return False
                 page.wait_for_selector(prof.sel["username"], state="visible",
                                        timeout=15000)
                 return True
@@ -557,6 +565,85 @@ def solve_aws_waf_token(website_url, challenge, api_key=None, proxy=None, timeou
     raise RuntimeError("solve timed out")
 
 
+# --- reusing a solved AWS WAF token --------------------------------------
+# A CapSolver solve is the single most expensive step in a winclash signup:
+# measured on the production server, 33 of the 50 seconds it takes to reach a
+# filled form, and it is billed every time. AWS WAF tokens are valid for
+# MINUTES, not for one request, so a token solved for one signup is very
+# likely still good for the next few. Caching one turns that 33s (and its
+# cost) into a page load for every signup that follows, and a stale token is
+# self-healing: the wall simply shows again and a real solve happens.
+#
+# Keyed by host AND the egress it was minted from, because AWS WAF tokens can
+# be IP-bound -- the same reason _capsolver_proxy() exists. A proxy change
+# therefore misses the cache rather than reusing a token from another IP.
+_WAF_TOKEN_TTL_SECS = int(os.environ.get("WAF_TOKEN_TTL_SECS", "240"))
+_waf_tokens = {}
+_waf_tokens_lock = threading.Lock()
+
+
+def _waf_token_key(site_url, proxy):
+    return (urlsplit(site_url or SITE_URL).hostname or "", proxy or "direct")
+
+
+def cache_waf_token(site_url, token, proxy=None):
+    """Remember a freshly solved token so the next signup can skip the solve."""
+    if not token:
+        return
+    with _waf_tokens_lock:
+        _waf_tokens[_waf_token_key(site_url, proxy)] = (token, time.time())
+
+
+def cached_waf_token(site_url, proxy=None):
+    """A previously solved token for this site+egress, if it is still young
+    enough to be worth trying. None otherwise."""
+    key = _waf_token_key(site_url, proxy)
+    with _waf_tokens_lock:
+        entry = _waf_tokens.get(key)
+        if not entry:
+            return None
+        token, at = entry
+        if time.time() - at > _WAF_TOKEN_TTL_SECS:
+            _waf_tokens.pop(key, None)
+            return None
+        return token
+
+
+def forget_waf_token(site_url, proxy=None):
+    """Drop a token that turned out not to work, so nothing retries it."""
+    with _waf_tokens_lock:
+        _waf_tokens.pop(_waf_token_key(site_url, proxy), None)
+
+
+def restart_with_waf_token(page, site_url, token, proxy=None, proxy_conf=None,
+                           settle_ms=4000):
+    """Open a FRESH context carrying `token`, close the old one, and load the
+    site there. Returns (page, cleared).
+
+    The fresh context is not an optimisation, it is the whole trick: a token
+    injected into the very context that was challenged is still refused --
+    AWS WAF tracks session state beyond the cookie -- while the identical
+    token in a clean context works immediately. Established live for the
+    register-POST wall and reused for every wall since."""
+    old_context = page.context
+    browser = old_context.browser
+    conf = _context_proxy_conf(proxy, proxy_conf)
+    new_context = new_site_context(browser, site_url, conf)
+    apply_waf_token(new_context, site_url or SITE_URL, token)
+    new_page = new_context.new_page()
+    try:
+        old_context.close()
+    except Exception:
+        pass
+    try:
+        new_page.goto(site_url or SITE_URL, wait_until="domcontentloaded",
+                      timeout=60000)
+    except PWError:
+        return new_page, False
+    new_page.wait_for_timeout(settle_ms)
+    return new_page, not waf_wall_showing(new_page)
+
+
 def apply_waf_token(context, website_url, token):
     """Inject a solved aws-waf-token into a BrowserContext so the next request
     to the site carries it."""
@@ -636,9 +723,24 @@ def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12,
     while time.time() < deadline:
         if not waf_wall_showing(page):
             return page, True, ""
+        # A wall is up and a usable token is already in hand -- there is
+        # nothing to gain by waiting to see whether this one clears itself.
+        if cached_waf_token(site, proxy):
+            break
         page.wait_for_timeout(1000)
     if not waf_wall_showing(page):
         return page, True, "AWS WAF challenge cleared itself"
+
+    # A token solved for an earlier signup is very likely still valid, and
+    # trying it costs a page load instead of a paid solve. If it has expired
+    # the wall just shows again and the real solve below runs, so the worst
+    # case is one extra navigation.
+    reused = cached_waf_token(site, proxy)
+    if reused:
+        page, cleared = restart_with_waf_token(page, site, reused, proxy, proxy_conf)
+        if cleared:
+            return page, True, "AWS WAF cleared with a reused token"
+        forget_waf_token(site, proxy)
 
     if not capsolver_key():
         return page, False, ("AWS WAF is showing a Human Verification page and "
@@ -652,22 +754,11 @@ def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12,
     except (RuntimeError, urllib.error.URLError, PWError) as e:
         return page, False, f"AWS WAF solve failed: {str(e)[:200]}"
 
-    old_context = page.context
-    browser = old_context.browser
-    proxy_conf = _context_proxy_conf(proxy, proxy_conf)
-    new_context = new_site_context(browser, site, proxy_conf)
-    apply_waf_token(new_context, site, token)
-    new_page = new_context.new_page()
-    try:
-        old_context.close()
-    except Exception:
-        pass
-
-    new_page.goto(site, wait_until="domcontentloaded", timeout=60000)
-    new_page.wait_for_timeout(4000)
-    if waf_wall_showing(new_page):
+    new_page, cleared = restart_with_waf_token(page, site, token, proxy, proxy_conf)
+    if not cleared:
         return new_page, False, ("AWS WAF still challenging after injecting a "
                                  "solved token")
+    cache_waf_token(site, token, proxy)
     return new_page, True, "AWS WAF cleared with a CapSolver token"
 
 
@@ -853,6 +944,9 @@ def submit_register(page, acct, site_url, proxy=None, proxy_conf=None):
             token = solve_aws_waf_token(site_url or SITE_URL, challenge, proxy=proxy)
         except (RuntimeError, urllib.error.URLError) as e:
             return outcome, [f"AWS WAF CAPTCHA solve failed: {e}"], captured, page
+        # Share it with every other WAF path, so the next signup's navigation
+        # wall costs a page load rather than another paid solve.
+        cache_waf_token(site_url or SITE_URL, token, proxy)
 
         old_context = page.context
         browser = old_context.browser
