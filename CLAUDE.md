@@ -629,22 +629,25 @@ lands on the same Evolution client every other site here drives.
 flag was needed; `selectable_chips=False` keeps cricmatch's
 one-click-the-pre-selected-chip behaviour unchanged.
 
-⚠️ **Two things are unverified and both are cheap to check first:**
-- **The Baccarat table has never been opened on winclash.** Only Stock Market
-  (id 1027) has. `casino_game_ids["Baccarat A"] = "86"` came from winclash's
-  own `/casinoGamesList`, not from driving it. A wrong id opens a *different*
-  table quite happily — the run then fails on the bet-spot check rather than
-  betting wrongly, but you'd be debugging the wrong thing.
-- **The table minimum is unknown.** cricmatch's Baccarat A is ₹100/side; do
-  not assume winclash matches.
+**Verified live on winclash 2026-08-31** with `verify_baccarat.py` from the
+VPS (account `omraman8775`, through proxy `51.194.232.114`), which settles the
+two things that were open when the bot was written:
+- **Game id 86 really is Baccarat A**, and it is the **same physical table
+  cricmatch reaches** — both report `table_id nx7ecktjzywdqwwt`. Login → launch
+  URL → live table took **78s**; `bet-spot-Banker` and `bet-spot-Player` both
+  present; **3 betting windows in 70s**. PASS.
+- **The table minimum is ₹100/side**, same as cricmatch: the real chip rail is
+  100/500/2500/10000/50000/100000 (plus 12 hidden 0-value template nodes).
+  So the first run is `/run <pair> 100 1` — ₹10 would be refused.
 
-`verify_baccarat.py <user> <pass> --url https://winclash.com/` answers both in
-one read-only run (it prints the real `table_id` and the live chip rail).
-**It could not be run to completion from the laptop or its one residential
-proxy on 2026-08-31**: winclash's WAF answered `POST /api2/v2/login` with
-405 + `x-amzn-waf-action: captcha` from both, and after a solved token the
-retry still never authenticated. That is the documented per-IP behavioural
-block, not a code fault — run the verifier from the VPS or a fresh exit IP.
+**The exit IP is the whole story on this site, and it is why that check
+failed from the laptop earlier the same day.** From the laptop and from
+`51.194.232.95` — the IP *every* bot on the server shares — winclash answered
+`POST /api2/v2/login` with 405 + `x-amzn-waf-action: captcha`, and even a
+solved token didn't get a session. The identical code on `51.194.232.114`
+logged in first try. `TOURNAMENT_PROXIES` in the tournament envs holds five
+of these residential IPs; this bot is deliberately pointed at the second one
+rather than piling onto the shared first.
 
 
 ### winclash's AWS WAF wall is on NAVIGATION, not just the POST

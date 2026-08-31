@@ -179,6 +179,14 @@ PROFILE = SiteProfile(
     # Ids as winclash's own /casinoGamesList returns them. Only tables this
     # engine actually drives are listed; add one by reading its id from that
     # endpoint, never by guessing.
+    #
+    # Baccarat A (86) DRIVEN LIVE 2026-08-31 with verify_baccarat.py from the
+    # VPS: it opens table_id nx7ecktjzywdqwwt -- the SAME physical table
+    # cricmatch's Baccarat A reaches -- with both bet spots present, a chip
+    # rail of 100/500/2500/10000/50000/100000 (so the table minimum is Rs 100
+    # a side, not Stock Market's Rs 10) and 3 betting windows in 70s.
+    # Stock Market (1027) likewise driven live. B and Auto-Roulette are
+    # catalogue reads only -- nothing has opened them.
     casino_game_ids={
         "Stock Market": "1027",
         "Baccarat A": "86",
