@@ -615,6 +615,37 @@ read `0.00` on an empty account, which cannot tell them apart. Fund two
 accounts, re-run `verify_stockmarket.py`, then do one `/run <pair> 10 1`
 (table minimum ₹10) and read `/runlog` before scaling.
 
+### winclash's Baccarat gameplay bot (`.env.winclash.gameplay`)
+
+`BOT_MODE=gameplay` + `BOT_SITE_URL=https://winclash.com/`, its own
+`admins`/`bot_settings`/`pairs`/`pair_runs` files, and `CAPSOLVER_API_KEY`
+(required here, unlike cricmatch/khelofun). Same commands and same engine as
+the cricmatch gameplay bot — acc1 Banker, acc2 Player on the same hand —
+because **the route is the only thing winclash does differently, and
+`_open_table_for()` already owns that**: `casino_launch_mode="direct_game_url"`
+navigates to `/casinoRedirect?q=<id>&provider=evolution&type=casino`, which
+lands on the same Evolution client every other site here drives.
+`RUN_GAME` is `BACCARAT` for any mode that isn't `stockmarket`, so no engine
+flag was needed; `selectable_chips=False` keeps cricmatch's
+one-click-the-pre-selected-chip behaviour unchanged.
+
+⚠️ **Two things are unverified and both are cheap to check first:**
+- **The Baccarat table has never been opened on winclash.** Only Stock Market
+  (id 1027) has. `casino_game_ids["Baccarat A"] = "86"` came from winclash's
+  own `/casinoGamesList`, not from driving it. A wrong id opens a *different*
+  table quite happily — the run then fails on the bet-spot check rather than
+  betting wrongly, but you'd be debugging the wrong thing.
+- **The table minimum is unknown.** cricmatch's Baccarat A is ₹100/side; do
+  not assume winclash matches.
+
+`verify_baccarat.py <user> <pass> --url https://winclash.com/` answers both in
+one read-only run (it prints the real `table_id` and the live chip rail).
+**It could not be run to completion from the laptop or its one residential
+proxy on 2026-08-31**: winclash's WAF answered `POST /api2/v2/login` with
+405 + `x-amzn-waf-action: captcha` from both, and after a solved token the
+retry still never authenticated. That is the documented per-IP behavioural
+block, not a code fault — run the verifier from the VPS or a fresh exit IP.
+
 
 ### winclash's AWS WAF wall is on NAVIGATION, not just the POST
 
@@ -739,8 +770,8 @@ longer serialize).
 Production layout: `.env.cricmatch` (signup), `.env.spin24star` (signup),
 `.env.khelofun.signup` (signup), `.env.winclash` (signup), `.env.gameplay`
 (gameplay), `.env.stockmarket` (stockmarket), `.env.khelofun.stockmarket`
-(stockmarket), `.env.winclash.stockmarket` (stockmarket), `.env.password`
-(password).
+(stockmarket), `.env.winclash.stockmarket` (stockmarket),
+`.env.winclash.gameplay` (gameplay), `.env.password` (password).
 
 **`--env` is parsed from `sys.argv` at module level and loaded with
 `load_dotenv(_env_file, override=True)`. The `override=True` is load-bearing:**
@@ -931,13 +962,24 @@ which needs `supports_casino`'s login selectors — cricmatch only. Runs on
 
 ## `/testbaccarat <user> <pass> [amount]` (master-only)
 
-`login()` / `open_casino_lobby()` / `search_and_open_game()` /
-`place_baccarat_bet()` / `test_baccarat()` in `main.py`. Logs into an **existing**
-account (credentials are args, not from `accounts.db`) and places a real bet, to
-confirm the third-party game integration works. Writes nothing to `accounts.db`.
+`test_baccarat()` / `place_baccarat_bet()` in `main.py`. Logs into an
+**existing** account (credentials are args, not from `accounts.db`) and places
+a real bet, to confirm the third-party game integration works. Writes nothing
+to `accounts.db`.
 
-**Verified against cricmatch247 only.** The login/casino `sel` keys are single
-cricmatch values, not cross-site.
+**`test_baccarat()` takes a BROWSER, not a page, and reaches the table through
+`_open_table_for()` — the exact route `/run`'s hedge setup uses.** It used to
+open the lobby and click a tile inline, which is cricmatch's route and only
+cricmatch's: on winclash there is no usable tile at all (tables launch by URL)
+and every page load can be met by an AWS WAF interstitial that must be cleared
+before a login button exists, so `/testbaccarat` failed on a site where `/run`
+worked. Sharing the route means they cannot drift again. `_blocking_test_
+baccarat()` therefore no longer builds its own `browser.new_context()` — that
+carried headless Chromium's default UA, which winclash flat-403s.
+
+**The bet placement itself is verified against cricmatch247 only.** The
+login/casino `sel` keys are per-site (`sites/<site>.py`), and only cricmatch's
+have had a real Baccarat bet placed through them.
 
 Established live:
 - Login: `a.cls_loginbtn` → `#user_login_id` / `#passwordId` → `#loginbutton`.
@@ -1614,6 +1656,21 @@ Run them, read the dump, *then* write selectors — same precedent as
 - `probe_login_balance.py` — captures the login/getBalance network calls.
 - `verify_stockmarket.py <user> <pass>` — drives `_open_table_for(game=STOCKMARKET)`
   end to end. **Run before any `/run`.**
+- `verify_baccarat.py <user> <pass> [--url U] [--proxy P] [--secs N]
+  [--tile "Baccarat A"]` — the gameplay bot's counterpart: drives
+  `_open_table_for(game=BACCARAT)` end to end, so it follows whatever route
+  that site needs (cricmatch's lobby+tile, starexch's direct lobby URL,
+  winclash's `/casinoRedirect` launch URL and its WAF). Prints the **table
+  id** (a wrong `casino_game_ids` entry opens some other table perfectly
+  happily), both bet spots, the live **chip rail** — i.e. the real smallest
+  stake, with baccarat's hidden 0-value template nodes filtered out (cricmatch
+  reports 18 chip nodes, 12 of them 0) — and counts betting windows. Places no
+  bets. **Run before any `/run` on a site whose Baccarat table has never been
+  opened here.** Verified live 2026-08-31 on cricmatch (`ali789`): table ready
+  in 122s, `table_id nx7ecktjzywdqwwt`, balance 1484, chips
+  100/500/2500/10000/50000/100000, both bet spots present, 2 betting windows
+  in 60s — which is also the regression check for `test_baccarat()` moving
+  onto this route.
 - `probe_seat_decay.py --env F [--seats N] [--secs N] [--spacing N]` — the one
   that found seat decay. Pulls accounts straight from the tournament's own
   sheet (no credentials typed or printed), seats N of them and samples every
@@ -1628,7 +1685,9 @@ Run them, read the dump, *then* write selectors — same precedent as
   winclash's live-casino catalogue from the site's own `/casinoGamesList`,
   so a new table gets added to `casino_game_ids` by its REAL id. winclash
   launches tables by URL, so the id is the only thing needed. Read-only,
-  opens no table.
+  opens no table. Logs in on `/join-now` and survives the WAF gating the
+  login CALL the same way `_open_table_for` does (solve, then retry once from
+  a fresh context) — without that it just prints the 405 and exits.
 - `probe_lobby_tables.py --env F [--open "<tile>"] [--secs N]` — finds a
   cheaper table: dumps Evolution-lobby search results, or opens one named
   table read-only and reports its live chip rail + bet limits, ending with

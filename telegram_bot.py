@@ -1559,11 +1559,16 @@ async def testproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def _blocking_test_baccarat(username, password, amount):
-    """Runs on _pw_executors[0]. Opens a throwaway context (mirrors
-    _blocking_test_proxy_once's "share slot 0, always clean up" pattern) and
-    calls main.test_baccarat() to log in and place a real bet. Uses the global
-    proxy (like signups/hedge) so a datacenter box whose IP the site WAF-blocks
-    can still reach the login/casino."""
+    """Runs on _pw_executors[0]. Hands slot 0's browser to main.test_baccarat(),
+    which opens (and closes) its own context through _open_table_for -- the
+    same route /run uses, so this cannot drift from it. Uses the global proxy
+    (like signups/hedge) so a datacenter box whose IP the site WAF-blocks can
+    still reach the login/casino.
+
+    The context is deliberately NOT built here any more: a bare new_context()
+    carries headless Chromium's default user agent, which winclash's WAF
+    flat-403s, and it also skips the navigation-interstitial clearing that
+    site needs before a login button exists. _open_table_for does both."""
     browser = _blocking_ensure_browser(0)
     raw = global_settings.get("proxy")
     proxy_conf = parse_proxy(raw) if raw else None
@@ -1572,14 +1577,12 @@ def _blocking_test_baccarat(username, password, amount):
         proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
     except RuntimeError as e:
         return {"ok": False, "messages": [f"Proxy bridge failed to start: {e}"], "shot": None}
-    context = browser.new_context(proxy=proxy_conf) if proxy_conf else browser.new_context()
     try:
-        page = context.new_page()
-        return test_baccarat(page, username, password, amount, site_url=BOT_SITE_URL)
+        return test_baccarat(browser, username, password, amount,
+                             site_url=BOT_SITE_URL, proxy_conf=proxy_conf)
     except PWError as e:
         return {"ok": False, "messages": [f"Playwright error: {str(e)[:300]}"], "shot": None}
     finally:
-        context.close()
         stop_bridge(bridge_proc)
 
 

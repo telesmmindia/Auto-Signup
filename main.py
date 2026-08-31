@@ -3174,40 +3174,38 @@ def place_baccarat_bet(game_page, frame, amount, round_attempts=12):
     return result
 
 
-def test_baccarat(page, username, password, amount, site_url=None, category="Baccarat",
-                   tile_text="Baccarat A"):
+def test_baccarat(browser, username, password, amount, site_url=None,
+                  category="Baccarat", tile_text="Baccarat A", proxy_conf=None):
     """Smoke-test the casino game integration: log in, open a Baccarat table,
     and place `amount` on both Player and Banker. Returns a result dict in
     the same shape convention as signup_once(): {"ok", "messages", "shot"}.
     Does not wait for the round to resolve -- confirms placement, not outcome.
 
-    Only verified live against cricmatch247 (2026-07-16). Does not write to
-    accounts.db -- this tests an EXISTING account, not a newly created one, a
-    different data lifecycle than the rest of this file."""
+    Takes a BROWSER, not a page, because getting to the table is site-specific
+    and _open_table_for already owns every one of those differences -- it is
+    the exact route /run's hedge setup uses. This used to open the lobby and
+    click a tile inline, which is cricmatch's route and only cricmatch's: on
+    winclash there is no usable tile at all (tables launch by URL, see
+    SiteProfile.casino_launch_mode) and every page load can be met by an AWS
+    WAF interstitial that has to be cleared before a login button even exists.
+    Sharing the route means /testbaccarat can no longer fail on a site where
+    /run works, or vice versa.
+
+    Does not write to accounts.db -- this tests an EXISTING account, not a
+    newly created one, a different data lifecycle than the rest of this file."""
     result = {"ok": False, "messages": [], "shot": None}
 
-    outcome, msgs = login(page, username, password, site_url=site_url)
-    if outcome != "ok":
-        result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        result["shot"] = save_screenshot(page, SHOTS_DIR / f"{username}-{stamp}-login-failed.png")
-        return result
-
-    if not open_casino_lobby(page):
-        result["messages"] = ["Could not open the Live Casino section."]
-        return result
-
-    game_page = search_and_open_game(page, category, tile_text)
-    if game_page is None:
-        result["messages"] = [f"Could not open the {tile_text!r} game tile."]
+    try:
+        context, page, game_page, frame = _open_table_for(
+            browser, username, password, site_url, category, tile_text,
+            proxy_conf=proxy_conf, game=BACCARAT)
+    except RuntimeError as e:
+        # _open_table_for closes its own context on every failure path and
+        # names the phase that failed (login / WAF / lobby / tile / frame).
+        result["messages"] = [str(e)]
         return result
 
     try:
-        frame = find_game_frame(game_page, "evo-games.com")
-        if frame is None:
-            result["messages"] = ["Game tab opened but its UI frame never loaded."]
-            return result
-
         bet_result = place_baccarat_bet(game_page, frame, amount)
         result["ok"] = bet_result["ok"]
         result["messages"] = bet_result["messages"]
@@ -3217,7 +3215,7 @@ def test_baccarat(page, username, password, amount, site_url=None, category="Bac
         return result
     finally:
         try:
-            game_page.close()
+            context.close()
         except Exception:
             pass
 

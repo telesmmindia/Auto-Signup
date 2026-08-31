@@ -43,7 +43,11 @@ with sync_playwright() as pw:
     ctx = engine.new_site_context(browser, SITE, proxy_conf=proxy_conf)
     page = ctx.new_page()
     try:
-        page.goto(SITE, wait_until="domcontentloaded", timeout=90000)
+        # login_url_for, not the bare homepage: winclash's header login bar
+        # does not always finish rendering, while /join-now carries the same
+        # form as part of the page (see SiteProfile.login_path).
+        page.goto(engine.login_url_for(SITE), wait_until="domcontentloaded",
+                  timeout=90000)
         page, ok, msg = engine.ensure_waf_cleared(page, SITE, proxy=args.proxy,
                                                   proxy_conf=proxy_conf)
         print(f"WAF: {ok} {msg}")
@@ -52,6 +56,24 @@ with sync_playwright() as pw:
         ctx = page.context
         outcome, msgs = engine.login(page, args.username, args.password,
                                      site_url=SITE, already_loaded=True)
+        if outcome == "waf":
+            # The WAF refused the login CALL, not the credentials -- the same
+            # case _open_table_for handles, and the only fix is a fresh token
+            # in a FRESH context (one injected into the challenged context is
+            # still refused). Worth exactly one retry: if the wall survives a
+            # solve the exit IP is flagged and more attempts only spend
+            # CapSolver credit.
+            print(f"login: waf -- {'; '.join(msgs)}; solving and retrying once")
+            page, ok, msg = engine.ensure_waf_cleared(
+                page, SITE, proxy=args.proxy, proxy_conf=proxy_conf, force=True)
+            ctx = page.context
+            if ok:
+                page.goto(engine.login_url_for(SITE),
+                          wait_until="domcontentloaded", timeout=90000)
+                outcome, msgs = engine.login(page, args.username, args.password,
+                                             site_url=SITE, already_loaded=True)
+            else:
+                msgs = [f"clearing the WAF failed too: {msg}"]
         print(f"login: {outcome} {'; '.join(msgs)}")
         if outcome != "ok":
             raise SystemExit(1)
