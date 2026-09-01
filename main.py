@@ -2581,11 +2581,15 @@ def _http_status_of(resp_json):
 
 def http_message_of(resp_json):
     """The human-readable text out of a register/OTP response. cricmatch calls
-    the key `message`, winclash calls it `msg`."""
+    the key `message`, winclash calls it `msg`.
+
+    Tags are stripped because these messages are shown to a person and stored
+    in accounts.db's notes: winclash really does answer "The mobile number is
+    already in use. <br>", confirmed live."""
     for key in ("message", "msg"):
         val = resp_json.get(key)
         if val:
-            return str(val)
+            return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(val))).strip()
     return ""
 
 

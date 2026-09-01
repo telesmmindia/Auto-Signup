@@ -590,6 +590,15 @@ than branches (`http_register_fields`, `http_confirm_password_field`,
   `message`. `http_message_of()` reads either key.
 - The `_token` belongs to `/join-now`, not the site root (`http_csrf_path`).
 
+**Confirmed with a valid, already-registered number** (`9304199756`, which
+sends NO SMS — a taken number is refused at the register POST, see above):
+the full payload reached the app in **1.30s** and came back
+`{"status":0,"msg":"The mobile number is already in use. <br>"}`, which the
+engine classified as error + phone_taken. So steps 1 and 2 work with a real
+identity, not just a deliberately-invalid probe. Note the site puts **HTML in
+its message** — `http_message_of()` strips tags, since these land in chat and
+in `accounts.db`'s notes.
+
 ⚠️ **What is NOT verified live.** Steps 1 and 2's request half are proven
 (real csrf, real payload, real application responses, correctly classified by
 the engine). Step 2's `205`, and steps 3 and 4, need a **real phone and a real
