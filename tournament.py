@@ -1432,6 +1432,9 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
     contenders = [dict(r) for r in roster]
     stage = 0
     stalled_stages = 0
+    # How many hands were actually DEALT across the whole run. A winner is
+    # only a winner if the money moved -- see the guard at the end.
+    played = {"hands": 0}
 
     while len(contenders) > 1:
         stage += 1
@@ -1544,7 +1547,11 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         f"could not move"})
                         note = "could not be seated; balance left stranded"
 
-                    account_update(f["username"], bal, "eliminated", stage,
+                    # The sheet gets the NOTE, not the bare word "eliminated":
+                    # an account that never logged in did not lose anything,
+                    # and a RESULT column saying it did is the same misleading
+                    # report as crowning a winner who never played.
+                    account_update(f["username"], bal, note, stage,
                                    start_balance=None)
                     out["eliminated"].append(
                         {"account": f["username"], "stage": stage,
@@ -1655,6 +1662,7 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
             """Fold one finished group into the bracket, on the main thread."""
             if out.get("group_rec"):
                 stage_rec["groups"].append(out["group_rec"])
+                played["hands"] += len(out["group_rec"].get("hands") or [])
             if out.get("winner_rec"):
                 stage_rec["winners"].append(out["winner_rec"])
             summary["eliminated"].extend(out["eliminated"])
@@ -1735,7 +1743,8 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
              f"account and playing it again "
              f"({stalled_stages}/{MAX_STALLED_STAGES})")
 
-    if len(contenders) == 1 and not dry_run:
+    summary["hands_played"] = played["hands"]
+    if len(contenders) == 1 and played["hands"] and not dry_run:
         summary["winner"] = contenders[0]["username"]
         summary["winner_balance"] = contenders[0].get("balance")
         emit(f"\n*** TOURNAMENT WINNER: {contenders[0]['username']} "
@@ -1744,6 +1753,14 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
         # No single account holds the pot. Say exactly who is still holding
         # what, so it can be finished by hand -- this is the state that
         # previously showed up only as a bare "winner": null.
+        #
+        # The `played["hands"]` half of that guard is why a run in which NOTHING
+        # was dealt cannot crown anybody. Live 2026-09-01 on winclash: five of
+        # six accounts could not log in (the site was force-resetting them), the
+        # group was skipped for having fewer than two seats, and the one
+        # account left standing was written into the sheet as WINNER -- of a
+        # tournament that never played a hand and moved no money. Outlasting a
+        # seating failure is not winning.
         summary["unfinished"] = [
             {"account": c["username"], "balance": c.get("balance")}
             for c in contenders]
@@ -1752,10 +1769,19 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
             + ("balance never read" if c.get("balance") is None
                else str(c["balance"])) + ")"
             for c in contenders)
-        summary["problems"].append(
-            {"problem": f"tournament ended with no single winner; still to be "
-                        f"settled between {held}"})
-        emit(f"\nXX NO WINNER -- still to be settled between {held}")
+        if not played["hands"]:
+            summary["problems"].append(
+                {"problem": f"no hand was ever dealt, so nothing was bet and "
+                            f"no money moved. Nobody won: {held} still holds "
+                            f"whatever it held before the run. Fix whatever "
+                            f"stopped the seats coming up and run it again."})
+            emit(f"\nXX NOTHING WAS PLAYED -- no hand was dealt, no money "
+                 f"moved. Still held by {held}")
+        else:
+            summary["problems"].append(
+                {"problem": f"tournament ended with no single winner; still to be "
+                            f"settled between {held}"})
+            emit(f"\nXX NO WINNER -- still to be settled between {held}")
     summary["ended_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
     save()
     return summary
