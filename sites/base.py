@@ -259,6 +259,45 @@ class SiteProfile:
     # is True (there's no DOM to count digit boxes in without a browser).
     http_otp_digits: int = 6
 
+    # The register POST's WIRE FIELD NAMES, keyed by what this engine calls
+    # them. cricmatch's Laravel form and winclash's differ purely in naming
+    # (user_name vs username, mobile_number vs phone), so this is data rather
+    # than a per-site branch in http_register_call(). Read off each site's own
+    # form handler, never guessed.
+    http_register_fields: dict = field(default_factory=lambda: {
+        "username": "username", "email": "email", "password": "password",
+        "phone": "phone", "otp": "otp", "token": "_token",
+    })
+
+    # Name of an extra field that carries a second copy of the password, when
+    # the site's own form sends one (winclash: confirm_password). None -> not
+    # sent, which is every site that predates this.
+    http_confirm_password_field: str = ""
+
+    # How the SMS code is redeemed over HTTP.
+    #   "single_post" -- cricmatch: the SAME register POST, now carrying the
+    #                    code, both requests the OTP and verifies it.
+    #   "confirm_otp" -- winclash: the code goes to http_confirm_otp_path
+    #                    first, and ONLY on its go-ahead is the register POST
+    #                    repeated with the code. Read out of the site's own
+    #                    #confirmSignupOtpBtn_ handler, which literally
+    #                    re-clicks #signUpButton on statusCode 251.
+    http_otp_flow: str = "single_post"
+    http_confirm_otp_path: str = "/api2/v2/confirmSignupOtp"
+
+    # Path to GET for the csrf token and the session cookies. Empty -> the
+    # site root, which is where cricmatch's register form lives. winclash's
+    # signup is its own page, and that page is what its _token belongs to.
+    http_csrf_path: str = ""
+
+    # JSON `status`/`statusCode` values this site's register endpoint uses,
+    # since they are not a shared convention:
+    #   ok_otp_sent   -- the SMS went out, move to the OTP step
+    #   ok_registered -- the account now exists
+    # Empty lists -> judge by message_class, which is what cricmatch does.
+    http_status_otp_sent: list = field(default_factory=list)
+    http_status_registered: list = field(default_factory=list)
+
     # Whether this site's mobile-number field can be overwritten post-signup
     # by POSTing a new number to `free_number_path` on the now-authenticated
     # session -- confirmed live (manual request interception) that this

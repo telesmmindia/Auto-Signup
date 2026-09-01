@@ -92,7 +92,8 @@ session cookies → `POST /register` with `otp=""` (triggers SMS) → same `POST
 
 Functions: `_http_session_for()`, `http_fetch_csrf()`, `http_register_call()`,
 `http_signup_once()` (same result shape as `signup_once()`, but `shot` is always
-`None`). Gated by `SiteProfile.supports_http_fast` — only cricmatch. `main()`
+`None`). Gated by `SiteProfile.supports_http_fast` — cricmatch and winclash (see
+its own section below; winclash uses different field names and a two-step OTP). `main()`
 falls back to Playwright per-account for other sites, and a mixed batch only
 launches Chromium if some account needs it. `--fast --no-submit` is rejected.
 
@@ -400,8 +401,9 @@ three `password_*` fields, `phone_taken_texts` and `user_agent`.
   `gen_account(prof)`/`gen_password(prof)` read these off the profile;
   called with no profile they produce the original cricmatch shape
   byte-for-byte, so no existing site changed.
-- `supports_http_fast` stays **False**: `/sign-up` is behind the same WAF as
-  everything else, so a bare `requests.Session` has no token to present.
+- `supports_http_fast` is **True** as of 2026-09-01 — the "behind the same
+  WAF, so a bare `requests.Session` has no token" reasoning turned out to be
+  wrong. See "winclash over plain HTTP" below.
 - Login selectors (`#user_login`/`#pass_eye_user`/`button.btnLogin`, all on
   `/join-now`) were **observed but never driven**, so `supports_login` and
   `supports_casino` stay off. Casino/stockmarket markup is uninspected.
@@ -519,6 +521,90 @@ signup still taking two minutes is spending it on **SMS delivery plus the human
 typing the OTP**, which no code change shortens. `ROUND_COOLDOWN_SECS` (12s,
 env) is the other non-browser cost, and on winclash it buys only WAF pacing —
 free-number, the reason it exists, does not apply here.
+
+### winclash over plain HTTP: `--fast` works here after all (2026-09-01)
+
+A browser signup is ~6s warm and ~28s cold. **The same signup over
+`requests` is 1.2s** (measured: 6.8s on the first call, then 1.21s and 1.24s
+for a fresh session + csrf GET + register POST). No Chromium, no WAF page, no
+form.
+
+This contradicts the profile's original `supports_http_fast=False` note, and
+the correction is worth stating plainly because it was half right:
+
+- **A clean IP is served normally.** A bare `requests.Session` GET of `/` and
+  `/join-now` returned **HTTP 200**, the real pages, a `csrf-token` meta tag
+  and session cookies (`jeet_session`, `XSRF-TOKEN`, `AWSALB`) — no
+  `x-amzn-waf-action` header at all. A `POST /sign-up` on that session came
+  back with genuine application validation
+  (`{"status":0,"msg":"Password cannot be same as username"}`). The wall is
+  behavioural, exactly as documented elsewhere here — not unconditional.
+- **When it does trip, CapSolver clears it for `requests` too.** After ~8
+  rapid requests `GET /join-now` started answering `202` +
+  `x-amzn-waf-action: challenge`. `challenge.js` is what a browser runs to
+  clear that, and `requests` cannot — but CapSolver mints the identical token
+  from the challenge params, and it works. `http_get_page()` does this, using
+  the **same** `cached_waf_token`/`cache_waf_token` store the browser path
+  uses, so a solve paid for by either path clears the wall for the other.
+
+**Two mechanical gotchas, either of which looks like a dead end:**
+
+- **A challenged XHR-shaped GET comes back 202 with an EMPTY BODY** — nothing
+  to read `gokuProps` out of, so the wall reads as unsolvable. The same GET
+  with real *navigation* headers is served the actual interstitial: 2407
+  bytes, `gokuProps` and all. That is what `_HTTP_NAV_HEADERS` is for, and it
+  is applied **only** to profiles with `waf_on_navigation` — cricmatch's and
+  starexch's HTTP paths keep the byte-identical plain GET they always had.
+- **Over HTTP a solved token does NOT need a fresh session**, unlike the
+  browser path where it must go into a brand-new context
+  (`restart_with_waf_token`). Verified: the same token cleared the wall both
+  in the session that had been challenged and in a freshly built one.
+
+**The call sequence, read out of `/join-now`'s own inline JS** (`URL_signUpUser`,
+the `#signUpButton` handler's `params`, the `#confirmSignupOtpBtn_` handler):
+
+1. `GET /join-now` → `_token` from `<meta name="csrf-token">`, plus cookies.
+2. `POST /sign-up` `{_token, user_name, email, password, confirm_password,
+   mobile_number, otp:""}` → `{"status":205, "msg":…, "phone":…}` = SMS sent.
+3. `POST /api2/v2/confirmSignupOtp` `{otp, phone}` + `X-CSRF-Token` header →
+   `{"statusCode":251}` = code accepted.
+4. **Only then** `POST /sign-up` again, same params with `otp:<code>` →
+   `{"status":1, "redirectTo":…}` = registered.
+
+Step 3 is winclash-only and is why `http_otp_flow="confirm_otp"` exists; the
+site's own handler literally re-clicks `#signUpButton` on 251. **Keep the
+order** — posting the register form with a code the confirm step has not
+blessed is not what the site does. The `phone` in step 3 is the one the
+server **echoed back** in step 2, not what was typed: the page renders
+`data.phone` into `.signup_verify_number` and reads it straight back out.
+
+**Three conventions that differ from cricmatch**, all now profile data rather
+than branches (`http_register_fields`, `http_confirm_password_field`,
+`http_status_otp_sent`/`http_status_registered`):
+- Field names: `user_name`/`mobile_number`/`confirm_password`, not
+  `username`/`phone`.
+- **Rejections carry no `message_class` at all**, so cricmatch's
+  message_class convention would have read **every winclash rejection as a
+  success**. Judge by `status`: 205 = OTP sent, 1 = registered, 0 or a
+  `statusCode` of `"301"` = rejected with the reason in **`msg`**, not
+  `message`. `http_message_of()` reads either key.
+- The `_token` belongs to `/join-now`, not the site root (`http_csrf_path`).
+
+⚠️ **What is NOT verified live.** Steps 1 and 2's request half are proven
+(real csrf, real payload, real application responses, correctly classified by
+the engine). Step 2's `205`, and steps 3 and 4, need a **real phone and a real
+SMS**, which discovery deliberately did not spend — they are coded from the
+site's own JS, which is the same basis the browser flow was written on and
+that one is verified end to end. **Do one `--fast` signup on a real number and
+check `accounts.db`** before running volume. If step 3 or 4 is wrong the raw
+message still reaches `result["messages"]`, so it will say so rather than fail
+silently.
+
+⚠️ **`--fast` skips the phone read-back guard.** `fill_register_form()`
+re-reads the mobile field to catch `maxlength` truncation (see the section
+below); there is no field to read over HTTP. `normalize_phone()` still runs at
+every entry point, which is what actually prevents the fault — but the safety
+net is browser-only.
 
 ### A country-coded phone number is silently truncated (all sites)
 

@@ -1992,7 +1992,7 @@ def http_check_account_balance(username, password, site_url=None, proxy=None):
         return result
 
     try:
-        csrf = http_fetch_csrf(session, url)
+        csrf = http_fetch_csrf(session, url, proxy)
     except (requests.RequestException, RuntimeError) as e:
         result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
         result["infra_block"] = True
@@ -2068,7 +2068,7 @@ def http_change_account_password(username, current_password, new_password,
         return result
 
     try:
-        csrf = http_fetch_csrf(session, url)
+        csrf = http_fetch_csrf(session, url, proxy)
     except (requests.RequestException, RuntimeError) as e:
         result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
         result["infra_block"] = True
@@ -2314,16 +2314,115 @@ def http_session_for(proxy_str):
     return session
 
 
-def http_fetch_csrf(session, site_url):
-    """GET the site and pull the Laravel csrf-token meta tag out of the
-    response (also seeds the session's cookies -- laravel_session, XSRF-TOKEN,
-    AWSALB* -- for the register calls that follow)."""
-    resp = session.get(site_url, timeout=20)
+# Headers a real Chrome sends when NAVIGATING to a page, as opposed to the
+# XHR-shaped set in _http_fast_browser_headers(). This distinction is not
+# cosmetic: AWS WAF answers a challenged XHR-shaped GET with a bare HTTP 202
+# and an EMPTY BODY -- nothing to read challenge parameters out of, so the
+# wall looks unsolvable -- while the same GET with navigation headers is
+# served the real interstitial, gokuProps and all. Confirmed live on winclash
+# 2026-09-01: 202 + 0 bytes with Accept: */*, 202 + 2407 bytes carrying
+# gokuProps with the headers below.
+_HTTP_NAV_HEADERS = {
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,*/*;q=0.8"),
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+
+def http_apply_waf_token(session, site_url, token):
+    """Put a solved aws-waf-token into a requests.Session's cookie jar.
+
+    Note the contrast with the browser path, where a token only ever works in
+    a BRAND-NEW context (see restart_with_waf_token()). Over plain HTTP there
+    is no such rule -- verified live 2026-09-01 on winclash, where the same
+    token cleared the wall both in the session that had been challenged and in
+    a freshly built one -- so nothing needs rebuilding here."""
+    host = urlsplit(site_url or SITE_URL).hostname
+    session.cookies.set("aws-waf-token", token, domain=host, path="/")
+
+
+def http_get_page(session, url, site_url=None, proxy=None):
+    """GET a page over plain HTTP, clearing an AWS WAF wall on the way if one
+    turns up. Returns the requests Response.
+
+    winclash's WAF is behavioural: a clean IP is served normally, and after a
+    handful of rapid requests the same GET starts coming back with an
+    `x-amzn-waf-action` header. The soft "challenge" action is what a browser
+    clears for free by running challenge.js, which `requests` cannot do -- but
+    CapSolver mints the identical token from the challenge parameters, and
+    that token works here.
+
+    Tokens come from and go back into the SAME cache the browser path uses
+    (cached_waf_token/cache_waf_token, keyed by host + egress), so a solve
+    paid for by a browser signup clears the wall for an HTTP one and vice
+    versa."""
+    site = site_url or url
+    # A site with no wall in front of it is fetched EXACTLY as it always was:
+    # same plain GET, same headers, same timeout. Nothing about cricmatch's or
+    # starexch's HTTP paths changes because winclash needed this.
+    if not profile_for(site).waf_on_navigation:
+        return session.get(url, timeout=20)
+
+    token = cached_waf_token(site, proxy)
+    if token:
+        http_apply_waf_token(session, site, token)
+
+    resp = session.get(url, headers=_HTTP_NAV_HEADERS, timeout=25)
+    if not resp.headers.get("x-amzn-waf-action"):
+        return resp
+
+    # The cached token (if there was one) has just been disproved -- same
+    # reasoning as ensure_waf_cleared()'s: don't spend a second request
+    # re-presenting it.
+    if token:
+        forget_waf_token(site, proxy)
+    if not capsolver_key():
+        raise RuntimeError("AWS WAF is challenging this request and "
+                           "CAPSOLVER_API_KEY is not set, so it can't be solved")
+
+    challenge = parse_aws_waf_challenge(resp.text)
+    if not challenge:
+        raise RuntimeError(
+            f"AWS WAF answered HTTP {resp.status_code} "
+            f"({resp.headers.get('x-amzn-waf-action')}) but its challenge "
+            f"parameters could not be read from the {len(resp.text)}-byte body")
+    token = solve_aws_waf_token(site, challenge, proxy=proxy)
+    http_apply_waf_token(session, site, token)
+    cache_waf_token(site, token, proxy)
+
+    resp = session.get(url, headers=_HTTP_NAV_HEADERS, timeout=25)
+    if resp.headers.get("x-amzn-waf-action"):
+        forget_waf_token(site, proxy)
+        raise RuntimeError("AWS WAF is still challenging after presenting a "
+                           "freshly solved token")
+    return resp
+
+
+def http_csrf_url(site_url):
+    """The page whose csrf token the register POST must carry. cricmatch's
+    register form is on the site root; winclash's is its own page, and the
+    _token belongs to that page."""
+    prof = profile_for(site_url)
+    path = prof.http_csrf_path or (prof.register_path if prof.register_trigger == "page_url" else "")
+    return urljoin(site_url, path) if path else site_url
+
+
+def http_fetch_csrf(session, site_url, proxy=None):
+    """GET the page carrying the register form and pull the Laravel csrf-token
+    meta tag out of the response (also seeds the session's cookies --
+    laravel_session/jeet_session, XSRF-TOKEN, AWSALB* -- for the register calls
+    that follow). Clears an AWS WAF wall if the site serves one."""
+    resp = http_get_page(session, http_csrf_url(site_url), site_url, proxy)
     resp.raise_for_status()
     m = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text)
     if not m:
-        raise RuntimeError("csrf-token meta tag not found on the homepage response "
-                           "(site markup may have changed).")
+        raise RuntimeError("csrf-token meta tag not found on the signup page "
+                           "response (site markup may have changed).")
     return m.group(1)
 
 
@@ -2335,26 +2434,70 @@ def http_register_call(session, csrf_token, acct, site_url, otp=""):
     prof = profile_for(site_url)
     parts = urlsplit(site_url)
     register_url = f"{parts.scheme}://{parts.netloc}{prof.http_register_path}"
+    # Field names come from the profile: the two sites' forms carry the same
+    # six values under different names (username/user_name,
+    # phone/mobile_number), so this stays one code path.
+    names = prof.http_register_fields
     data = {
-        "username": acct["username"],
-        "email": acct["email"],
-        "password": acct["password"],
-        "phone": str(acct["phone"]),
-        "otp": otp,
-        "_token": csrf_token,
+        names["username"]: acct["username"],
+        names["email"]: acct["email"],
+        names["password"]: acct["password"],
+        names["phone"]: str(acct["phone"]),
+        names["otp"]: otp,
+        names["token"]: csrf_token,
     }
+    if prof.http_confirm_password_field:
+        data[prof.http_confirm_password_field] = acct["password"]
     headers = {
         "X-Requested-With": "XMLHttpRequest",
         "X-CSRF-TOKEN": csrf_token,
-        "Referer": site_url,
+        "Referer": http_csrf_url(site_url),
         "Origin": _http_fast_origin(site_url),
     }
     resp = session.post(register_url, data=data, headers=headers, timeout=20)
+    return _http_json_or_error(resp)
+
+
+def _http_json_or_error(resp):
+    """Parse a JSON response, turning anything else -- an edge block page, an
+    empty WAF 202 -- into the same error-shaped dict the callers already read,
+    so a block is reported rather than raising a JSONDecodeError."""
     try:
         return resp.json()
     except ValueError:
+        waf = resp.headers.get("x-amzn-waf-action")
+        detail = f" BLOCKED by AWS WAF (x-amzn-waf-action: {waf})" if waf else ""
         return {"status": None, "message_class": "danger",
-                "message": f"Non-JSON response (HTTP {resp.status_code}): {resp.text[:200]}"}
+                "waf_action": waf,
+                "message": f"Non-JSON response (HTTP {resp.status_code}){detail}: "
+                           f"{resp.text[:200]}"}
+
+
+def http_confirm_signup_otp(session, csrf_token, otp, phone, site_url):
+    """winclash's extra OTP step: the code is checked by its own endpoint
+    BEFORE the register POST is repeated with it.
+
+    Read out of the site's own #confirmSignupOtpBtn_ handler, which POSTs
+    {otp, phone} to /api2/v2/confirmSignupOtp with an X-CSRF-Token header and,
+    on statusCode 251, literally re-clicks #signUpButton -- i.e. re-sends the
+    whole register form with the code in it. `phone` is the number the
+    register call ECHOED BACK (data.phone, which the page renders into
+    .signup_verify_number and reads straight back out), not the one we typed,
+    so whatever normalisation the server applied is preserved.
+
+    Returns the parsed JSON."""
+    prof = profile_for(site_url)
+    parts = urlsplit(site_url)
+    url = f"{parts.scheme}://{parts.netloc}{prof.http_confirm_otp_path}"
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "X-CSRF-Token": csrf_token,
+        "Referer": http_csrf_url(site_url),
+        "Origin": _http_fast_origin(site_url),
+    }
+    resp = session.post(url, data={"otp": otp, "phone": phone},
+                        headers=headers, timeout=20)
+    return _http_json_or_error(resp)
 
 
 def http_free_phone_number(session, csrf_token, site_url):
@@ -2426,7 +2569,45 @@ def http_free_phone_number(session, csrf_token, site_url):
     return ok, new_phone, msg
 
 
-def http_is_error(resp_json):
+def _http_status_of(resp_json):
+    """The site's own status value, as a string. Sites disagree on both the
+    key (`status` vs `statusCode`) and the type (0 vs "301"), so normalise
+    once here rather than at four call sites."""
+    for key in ("status", "statusCode"):
+        if key in resp_json and resp_json[key] is not None:
+            return str(resp_json[key])
+    return ""
+
+
+def http_message_of(resp_json):
+    """The human-readable text out of a register/OTP response. cricmatch calls
+    the key `message`, winclash calls it `msg`."""
+    for key in ("message", "msg"):
+        val = resp_json.get(key)
+        if val:
+            return str(val)
+    return ""
+
+
+def http_is_error(resp_json, site_url=None):
+    """Did this register/OTP call fail?
+
+    Two conventions, and a site declares which it uses by whether it lists any
+    success statuses (http_status_otp_sent / http_status_registered):
+
+    * cricmatch: no statuses listed -> judge by message_class, exactly as
+      before, so its behaviour is untouched.
+    * winclash: statuses listed -> judge by them. Its `status` is 205 for "OTP
+      sent" and 1 for "registered", while a rejection is 0 (or a `statusCode`
+      of "301") with the reason in `msg`. Its rejections carry NO
+      message_class at all, so the old check would have called every one of
+      them a success."""
+    prof = profile_for(site_url) if site_url else None
+    ok_statuses = (prof.http_status_otp_sent + prof.http_status_registered) if prof else []
+    if ok_statuses:
+        if resp_json.get("waf_action") or _http_status_of(resp_json) == "":
+            return True
+        return _http_status_of(resp_json) not in [str(x) for x in ok_statuses]
     return (resp_json.get("message_class") or "").lower() in ("danger", "error")
 
 
@@ -2437,8 +2618,45 @@ def http_is_phone_taken(resp_json):
     wording ("The mobile number has already been taken.", see
     check_phone_taken()). If this misclassifies, the raw message still reaches
     result["messages"] via the generic-error fallback, so nothing is hidden."""
-    msg = (resp_json.get("message") or "").lower()
-    return "taken" in msg and ("mobile" in msg or "phone" in msg)
+    msg = http_message_of(resp_json).lower()
+    if "taken" in msg and ("mobile" in msg or "phone" in msg):
+        return True
+    # winclash words it "The mobile number is already in use." -- matched on
+    # the phone-specific phrase, never a bare "already in use", for the same
+    # reason its phone_taken_texts is: a taken EMAIL worded that way would
+    # otherwise send the continuous loop rotating to a new number for a fault
+    # a new number cannot fix.
+    return "mobile number is already in use" in msg
+
+
+def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
+    """Redeem the SMS code, whichever way this site does it. Returns the JSON
+    of whichever call decides the outcome, so the caller judges it with one
+    http_is_error().
+
+    "single_post" (cricmatch): the register POST is simply repeated with the
+    code in it.
+
+    "confirm_otp" (winclash): the code goes to /api2/v2/confirmSignupOtp
+    first, and only if that answers with a go-ahead status is the register
+    POST repeated. This mirrors the site's own handler exactly -- it re-clicks
+    #signUpButton on statusCode 251 -- and the order matters: posting the
+    register form with a code the confirm step has not blessed is not what the
+    site does, and was never observed to work.
+
+    The phone sent to the confirm step is the one the register call ECHOED
+    BACK, because that is what the page uses (it renders data.phone into
+    .signup_verify_number and reads it straight back out), so any
+    normalisation the server applied is preserved."""
+    prof = profile_for(site_url)
+    if prof.http_otp_flow != "confirm_otp":
+        return http_register_call(session, csrf, acct, site_url, otp=otp)
+
+    phone = str(register_json.get("phone") or acct["phone"])
+    confirmed = http_confirm_signup_otp(session, csrf, otp, phone, site_url)
+    if http_is_error(confirmed, site_url):
+        return confirmed
+    return http_register_call(session, csrf, acct, site_url, otp=otp)
 
 
 def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=None,
@@ -2463,7 +2681,7 @@ def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=
         return result
 
     try:
-        csrf = http_fetch_csrf(session, url)
+        csrf = http_fetch_csrf(session, url, proxy)
     except (requests.RequestException, RuntimeError) as e:
         result["ok"] = False
         result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
@@ -2486,39 +2704,40 @@ def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=
             result["messages"] = [f"Register request failed: {str(e)[:200]}"]
             return result
 
-        if not http_is_error(resp_json):
+        if not http_is_error(resp_json, url):
             break  # OTP triggered
 
         if http_is_phone_taken(resp_json) and interactive and attempts < 5:
             attempts += 1
-            print(f"\n{resp_json.get('message')} Try a different phone number.")
+            print(f"\n{http_message_of(resp_json)} Try a different phone number.")
             acct["phone"] = prompt_phone(site_url)
             continue
 
         result["ok"] = False
-        result["messages"] = [resp_json.get("message") or f"Register rejected: {resp_json}"]
+        result["phone_taken"] = http_is_phone_taken(resp_json)
+        result["messages"] = [http_message_of(resp_json) or f"Register rejected: {resp_json}"]
         if attempts:
             result["messages"].append(f"Gave up after {attempts} retr{'y' if attempts == 1 else 'ies'}.")
         return result
 
     print(f"\nOTP requested — an SMS code was sent to {acct.get('phone', 'your phone')}.")
-    print(f"  server says: {resp_json.get('message')}")
+    print(f"  server says: {http_message_of(resp_json)}")
     otp = prompt_otp(prof.http_otp_digits)
 
     try:
-        verify_json = http_register_call(session, csrf, acct, url, otp=otp)
+        verify_json = http_verify_signup_otp(session, csrf, acct, url, otp, resp_json)
     except requests.RequestException as e:
         result["ok"] = False
         result["messages"] = [f"OTP verify request failed: {str(e)[:200]}"]
         return result
 
-    if http_is_error(verify_json):
+    if http_is_error(verify_json, url):
         result["ok"] = False
-        result["messages"] = [f"OTP rejected: {verify_json.get('message') or verify_json}"]
+        result["messages"] = [f"OTP rejected: {http_message_of(verify_json) or verify_json}"]
         return result
 
     result["ok"] = True
-    result["messages"] = [verify_json.get("message") or "OTP verified — account appears registered."]
+    result["messages"] = [http_message_of(verify_json) or "OTP verified — account appears registered."]
 
     if free_number:
         ok, new_phone, msg = http_free_phone_number(session, csrf, url)

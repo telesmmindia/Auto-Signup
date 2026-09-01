@@ -156,7 +156,8 @@ from main import (
     fill_otp, fill_register_form, free_account_number, free_phone_number,
     gen_account, gen_password, otp_digit_count,
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
-    http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
+    http_message_of, http_register_call, http_session_for, http_verify_signup_otp,
+    is_waf_captcha, maybe_bridge_proxy,
     ensure_waf_cleared, new_site_context, open_signup_form, open_signup_modal,
     normalize_phone, parse_proxy, post_load_settle, read_result,
     seed_waf_token, signup_entry_url,
@@ -588,6 +589,9 @@ class Session:
         self.use_fast = False
         self.http_session = None
         self.http_csrf = None
+        # The register call's own JSON, kept for the OTP step on sites whose
+        # confirm call must quote the phone number the server echoed back.
+        self.http_register_json = {}
         # Free-number mode (global_settings["free_number"], see /freenumber) --
         # set once in begin_signup(), same lifecycle as use_fast above. When
         # True, a successful OTP verify is immediately followed by a call that
@@ -644,6 +648,7 @@ def _blocking_close_context(session):
     session.page = None
     session.http_session = None
     session.http_csrf = None
+    session.http_register_json = {}
     stop_bridge(session.bridge_proc)
     session.bridge_proc = None
 
@@ -869,7 +874,7 @@ def _blocking_http_register(session, phone):
         return {"ok": False, "message": f"Bad proxy: {e}"}
 
     try:
-        csrf = http_fetch_csrf(http_sess, url)
+        csrf = http_fetch_csrf(http_sess, url, session.proxy)
     except (requests.RequestException, RuntimeError) as e:
         return {"ok": False, "message": f"Couldn't load the site (check the proxy?): {str(e)[:200]}"}
 
@@ -878,31 +883,41 @@ def _blocking_http_register(session, phone):
     except requests.RequestException as e:
         return {"ok": False, "message": f"Register request failed: {str(e)[:200]}"}
 
-    if http_is_error(resp_json):
+    if http_is_error(resp_json, url):
         if http_is_phone_taken(resp_json):
-            return {"ok": False, "phone_taken": True, "message": resp_json.get("message")}
-        return {"ok": False, "message": "Register rejected: " + (resp_json.get("message") or str(resp_json))}
+            return {"ok": False, "phone_taken": True, "message": http_message_of(resp_json)}
+        return {"ok": False,
+                "message": "Register rejected: " + (http_message_of(resp_json) or str(resp_json))}
 
     session.http_session = http_sess
     session.http_csrf = csrf
+    # The number the SERVER echoed back, which a two-step site's confirm call
+    # must quote (see http_verify_signup_otp) -- the page reads it out of its
+    # own .signup_verify_number rather than re-using what was typed.
+    session.http_register_json = resp_json
     return {"ok": True, "digits": prof.http_otp_digits, "shot": None}
 
 
 def _blocking_http_verify_otp(session, otp):
-    """HTTP-fast counterpart to _blocking_verify_otp(): re-POST /register on
-    the SAME requests.Session, now with the real code."""
+    """HTTP-fast counterpart to _blocking_verify_otp(): redeem the code on the
+    SAME requests.Session. Goes through main.http_verify_signup_otp so the
+    one-POST sites (cricmatch) and the two-step ones (winclash, which blesses
+    the code at /api2/v2/confirmSignupOtp before the register form is
+    re-sent) share the CLI's code path rather than a second copy of it."""
     url = session.site_url or BOT_SITE_URL
     try:
-        verify_json = http_register_call(session.http_session, session.http_csrf,
-                                         session.acct, url, otp=otp)
+        verify_json = http_verify_signup_otp(
+            session.http_session, session.http_csrf, session.acct, url, otp,
+            getattr(session, "http_register_json", {}) or {})
     except requests.RequestException as e:
         return {"ok": False, "message": f"OTP verify request failed: {str(e)[:200]}", "shot": None}
 
-    if http_is_error(verify_json):
-        return {"ok": False, "message": f"OTP rejected: {verify_json.get('message') or verify_json}",
+    if http_is_error(verify_json, url):
+        return {"ok": False,
+                "message": f"OTP rejected: {http_message_of(verify_json) or verify_json}",
                 "shot": None}
 
-    message = verify_json.get("message") or "OTP verified — account registered."
+    message = http_message_of(verify_json) or "OTP verified — account registered."
     freed_phone = None
     if session.free_number:
         ok, new_phone, fn_msg = http_free_phone_number(session.http_session, session.http_csrf, url)

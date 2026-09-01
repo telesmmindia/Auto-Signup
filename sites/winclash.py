@@ -194,7 +194,46 @@ PROFILE = SiteProfile(
         "Baccarat B": "87",
         "Auto-Roulette": "220",
     },
-    supports_http_fast=False,
+    # HTTP-fast signup: CONFIRMED LIVE 2026-09-01 against the real site.
+    # Every value below was read off winclash's own /join-now JavaScript
+    # (URL_signUpUser, the #signUpButton handler's `params`, and the
+    # #confirmSignupOtpBtn_ handler) and then exercised with plain requests.
+    #
+    # This flag used to be False on the reasoning that "/sign-up is behind the
+    # same WAF, so a bare requests.Session has no token to present". Half of
+    # that turned out to be wrong and the other half is now handled:
+    #   * A clean IP is served normally -- a bare requests.Session got HTTP
+    #     200, the real page, a csrf token and session cookies, and a POST to
+    #     /sign-up came back with genuine application validation
+    #     ({"status":0,"msg":"Password cannot be same as username"}). The wall
+    #     is behavioural, not unconditional.
+    #   * Once it DOES trip, CapSolver mints the same token challenge.js would
+    #     have, and that token works in a plain requests session -- including
+    #     the very session that was challenged, unlike the browser path, which
+    #     needs a fresh context. http_get_page() does this, sharing one token
+    #     cache with the browser flow.
+    supports_http_fast=True,
+    http_register_path="/sign-up",
+    http_otp_digits=6,
+    # winclash's wire names for the same six values cricmatch sends.
+    http_register_fields={
+        "username": "user_name", "email": "email", "password": "password",
+        "phone": "mobile_number", "otp": "otp", "token": "_token",
+    },
+    http_confirm_password_field="confirm_password",
+    # Two-step: the code is blessed by its own endpoint before the register
+    # POST is repeated with it -- exactly what the page's own JS does.
+    http_otp_flow="confirm_otp",
+    http_confirm_otp_path="/api2/v2/confirmSignupOtp",
+    # The _token belongs to /join-now, not the site root.
+    http_csrf_path="/join-now",
+    # 205 = "OTP sent", 1 = "registered". A rejection is status 0 (or a
+    # statusCode of "301") with the reason in `msg` and NO message_class at
+    # all -- so the message_class convention cricmatch uses would have read
+    # every winclash rejection as a success. 251 is the confirmSignupOtp
+    # go-ahead, the point at which the site re-submits the register form.
+    http_status_otp_sent=[205, 251],
+    http_status_registered=[1],
     supports_free_number=False,
     supports_change_password=False,
     sel={
