@@ -158,7 +158,8 @@ from main import (
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_register_call, http_session_for, is_waf_captcha, maybe_bridge_proxy,
     ensure_waf_cleared, new_site_context, open_signup_form, open_signup_modal,
-    normalize_phone, parse_proxy, read_result,
+    normalize_phone, parse_proxy, post_load_settle, read_result,
+    seed_waf_token, signup_entry_url,
     run_paired_hedge, save_screenshot, stop_bridge,
     submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
@@ -660,6 +661,27 @@ async def end_session(session):
     await close_browser(session)
 
 
+class _PhaseTimer:
+    """Stopwatch for the browser half of a signup, so "it takes two minutes"
+    can be read off a log line instead of guessed at. Costs nothing but a
+    time.time() per phase, and the report tells you immediately whether the
+    time is going on the site (load/waf/form) or on the human at the other end
+    of the OTP -- which no amount of code tuning can shorten."""
+
+    def __init__(self):
+        self.t0 = self.last = time.time()
+        self.phases = []
+
+    def mark(self, name):
+        now = time.time()
+        self.phases.append((name, now - self.last))
+        self.last = now
+
+    def report(self):
+        parts = " | ".join(f"{n} {d:.1f}s" for n, d in self.phases)
+        return f"{parts} = {self.last - self.t0:.1f}s total"
+
+
 def _blocking_fill_and_register(session, phone):
     """Runs on session.slot's worker thread. Opens a fresh browser context on
     that slot's browser, fills the form, submits, and waits for the OTP screen."""
@@ -672,16 +694,26 @@ def _blocking_fill_and_register(session, phone):
     # new_site_context (not a bare new_context) so a site that needs a
     # specific user agent gets one -- winclash's WAF flat-403s headless
     # Chromium's default UA before serving any page.
-    context = new_site_context(browser, session.site_url or BOT_SITE_URL, proxy_conf)
+    site = session.site_url or BOT_SITE_URL
+    marks = _PhaseTimer()
+    context = new_site_context(browser, site, proxy_conf)
+    # A token solved for an earlier signup, injected before the first
+    # navigation, gets this context served the real site straight away -- and
+    # lets a page_url site (winclash) load its register page directly instead
+    # of hopping through the homepage first. Stale tokens self-heal below.
+    seeded = seed_waf_token(context, site, session.proxy)
     page = context.new_page()
     session.context, session.page = context, page
+    marks.mark("context")
 
     acct = session.acct
     try:
-        page.goto(session.site_url or BOT_SITE_URL, wait_until="domcontentloaded", timeout=60000)
+        page.goto(signup_entry_url(site, seeded), wait_until="domcontentloaded",
+                  timeout=60000)
     except PWError as e:
         return {"ok": False, "message": f"Couldn't load the site (check the proxy?): {str(e)[:200]}"}
-    page.wait_for_timeout(4000)
+    post_load_settle(page, site)
+    marks.mark("load")
 
     # Clear an AWS WAF "Human Verification" wall if this site serves one in
     # front of its homepage (winclash). No-op elsewhere. It may hand back a
@@ -691,6 +723,7 @@ def _blocking_fill_and_register(session, phone):
                                                proxy=session.proxy,
                                                proxy_conf=proxy_conf)
     session.context, session.page = page.context, page
+    marks.mark("waf")
     if not waf_ok:
         return {"ok": False, "message": waf_msg}
 
@@ -701,12 +734,14 @@ def _blocking_fill_and_register(session, phone):
                                                proxy=session.proxy,
                                                proxy_conf=proxy_conf)
     session.context, session.page = page.context, page
+    marks.mark("form")
     if not form_ok:
         stamp = time.strftime("%Y%m%d-%H%M%S")
         no_modal_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-no-modal.png")
         return {"ok": False, "message": form_msg, "shot": no_modal_shot}
 
     fill_register_form(page, acct)
+    marks.mark("fill")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-filled.png")
@@ -723,6 +758,8 @@ def _blocking_fill_and_register(session, phone):
                                                      proxy=session.proxy,
                                                      proxy_conf=proxy_conf)
     session.context, session.page = page.context, page
+    marks.mark("submit")
+    logger.info(f"{acct['username']}: browser phase timings -- {marks.report()}")
 
     result_shot = save_screenshot(page, SHOTS_DIR / f"{acct['username']}-{stamp}-result.png")
 

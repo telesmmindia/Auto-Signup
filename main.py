@@ -390,7 +390,11 @@ def dismiss_popups(page):
 def open_signup_modal(page):
     """Click JOIN/REGISTER and wait for the register form to appear."""
     prof = profile_for(page.url)
-    dismiss_popups(page)
+    # A page_url site's form is on ANOTHER page, so anything overlaying this
+    # one is about to be navigated away from -- closing it first is pure cost
+    # (dismiss_popups sleeps 800ms and each candidate click waits up to 1.5s).
+    if prof.register_trigger != "page_url":
+        dismiss_popups(page)
 
     # Already showing? (Khelo sites open the form directly at /?reg=1.)
     try:
@@ -577,7 +581,13 @@ def solve_aws_waf_token(website_url, challenge, api_key=None, proxy=None, timeou
 # Keyed by host AND the egress it was minted from, because AWS WAF tokens can
 # be IP-bound -- the same reason _capsolver_proxy() exists. A proxy change
 # therefore misses the cache rather than reusing a token from another IP.
-_WAF_TOKEN_TTL_SECS = int(os.environ.get("WAF_TOKEN_TTL_SECS", "240"))
+# How long a solved AWS WAF token is worth re-presenting. Deliberately
+# optimistic rather than conservative: a token that has expired costs exactly
+# one page load to find out (the wall shows, ensure_waf_cleared() drops it and
+# solves for real), while a token retired too early costs a full CapSolver
+# solve -- measured at ~21s of a 27.7s cold signup against winclash, versus
+# 6.1-6.6s for a signup that reused one. Env-overridable either way.
+_WAF_TOKEN_TTL_SECS = int(os.environ.get("WAF_TOKEN_TTL_SECS", "600"))
 _waf_tokens = {}
 _waf_tokens_lock = threading.Lock()
 
@@ -615,6 +625,93 @@ def forget_waf_token(site_url, proxy=None):
         _waf_tokens.pop(_waf_token_key(site_url, proxy), None)
 
 
+def seed_waf_token(context, site_url=None, proxy=None):
+    """Put an already-solved token into a BRAND-NEW context before its first
+    navigation, so a site whose every page load is walled (winclash) is served
+    the real site on the very first GET. Returns True if one was injected.
+
+    This is the cheap half of the token cache. Without it a warm signup still
+    pays: load the homepage -> hit the wall -> throw that context away ->
+    build a fresh one with the token -> load the homepage AGAIN. That second
+    load is pure waste, because the fresh context this token needs is the one
+    we are about to create anyway. A stale token costs nothing extra: the wall
+    simply shows and ensure_waf_cleared() runs exactly as before."""
+    token = cached_waf_token(site_url, proxy)
+    if not token:
+        return False
+    try:
+        apply_waf_token(context, site_url or SITE_URL, token)
+        return True
+    except Exception:
+        return False
+
+
+def current_waf_token(page):
+    """The aws-waf-token this context is carrying, if any -- either seeded by
+    seed_waf_token() or minted by the site's own challenge.js."""
+    try:
+        for c in page.context.cookies():
+            if c.get("name") == "aws-waf-token" and c.get("value"):
+                return c["value"]
+    except Exception:
+        pass
+    return None
+
+
+def has_waf_token_cookie(page):
+    """True once this context holds an aws-waf-token cookie -- i.e. the site's
+    own challenge.js has run and minted one."""
+    return bool(current_waf_token(page))
+
+
+def post_load_settle(page, site_url=None, ms=4000, poll_ms=250):
+    """The pause after the first page load, before the signup form is looked
+    for. Sites whose form is a MODAL keep the flat sleep byte-for-byte -- it
+    is load-bearing there (a promo overlay covers the JOIN button while
+    Playwright already reports it visible, and replacing this with a
+    visibility wait reproduced a real failure).
+
+    Sites whose form is its own PAGE (winclash) are about to navigate away, so
+    the only thing this wait can buy them is letting challenge.js mint the
+    aws-waf-token cookie the next navigation needs. That is a condition we can
+    actually test for, so poll for it and leave the moment it is true --
+    typically well under the flat 4s, and instantly when a cached token was
+    seeded into the context."""
+    prof = profile_for(site_url or page.url or SITE_URL)
+    if prof.register_trigger != "page_url":
+        page.wait_for_timeout(ms)
+        return
+    if not prof.waf_on_navigation:
+        return
+    deadline = time.time() + ms / 1000.0
+    while time.time() < deadline:
+        if not waf_wall_showing(page) and has_waf_token_cookie(page):
+            return
+        page.wait_for_timeout(poll_ms)
+
+
+def signup_entry_url(site_url=None, token_seeded=False):
+    """Where a signup's FIRST navigation should go.
+
+    Normally the site root: a page_url site (winclash) needs the homepage load
+    to run challenge.js and mint the aws-waf-token cookie, and fetching
+    /join-now cold in a fresh context comes back a bare 403 -- so the homepage
+    hop is what makes the register page reachable at all.
+
+    When a solved token has already been seeded into this context
+    (seed_waf_token), that hop has nothing left to do and the register page
+    can be loaded directly, saving a whole page load per signup. If the token
+    turns out to be stale the wall shows on the register page instead of the
+    homepage, and open_signup_form() -> ensure_waf_cleared() recovers exactly
+    as it always did -- so the worst case is the old behaviour, one navigation
+    later."""
+    site = site_url or SITE_URL
+    prof = profile_for(site)
+    if token_seeded and prof.register_trigger == "page_url" and prof.register_path:
+        return urljoin(site, prof.register_path)
+    return site
+
+
 def restart_with_waf_token(page, site_url, token, proxy=None, proxy_conf=None,
                            settle_ms=4000):
     """Open a FRESH context carrying `token`, close the old one, and load the
@@ -640,7 +737,14 @@ def restart_with_waf_token(page, site_url, token, proxy=None, proxy_conf=None,
                       timeout=60000)
     except PWError:
         return new_page, False
-    new_page.wait_for_timeout(settle_ms)
+    # Poll rather than sleep the whole budget: the point of this wait is to
+    # find out whether the token worked, and on a good token the wall is gone
+    # as soon as the document parses.
+    deadline = time.time() + settle_ms / 1000.0
+    while time.time() < deadline:
+        if not waf_wall_showing(new_page):
+            return new_page, True
+        new_page.wait_for_timeout(250)
     return new_page, not waf_wall_showing(new_page)
 
 
@@ -736,6 +840,15 @@ def ensure_waf_cleared(page, site_url=None, proxy=None, settle_secs=12,
     # the wall just shows again and the real solve below runs, so the worst
     # case is one extra navigation.
     reused = cached_waf_token(site, proxy)
+    # If this very token is already in the context and the wall is STILL up,
+    # it has just been disproved -- rebuilding a context to present it again
+    # would only spend another page load to reach the same answer. Drop it and
+    # go straight to a real solve. (This is what keeps a generous
+    # WAF_TOKEN_TTL_SECS cheap: an over-optimistic TTL costs nothing beyond
+    # the load that discovered it, instead of a second one.)
+    if reused and reused == current_waf_token(page):
+        forget_waf_token(site, proxy)
+        reused = None
     if reused:
         page, cleared = restart_with_waf_token(page, site, reused, proxy, proxy_conf)
         if cleared:
@@ -959,8 +1072,12 @@ def submit_register(page, acct, site_url, proxy=None, proxy_conf=None):
         except Exception:
             pass
 
-        new_page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
-        new_page.wait_for_timeout(4000)
+        # The token is already in this context, so a page_url site can go
+        # straight back to its register page rather than by way of the
+        # homepage -- same reasoning as signup_entry_url()'s.
+        new_page.goto(signup_entry_url(site_url, True),
+                      wait_until="domcontentloaded", timeout=60000)
+        post_load_settle(new_page, site_url)
         if not open_signup_modal(new_page):
             return ("timeout", ["WAF solved but could not reopen the register form"],
                     captured, new_page)
@@ -2010,8 +2127,13 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     real phone used for this signup is freed up for the next one."""
     result = {"account": acct.get("username", "?"), "ok": None, "messages": [], "shot": None}
 
-    page.goto(site_url or SITE_URL, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(4000)
+    # A token solved for an earlier signup lets this context be served the
+    # real site on its first GET, which also means the register page can be
+    # opened directly instead of by way of the homepage.
+    seeded = seed_waf_token(page.context, site_url, proxy)
+    page.goto(signup_entry_url(site_url, seeded), wait_until="domcontentloaded",
+              timeout=60000)
+    post_load_settle(page, site_url)
 
     # Some sites (winclash) put an AWS WAF wall in front of the homepage
     # itself, so there is nothing to click until it's cleared. This is a
@@ -4878,6 +5000,7 @@ def run_browser_account(browser, acct, args):
     failures are folded in here too (rather than raising), so main()'s loop
     can treat this and http_signup_once() identically: call it, get a res."""
     bridge_proc = None
+    started = time.time()
     try:
         proxy_conf = parse_proxy(acct.get("proxy"))
         proxy_conf, bridge_proc = maybe_bridge_proxy(proxy_conf)
@@ -4907,6 +5030,8 @@ def run_browser_account(browser, acct, args):
         res = {"account": acct.get("username", "?"), "ok": False,
                "messages": [f"Browser error (check --proxy?): {str(e)[:200]}"], "shot": None}
     finally:
+        if isinstance(res, dict):
+            res["secs"] = time.time() - started
         # signup_once() may have swapped in a fresh page/context to route
         # around an AWS WAF CAPTCHA (submit_register() closes the original
         # context itself when that happens) -- close whichever page/context
@@ -5018,8 +5143,12 @@ def main():
                 res = run_browser_account(browser, acct, args)
 
             results.append(res)
+            # Per-account wall time, because "the signups are slow" is only
+            # actionable once you can see whether it is the first one (which
+            # pays for a WAF solve) or every one.
+            took = f" [{res['secs']:.1f}s]" if res.get("secs") is not None else ""
             print(f"[{'OK ' if res['ok'] else 'FAIL' if res['ok'] is False else '?  '}] "
-                  f"{res['account']}: {' | '.join(res['messages'])}")
+                  f"{res['account']}{took}: {' | '.join(res['messages'])}")
             if res["shot"]:
                 print(f"       screenshot: {res['shot']}")
 

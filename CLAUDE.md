@@ -450,9 +450,9 @@ minutes** instead of once per signup:
   of the two places that open-coded it) replays it. Keyed by host **and the
   egress it was minted from** — tokens can be IP-bound, the same reason
   `_capsolver_proxy()` exists, so a proxy change misses the cache rather than
-  reusing another IP's token. `WAF_TOKEN_TTL_SECS` (240) bounds it. A stale
-  token is **self-healing**: the wall shows again and a real solve runs, so
-  the worst case is one extra page load. `submit_register()` caches what it
+  reusing another IP's token. `WAF_TOKEN_TTL_SECS` (**600**) bounds it. A
+  stale token is **self-healing**: the wall shows again and a real solve runs,
+  so the worst case is one extra page load. `submit_register()` caches what it
   solves too, so both WAF paths share one token.
 - **No settle wait when a token is already in hand.** `ensure_waf_cleared()`
   waits up to `settle_secs` to see whether a wall clears itself for free —
@@ -466,6 +466,59 @@ minutes** instead of once per signup:
 
 Measured after, three signups in one process: **29.2s** (cold, real solve),
 then **13.7s** and **14.3s** on the reused token.
+
+### The cached token is used BEFORE the first navigation (2026-09-01)
+
+The caching above still let every warm signup take the long way round: build
+a context → load the homepage → **hit the wall anyway** → throw that context
+away → build a fresh one carrying the token → load the homepage **again** →
+only then navigate to `/join-now`. Three page loads and two flat 4s sleeps to
+reach a form, for a token we already held. Measured on the same three-signup
+run: **66.7s** for three fills, ~19s each warm.
+
+Four changes, and the same three fills now take **40.8s — 28.0s cold (a real
+CapSolver solve) and 6.7s / 6.0s warm**, i.e. warm signups went from ~14-19s
+to ~6s:
+
+- **`seed_waf_token(context, ...)` injects the cached token into the
+  brand-new context before its first navigation.** The fresh context a token
+  needs is the one about to be created anyway, so the discard-and-rebuild
+  round trip was pure ceremony. Callers: `signup_once()` and the bot's
+  `_blocking_fill_and_register()`.
+- **`signup_entry_url(site_url, token_seeded)` skips the homepage hop.** The
+  homepage load exists only so `challenge.js` mints the token; holding one
+  already, a `page_url` site can load `/join-now` directly. A stale token
+  lands on the wall there instead, and `open_signup_form()` →
+  `ensure_waf_cleared()` recovers exactly as before — the worst case is the
+  old behaviour, one navigation later. `submit_register()`'s post-solve
+  refill uses it too.
+- **`post_load_settle()` replaces the flat `wait_for_timeout(4000)` — for
+  `page_url` sites only.** Modal sites keep that sleep **byte-for-byte**: it
+  is load-bearing there (see the "leave the 4000 alone" note above). A site
+  navigating away next can only be waiting for the token cookie, which is a
+  testable condition, so it polls `waf_wall_showing()` + the cookie and leaves
+  at once — instantly when a token was seeded. `restart_with_waf_token()`
+  polls its settle for the same reason.
+- **`open_signup_modal()` skips `dismiss_popups()` on a `page_url` site.**
+  Anything overlaying the homepage is about to be navigated away from, so
+  closing it costs 800ms plus up to 1.5s per candidate click for nothing.
+
+**A stale token now costs one page load, not two**, which is what makes the
+longer TTL safe: `ensure_waf_cleared()` compares the cached token against the
+one the context is **already carrying** (`current_waf_token()`) and, when they
+match while the wall is still up, drops it and solves rather than rebuilding a
+context to present the same disproved token again.
+
+Regression-checked on cricmatch (modal path, `--no-submit`): 10.2s, unchanged.
+
+`main.py --account-file` now prints **per-account wall time** (`[6.7s]`), and
+the bot logs `browser phase timings -- context 0.2s | load 3.1s | waf 0.0s |
+form 2.4s | fill 0.9s | submit 3.2s = 9.8s` after every register. Use those
+before tuning anything: on a bot round the browser half is now ~10s, so a
+signup still taking two minutes is spending it on **SMS delivery plus the human
+typing the OTP**, which no code change shortens. `ROUND_COOLDOWN_SECS` (12s,
+env) is the other non-browser cost, and on winclash it buys only WAF pacing —
+free-number, the reason it exists, does not apply here.
 
 ### A country-coded phone number is silently truncated (all sites)
 
