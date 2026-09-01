@@ -1708,9 +1708,31 @@ actually wrong before this.
   its login, so a big group takes longer to seat — and seat decay means a
   group that seats slowly starts half dead.
 
-**Not yet run live.** The pieces under it are (login, the launch URL, a real
-Baccarat table, and a real settled hedge on 2026-09-01), but no knockout has
-played on winclash. Start with `--dry-run` on a handful of funded ids.
+**First live run, 2026-09-01: nothing was dealt, and the reason is
+account-side.** Six ids, one group. One (`shauryac1498`) seated in ~50s and
+was fine; the other five failed to log in, and on the retries the site's own
+message came through: **"Force Reset"**. Established by testing one failing
+account with BOTH its sheet password and its original signup password from
+`accounts.db` through the working proxy — same "Force Reset" either way —
+while `shauryac1498` logged in on the same code, same IP, same moment. So it
+is not a wrong password, not the proxy, and not the WAF: **winclash is
+demanding a password reset on those accounts**, and nothing in this repo can
+clear it (`supports_change_password` is False here; the site's own OTP reset
+flow is the only route). Worth noting which accounts: `shauryamo989` and
+`rishabhg9178` are exactly the two that ran the verified hedge the day
+before, so being PLAYED looks like what earns the flag. A separate retry on
+`krishnab4810` showed "Something went wrong", which is the WAF-blocked login
+toast, not this.
+
+**That run also exposed a reporting bug, now fixed.** With fewer than two
+seats the group is skipped, which left five accounts eliminated at seating
+and one still standing — and `run_tournament` crowned it, writing WINNER into
+the sheet for a tournament that dealt **no hand and moved no money**. It now
+counts hands actually dealt and refuses to name a winner when that is zero,
+reporting "nothing was played, here is who still holds what" instead. In the
+same place, a seating failure used to write the bare word `eliminated` into
+the sheet's RESULT column — claiming an account lost something it never
+played for; the note that says what really happened goes in the cell now.
 
 ### Discovery scripts (all read-only, none place a bet)
 
