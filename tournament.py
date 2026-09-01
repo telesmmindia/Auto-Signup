@@ -1297,6 +1297,52 @@ def seat_accounts(group, gi, site_url, proxies, login_spacing=0, progress=None,
     return ready, failures
 
 
+# Site messages worth translating before they reach the operator. Somebody
+# reading a spreadsheet cell that says "Force Reset" has no way to know what
+# it wants from them; the whole point of writing a reason into the sheet is
+# that it can be acted on without opening a log. Matched case-insensitively
+# against the site's own words, longest-standing case first.
+_SEAT_FAILURE_HINTS = (
+    ("force reset",
+     "The site is forcing a password reset on this account. Reset its "
+     "password on the site itself, then run again."),
+    ("dropped",
+     "The site dropped this account's session right after login. That is a "
+     "restriction on their side, so retrying will not fix it."),
+    ("human verification",
+     "The site's bot wall stopped the login, not the password. Worth another "
+     "run."),
+    ("aws waf",
+     "The site's bot wall stopped the login, not the password. Worth another "
+     "run."),
+    ("something went wrong",
+     "The site showed only its generic error, which is usually the bot wall "
+     "rather than a bad password. Worth another run."),
+)
+
+
+def site_message(error):
+    """The site's own words out of a seat error.
+
+    Seat errors read "login failed for bob: Force Reset" -- the half after the
+    colon is what the site actually said, and it is the only part an operator
+    can do anything with."""
+    txt = (error or "").strip()
+    if ":" in txt:
+        txt = txt.split(":", 1)[1].strip()
+    return txt[:140]
+
+
+def explain_seat_failure(error):
+    """A plain-English reason for a failed seat, or None if the site's message
+    is not one we can translate. The raw message is still carried alongside."""
+    msg = (error or "").lower()
+    for needle, hint in _SEAT_FAILURE_HINTS:
+        if needle in msg:
+            return hint
+    return None
+
+
 def diagnose_account(username, password, site_url=None, proxy=None):
     """Ask the site directly what is wrong with an account, over HTTP.
 
@@ -1514,7 +1560,23 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         "Nothing is wrong with it; re-run once "
                                         "the block clears (~20 min)."})
                         blocked.append(f["username"])
+                        # It stays in the bracket, but say so in the sheet --
+                        # a blank row next to five explained ones reads like
+                        # the account was forgotten about.
+                        account_update(f["username"], None,
+                                       "not tried — the site was rate-limiting "
+                                       "logins, so it was never actually "
+                                       "checked. It stays in for the next run.",
+                                       stage, start_balance=None)
                         continue
+
+                    # What the site itself said, and what that means in
+                    # words the operator can act on. Both go in the sheet:
+                    # the translation first, the site's own wording after it
+                    # in quotes, so a message nobody has taught this code yet
+                    # still reaches the person reading the row.
+                    said = site_message(f["error"])
+                    hint = explain_seat_failure(f["error"])
 
                     if state == "rejected":
                         gp(f"   XX {f['username']}: the site refused "
@@ -1526,13 +1588,30 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         f"{f['detail']}. Credentials look "
                                         f"wrong; whatever it holds could not "
                                         f"be reached."})
-                        note = "could not log in; credentials refused"
+                        note = ("could not log in — the site refused the "
+                                "username or password. Check column B. "
+                                "Nothing was bet.")
                     elif bal is not None and bal < table_min:
                         gp(f"   .. {f['username']} could not open a table "
                            f"but holds {bal} (< table min {table_min}) -- "
                            "already out, nothing stranded")
-                        note = ("could not be seated; was already below the "
-                                "table minimum, so nothing is stranded")
+                        note = (f"out already — holds {bal}, under the "
+                                f"{table_min} table minimum, so it cannot open "
+                                f"a table. Nothing is stranded.")
+                    elif hint:
+                        # A login the site itself explained. Not "could not be
+                        # seated" -- it never got as far as a table, and saying
+                        # so is the difference between a row somebody can act
+                        # on and one they have to come and ask about.
+                        gp(f"   XX {f['username']}: could not log in. {hint} "
+                           f"(the site said: {said!r})")
+                        out["problems"].append(
+                            {"account": f["username"], "stage": stage,
+                             "balance": bal,
+                             "problem": f"could not log in. {hint} The site "
+                                        f"said: {said!r}. Nothing was bet on "
+                                        f"this account."})
+                        note = f"could not log in. {hint} Site said: {said!r}"
                     else:
                         held = "an unreadable balance" if bal is None else str(bal)
                         gp(f"   XX {f['username']} could not open a table "
@@ -1545,7 +1624,9 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                                         f"{SEAT_ATTEMPTS} tries ({f['error']}); "
                                         f"holds {held} that the tournament "
                                         f"could not move"})
-                        note = "could not be seated; balance left stranded"
+                        note = (f"could not be seated after {SEAT_ATTEMPTS} "
+                                f"tries — {said!r}. Holds {held}, which this "
+                                f"run could not move. Nothing was bet on it.")
 
                     # The sheet gets the NOTE, not the bare word "eliminated":
                     # an account that never logged in did not lose anything,
@@ -1564,6 +1645,22 @@ def run_tournament(roster, site_url=None, proxies=None, group_size=10,
                     gp("   XX fewer than two seats came up -- skipping "
                        "this group, its seated accounts stay in the "
                        "bracket")
+                    out["problems"].append(
+                        {"stage": stage, "group": gi,
+                         "problem": f"only {len(ready)} of {len(group)} "
+                                    f"account(s) could be seated, and a hand "
+                                    f"needs two — nothing was bet in this "
+                                    f"group. The rows above say what stopped "
+                                    f"each of the others."})
+                    for s_ok in ready:
+                        # This one was fine; it just had nobody to play. Say
+                        # that in its row rather than leaving it blank next to
+                        # rows full of reasons.
+                        account_update(s_ok.username, s_ok.balance,
+                                       "logged in fine, but its group could "
+                                       "not start — too few other accounts "
+                                       "got in. Nothing was bet.",
+                                       stage, start_balance=s_ok._start_balance)
                     out["advancing"].extend(dict(a) for a in seated)
                     return out
 

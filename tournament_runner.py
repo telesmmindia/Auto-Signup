@@ -472,8 +472,12 @@ def play(ws, roster, site_url, args, on_stage=None):
             f"(balance {summary.get('winner_balance')})")
     elif args.dry_run:
         log("WINNER     : n/a -- dry run, nothing was bet")
+    elif not summary.get("hands_played"):
+        log("WINNER     : none -- NOT A SINGLE HAND WAS DEALT, so no money "
+            "moved. Each account's row in the sheet says what stopped it.")
     else:
         log("WINNER     : none -- see problems below")
+    log(f"hands dealt: {summary.get('hands_played', 0)}")
     if summary["problems"]:
         log("")
         log(f"problems ({len(summary['problems'])}) -- these need a human:")
@@ -625,11 +629,20 @@ def watch_loop(args, site_url):
                         ws, f"DONE {done} — winner {summary['winner']} "
                             f"({summary.get('winner_balance')}). "
                             f"Type START to run again.")
+                elif not summary.get("hands_played"):
+                    # The cell is the only thing most people look at, so it
+                    # has to carry the headline: nothing happened, and the
+                    # per-account reasons are in the RESULT column.
+                    write_control(
+                        ws, f"DONE {done} — nothing was played: no hand was "
+                            f"dealt and no money moved. See the RESULT column "
+                            f"for what stopped each account. Type START to "
+                            f"try again.")
                 else:
                     write_control(
                         ws, f"DONE {done} — no winner, "
-                            f"{len(summary['problems'])} problem(s), see "
-                            f"{STATE_FILE}. Type START to run again.")
+                            f"{len(summary['problems'])} problem(s), see the "
+                            f"RESULT column. Type START to run again.")
 
             elif upper in ("STOP", "IDLE"):
                 write_control(ws, "IDLE — type START to begin")
