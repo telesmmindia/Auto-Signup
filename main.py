@@ -1676,9 +1676,53 @@ def check_account_balance(page, username, password, site_url=None):
     not place a bet or change anything, and does not write to accounts.db
     (like free_account_number(), this operates on an account someone already
     has, not one generated here)."""
-    result = {"ok": False, "balance": None, "messages": [], "shot": None}
+    result = {"ok": False, "balance": None, "messages": [], "shot": None,
+              "page": page}
 
-    outcome, msgs = login(page, username, password, site_url=site_url)
+    # Same preamble as _open_table_for, and for the same reason: on a site
+    # whose every page load can be met by an AWS WAF interstitial (winclash),
+    # login() would otherwise spend its whole timeout hunting a LOGIN button
+    # on a "Human Verification" page. Clearing the wall can hand back a page
+    # in a BRAND-NEW context (a solved token only works in a fresh one), so
+    # the page is published in result["page"] -- the same convention
+    # signup_once() uses -- and run_balance_check closes whichever context the
+    # page ended up in.
+    prof = profile_for(site_url or SITE_URL)
+    if prof.waf_on_navigation:
+        try:
+            page.goto(login_url_for(site_url), wait_until="domcontentloaded",
+                      timeout=60000)
+        except PWError as e:
+            result["messages"] = [f"Could not load the site: {str(e)[:150]}"]
+            return result
+        page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url or SITE_URL)
+        result["page"] = page
+        if not waf_ok:
+            result["messages"] = [f"Blocked before login: {waf_msg}"]
+            return result
+
+    outcome, msgs = login(page, username, password, site_url=site_url,
+                          already_loaded=prof.waf_on_navigation)
+    if outcome == "waf":
+        # The WAF refused the login CALL, not the credentials. Only a fresh
+        # token in a FRESH context fixes that, and it is worth exactly one
+        # retry -- if the wall survives a solve the exit IP is flagged and
+        # more attempts only spend CapSolver credit. Same rule as
+        # _open_table_for.
+        page, waf_ok, waf_msg = ensure_waf_cleared(page, site_url or SITE_URL,
+                                                   force=True)
+        result["page"] = page
+        if waf_ok:
+            try:
+                page.goto(login_url_for(site_url),
+                          wait_until="domcontentloaded", timeout=60000)
+            except PWError:
+                pass
+            outcome, msgs = login(page, username, password, site_url=site_url,
+                                  already_loaded=True)
+        else:
+            msgs = [f"{msgs[0] if msgs else 'AWS WAF blocked the login'}; "
+                    f"clearing it failed too: {waf_msg}"]
     if outcome != "ok":
         result["messages"] = msgs or [f"Login did not succeed (outcome={outcome})."]
         stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1733,16 +1777,25 @@ def run_balance_check(username, password, site_url=None, proxy=None):
             page = context.new_page()
             result = check_account_balance(page, username, password, site_url=site_url)
         finally:
-            try:
-                context.close()
-            except Exception:
-                pass
+            # Clearing a WAF wall can move the page into a brand-new context
+            # and close the original, so close the one the page actually ended
+            # up in -- otherwise that replacement leaks until browser.close().
+            for ctx in {context, getattr(result.get("page"), "context", None)}:
+                try:
+                    if ctx is not None:
+                        ctx.close()
+                except Exception:
+                    pass
     finally:
         stop_bridge(bridge_proc)
         try:
             browser.close()
         finally:
             pw.stop()
+    # Page and context are closed by now, and callers of this one-call entry
+    # point (balance_checker.py, the bot) persist the result dict -- so don't
+    # hand them a dead Playwright handle to trip over.
+    result.pop("page", None)
     return result
 
 
