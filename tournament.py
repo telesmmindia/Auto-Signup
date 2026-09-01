@@ -579,8 +579,8 @@ class Seat:
         self.context, self.page, self.game_page, self.frame = m._open_table_for(
             self.browser, self.username, self.password, self.site_url,
             game.category, game.tile_text,
-            proxy_conf=proxy_conf, progress=progress, label=self.username,
-            game=game)
+            proxy_conf=proxy_conf, proxy=self.proxy, progress=progress,
+            label=self.username, game=game)
         self.table_id = m._table_id(self.game_page)
         self.balance = m.read_game_balance(self.frame)
         self._start_balance = self.balance
@@ -1315,7 +1315,21 @@ def diagnose_account(username, password, site_url=None, proxy=None):
 
     The browser's own login timeout cannot tell "rejected" from "blocked" --
     it says "credentials rejected or the login was throttled" for both, which
-    is exactly the ambiguity this resolves."""
+    is exactly the ambiguity this resolves.
+
+    On a site with no HTTP login path this cannot answer at all, and saying so
+    is the whole point: http_check_account_balance returns a plain not-ok for
+    that case, which used to read as "rejected" -- i.e. the seat retries were
+    abandoned and every account was recorded as "credentials refused" when
+    nothing about them had been checked. winclash is exactly that site
+    (supports_http_login=False: a bare requests.Session cannot get past its
+    WAF, so auth is verified in-page instead), so it answers "unknown" and the
+    ordinary browser retry ladder runs."""
+    prof = m.profile_for(site_url or m.SITE_URL)
+    if not prof.supports_http_login:
+        return "unknown", None, (
+            f"{prof.key} has no HTTP login path, so nothing could be checked "
+            "without a browser -- this says nothing about the account")
     try:
         res = m.http_check_account_balance(username, password,
                                            site_url=site_url, proxy=proxy)

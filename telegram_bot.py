@@ -1579,7 +1579,8 @@ def _blocking_test_baccarat(username, password, amount):
         return {"ok": False, "messages": [f"Proxy bridge failed to start: {e}"], "shot": None}
     try:
         return test_baccarat(browser, username, password, amount,
-                             site_url=BOT_SITE_URL, proxy_conf=proxy_conf)
+                             site_url=BOT_SITE_URL, proxy_conf=proxy_conf,
+                             proxy=raw)
     except PWError as e:
         return {"ok": False, "messages": [f"Playwright error: {str(e)[:300]}"], "shot": None}
     finally:

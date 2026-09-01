@@ -3228,7 +3228,8 @@ def place_baccarat_bet(game_page, frame, amount, round_attempts=12):
 
 
 def test_baccarat(browser, username, password, amount, site_url=None,
-                  category="Baccarat", tile_text="Baccarat A", proxy_conf=None):
+                  category="Baccarat", tile_text="Baccarat A", proxy_conf=None,
+                  proxy=None):
     """Smoke-test the casino game integration: log in, open a Baccarat table,
     and place `amount` on both Player and Banker. Returns a result dict in
     the same shape convention as signup_once(): {"ok", "messages", "shot"}.
@@ -3251,7 +3252,7 @@ def test_baccarat(browser, username, password, amount, site_url=None,
     try:
         context, page, game_page, frame = _open_table_for(
             browser, username, password, site_url, category, tile_text,
-            proxy_conf=proxy_conf, game=BACCARAT)
+            proxy_conf=proxy_conf, proxy=proxy, game=BACCARAT)
     except RuntimeError as e:
         # _open_table_for closes its own context on every failure path and
         # names the phase that failed (login / WAF / lobby / tile / frame).
@@ -3745,11 +3746,18 @@ def _open_game_direct(page, prof, tile_text, site_url=None):
 
 
 def _open_table_for(browser, username, password, site_url, category, tile_text,
-                    proxy_conf=None, progress=None, label="", game=None):
+                    proxy_conf=None, progress=None, label="", game=None,
+                    proxy=None):
     """Log a fresh context into `username` and open the given live table.
     Returns (context, main_page, game_page, frame) or raises RuntimeError with
     a human-readable reason. Caller owns closing the context. `proxy_conf` is a
     Playwright proxy dict (already bridged for SOCKS5-auth) or None for direct.
+    `proxy` is the RAW proxy string that conf came from, and both are needed on
+    a WAF-walled site: Chromium gets the (possibly bridged, 127.0.0.1) conf,
+    while CapSolver must be told the real upstream so the token is minted from
+    the egress IP it will be used from -- AWS WAF tokens can be IP-bound. It is
+    also the token cache key, so seats on different proxies never reuse each
+    other's token. Same deliberate raw+conf pairing as the signup paths.
     `progress(str)` (optional), if given, is called once per phase (login,
     casino lobby, game join, live table) -- this whole function is naturally
     slow (a real login + a real live-video game loading, done sequentially for
@@ -3779,7 +3787,7 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
             context.close()
             raise RuntimeError(f"could not load the site for {username}: {str(e)[:150]}")
         page, waf_ok, waf_msg = ensure_waf_cleared(
-            page, site_url or SITE_URL, proxy_conf=proxy_conf)
+            page, site_url or SITE_URL, proxy=proxy, proxy_conf=proxy_conf)
         context = page.context
         if not waf_ok:
             context.close()
@@ -3794,7 +3802,8 @@ def _open_table_for(browser, username, password, site_url, category, tile_text,
         # exactly one retry; if the wall is still up after a solve, the IP is
         # flagged and another attempt just spends more CapSolver credit.
         page, waf_ok, waf_msg = ensure_waf_cleared(
-            page, site_url or SITE_URL, proxy_conf=proxy_conf, force=True)
+            page, site_url or SITE_URL, proxy=proxy, proxy_conf=proxy_conf,
+            force=True)
         context = page.context
         if waf_ok:
             try:
@@ -3943,7 +3952,7 @@ class _HedgeStopped(Exception):
 
 def _open_table_with_retry(browser, creds, site_url, category, tile_text,
                            label, progress, attempts=4, proxy_conf=None,
-                           should_stop=None, game=None):
+                           should_stop=None, game=None, proxy=None):
     """_open_table_for with fresh-context retries. Login + the Live Casino nav
     are intermittently flaky in stretches (site-side; observed live 2026-07-17:
     fine at 21:58 and 22:15, failing repeatedly at 21:52 and 22:06), so a failed
@@ -3961,7 +3970,7 @@ def _open_table_with_retry(browser, creds, site_url, category, tile_text,
             return _open_table_for(browser, creds["username"], creds["password"],
                                    site_url, category, tile_text, proxy_conf=proxy_conf,
                                    progress=progress, label=f"{label}: {creds['username']}",
-                                   game=game)
+                                   game=game, proxy=proxy)
         except RuntimeError as e:
             last = e
             # An account-level session drop (see _open_table_for) is not the
@@ -4156,12 +4165,13 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
             player_fut = player_exec.submit(
                 _open_table_with_retry, player_browser, player_creds, site_url,
                 category, tile_text, game.side_b_label, setup_progress,
-                proxy_conf=proxy_conf, should_stop=should_stop, game=game)
+                proxy_conf=proxy_conf, should_stop=should_stop, game=game,
+                proxy=proxy)
             try:
                 banker_open = _open_table_with_retry(
                     browser, banker_creds, site_url, category, tile_text,
                     game.side_a_label, setup_progress, proxy_conf=proxy_conf,
-                    should_stop=should_stop, game=game)
+                    should_stop=should_stop, game=game, proxy=proxy)
             except (_HedgeStopped, RuntimeError):
                 # Banker failed/stopped -- still must collect (and clean up)
                 # whatever the Player side produced, so nothing leaks.

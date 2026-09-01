@@ -1654,6 +1654,64 @@ block, and each attempt extends it). Verified against khelofun 2026-08-14: its
 JSON `"Invalid Username or Password"` for a bad account, so the diagnosis is
 trustworthy on both sites.
 
+**A site with no HTTP login gets `unknown`, and that is the point.**
+`diagnose_account()` runs `http_check_account_balance()`, which returns a plain
+not-ok on a profile without `supports_http_login` — which used to read as
+`rejected`, i.e. `seat_accounts()` abandoned its retries and every account was
+recorded "could not log in; credentials refused" **when nothing about it had
+been checked**. winclash is exactly that site (its WAF only serves a real
+browser, so auth is verified in-page instead), so the profile is checked first
+and the answer is `unknown`: the ordinary browser retry ladder runs and a seat
+that never comes up is reported as "could not be seated", not as bad
+credentials. `--check` bails out on such a site with one line and a pointer to
+`verify_baccarat.py` rather than walking the roster printing `unknown` a
+`CHECK_SPACING` wait apart.
+
+### winclash's multi-id wager (`.env.winclash.tournament`)
+
+The same knockout every other site runs, on winclash's Baccarat A. **No engine
+change was needed for the route** — `_open_table_for()` already owns winclash's
+launch-URL + WAF differences, and `tournament.Seat` goes through it — so what
+follows is only what is different to CONFIGURE and the two things that were
+actually wrong before this.
+
+- `TOURNAMENT_TABLE_MIN=100`. Baccarat A is game id 86, driven live 2026-08-31:
+  it opens `table_id nx7ecktjzywdqwwt` (the same physical table cricmatch
+  reaches) with a rail of 100/500/2500/10000/50000/100000. So an eliminated id
+  keeps up to ₹99, same as cricmatch.
+- **Do not set `TOURNAMENT_LOBBY_TILE` here.** On a `direct_game_url` site the
+  tile name is looked up in `casino_game_ids`, not searched for in Evolution's
+  in-game lobby — `_open_table_for()` skips the provider-lobby hop entirely.
+  A name that isn't in that dict fails with "no game id recorded for …". The
+  cleanup variant (`TOURNAMENT_GAME=roulette`) does resolve, since
+  Auto-Roulette is id 220, but **nothing has ever opened that table here**.
+- **`CAPSOLVER_API_KEY` is required**, unlike cricmatch/khelofun. Preflight now
+  says so out loud on any `waf_on_navigation` profile — without it every seat
+  fails at the wall, which is a long way to travel to find out. Solved tokens
+  are cached per site+exit IP and shared between seats in one process, so a
+  group of 6 does not pay 6 solves.
+- **The raw proxy string is now threaded down to the WAF solve.**
+  `_open_table_for()` passed only `proxy_conf` (which may be a `127.0.0.1`
+  pproxy bridge address), so CapSolver solved from ITS own IP and the token
+  cache keyed everything as `"direct"` — an IP-bound token minted from the
+  wrong egress, and seats on different proxies reusing each other's. It now
+  takes `proxy=` alongside `proxy_conf=` (the same deliberate raw+conf pairing
+  the signup paths use) and every caller passes both: `Seat._open`,
+  `_open_table_with_retry`/`run_paired_hedge`, `test_baccarat`, and the verify
+  probes.
+- **Winclash's block is per exit IP and behavioural**, so `TOURNAMENT_PROXIES`
+  matters more here than anywhere: the shared `51.194.232.95` is burnt for
+  winclash logins (405 + `x-amzn-waf-action: captcha` even with a solved
+  token) while `.114` works. `TOURNAMENT_LOGIN_SPACING` is 15 in the example
+  (vs 5 on the Laravel sites) because each seat's login may also carry a wall.
+- Smaller default group (6, one lane): each seat pays a WAF clear on top of
+  its login, so a big group takes longer to seat — and seat decay means a
+  group that seats slowly starts half dead.
+
+**Not yet run live.** The pieces under it are (login, the launch URL, a real
+Baccarat table, and a real settled hedge on 2026-09-01), but no knockout has
+played on winclash. Start with `--dry-run` on a handful of funded ids.
+
 ### Discovery scripts (all read-only, none place a bet)
 
 Run them, read the dump, *then* write selectors — same precedent as

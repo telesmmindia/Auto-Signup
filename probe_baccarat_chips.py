@@ -124,7 +124,7 @@ try:
     context, page, game_page, frame = m._open_table_for(
         browser, args.username, args.password, SITE_URL,
         BACCARAT.category, BACCARAT.tile_text,
-        proxy_conf=proxy_conf, progress=lambda s: print(f"  {s}"),
+        proxy_conf=proxy_conf, proxy=args.proxy, progress=lambda s: print(f"  {s}"),
         label=args.username, game=BACCARAT)
     print(f"--- table open in {time.time() - t0:.0f}s ---")
 

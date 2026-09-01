@@ -296,6 +296,20 @@ def check_roster(roster, site_url):
     seat_accounts() uses between retries (tournament.diagnose_account), run
     over the whole roster before committing to anything. It places no bets and
     opens no browser."""
+    prof = main.profile_for(site_url)
+    if not prof.supports_http_login:
+        # Nothing to be gained by walking the roster: every row would come
+        # back "unknown" a CHECK_SPACING wait apart. winclash is the case --
+        # its WAF only serves a real browser, so there is no cheap login to
+        # make. Say so once instead.
+        log("")
+        log(f"  {prof.key} has no HTTP login path (its WAF only answers a real "
+            "browser), so this cheap check cannot be run here at all.")
+        log("  Check one account the slow way instead:")
+        log(f"      .venv/bin/python verify_baccarat.py <user> <pass> "
+            f"--url {site_url}")
+        return {}
+
     proxies = current_proxies()
     log("")
     log(f"  site   : {site_url}")
@@ -382,6 +396,17 @@ def preflight(roster, site_url, args):
     log(f"  click budget: {T.MAX_BET_CLICKS} chips per stake")
     log(f"  ~rounds     : {rounds} for one winner")
     log(f"  mode        : {'DRY RUN (no bets)' if args.dry_run else '*** REAL MONEY ***'}")
+    prof = main.profile_for(site_url)
+    if prof.waf_on_navigation:
+        # Every page load here can be met by an AWS WAF interstitial, and the
+        # hard "captcha" action never clears itself. Without a key each seat
+        # fails at login, which on a full roster is a long way to travel to
+        # find out -- so say it before anything is bet.
+        log(f"  WAF         : {prof.key} walls page loads and the login call; "
+            + ("CapSolver key set" if main.capsolver_key()
+               else "*** NO CAPSOLVER_API_KEY SET -- seats will fail ***"))
+        log("                each seat may pay one solve; tokens are cached "
+            "per exit IP for a few minutes and shared between seats")
     log("")
 
 
