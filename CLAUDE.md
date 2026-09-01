@@ -607,13 +607,19 @@ laptop** (slower hydration, datacenter IP):
 `verify_stockmarket.py --url https://winclash.com/` passes on **both** the
 laptop (~37s) and the server through its residential proxy (~78s).
 
-⚠️ **No bet has ever been placed on winclash.** The only account available
-held ₹0.00, so everything above is a *read*. Placing, settling and the hedge
-itself are unverified here, and so is **which key of `/api/getBalance`
-carries the real figure** — `wallet` and `main_balance`/`totalBalance` all
-read `0.00` on an empty account, which cannot tell them apart. Fund two
-accounts, re-run `verify_stockmarket.py`, then do one `/run <pair> 10 1`
-(table minimum ₹10) and read `/runlog` before scaling.
+**A real hedge has now run on winclash — 2026-09-01, and it settled cleanly.**
+One round, ₹100/side on Baccarat A (`shauryamo989` Banker vs `rishabhg9178`
+Player, through proxy `.114`): 500/500 → **400/600**, combined **1000 → 1000**,
+i.e. the money moved between the two accounts and nothing bled (Player won, so
+no banker commission). Setup to summary took **2m03s**. So placing, settling
+and the hedge itself are no longer theoretical here.
+
+Still untested on winclash: **Stock Market** specifically (only baccarat has
+been bet), more than one round, and **which key of `/api/getBalance` carries
+the real figure**. That last one stays open because nothing uses it —
+`supports_http_login` is False, so balances come from the header selector
+`.wallet_balance`, which IS now confirmed against non-zero balances (six
+accounts read ₹500/₹500/₹500/₹500/₹500/₹0 in one sweep).
 
 ### winclash's Baccarat gameplay bot (`.env.winclash.gameplay`)
 

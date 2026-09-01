@@ -50,12 +50,12 @@ Live casino / Stock Market, all mapped live 2026-08-29 on a real account:
   with the figure. Balance is POST /api/getBalance ->
   {"status":200,"balance":{...,"wallet":0,"main_balance":"0.00",
   "totalBalance":"0.00",...}}.
-  WARNING, not yet resolvable: the only account available for this work held
-  0.00, so it is NOT known whether http_check_account_balance's preferred
-  "wallet" key carries the real figure here or is always 0 with the money in
-  main_balance/totalBalance. Both read 0.00, which is correct but tells the
-  two apart not at all. Confirm on a FUNDED account before trusting a
-  winclash balance reading.
+  Which JSON key carries the real figure is still unknown (wallet vs
+  main_balance/totalBalance all read 0.00 on the empty account this was
+  mapped with) -- but nothing depends on it: supports_http_login is False, so
+  balances here are read from the header selector .wallet_balance, which was
+  confirmed against FUNDED accounts 2026-09-01 (six accounts, five reading
+  Rs 500 and one Rs 0).
 
 * A table is launched by /casinoRedirect?q=<id>&provider=<prov>&type=casino,
   read straight out of the site's own .casinoLink click handler, which hands
@@ -86,10 +86,11 @@ Live casino / Stock Market, all mapped live 2026-08-29 on a real account:
   Chip rail and table minimum match cricmatch's Stock Market (Rs 10), so
   sites/games.py's STOCKMARKET profile applies unchanged.
 
-* NOT verified, and it cannot be until an account here holds money: placing
-  an actual bet, and therefore a real hedge round. Everything above is a
-  read. The site's own handler proves a zero-balance account is refused a
-  table through the UI, so a funded account is needed for any real run.
+* A REAL HEDGE ROUND HAS NOW RUN (2026-09-01), so this is no longer a
+  read-only mapping. Baccarat A, Rs 100 a side, shauryamo989 (Banker) vs
+  rishabhg9178 (Player) through proxy .114: 500/500 -> 400/600, combined
+  1000 -> 1000, no bleed (Player won, so no banker commission), 2m03s end to
+  end. Stock Market has still only ever been read, never bet.
 
 """
 from .base import SiteProfile
