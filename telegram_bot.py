@@ -737,7 +737,13 @@ def _blocking_fill_and_register(session, phone):
     # the site sets by redirecting a ?btag= URL through /setcookie -- and that
     # is exactly the navigation an AWS WAF wall answers instead of the site.
     # Check the cookie itself now, before anything is filled.
-    if not ensure_tracking_cookie(page, site):
+    if ensure_tracking_cookie(page, site):
+        # Logged on the SUCCESS path too, not just on failure: "no warning in
+        # the log" is a weak thing to answer an affiliate-stats dispute with,
+        # while a per-account line naming the code is evidence.
+        code = extract_referral_code(site) or "?"
+        logger.info(f"{acct['username']}: affiliate cookie present (btag {code})")
+    else:
         logger.warning(f"{acct['username']}: affiliate (btag) cookie is NOT set "
                        f"-- this signup may not be credited to the referral link")
 
