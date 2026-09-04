@@ -53,7 +53,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from urllib.parse import parse_qs, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
 from dotenv import load_dotenv
@@ -387,9 +387,14 @@ def dismiss_popups(page):
     page.wait_for_timeout(800)
 
 
-def open_signup_modal(page):
-    """Click JOIN/REGISTER and wait for the register form to appear."""
-    prof = profile_for(page.url)
+def open_signup_modal(page, site_url=None):
+    """Click JOIN/REGISTER and wait for the register form to appear.
+
+    `site_url` is the configured URL for this signup, and it is passed for its
+    affiliate parameter: after a WAF restart the page we are standing on may
+    be an inner page that no longer carries the btag, and urljoin() would then
+    build an untracked register URL (see tracked_url())."""
+    prof = profile_for(site_url or page.url)
     # A page_url site's form is on ANOTHER page, so anything overlaying this
     # one is about to be navigated away from -- closing it first is pure cost
     # (dismiss_popups sleeps 800ms and each candidate click waits up to 1.5s).
@@ -413,7 +418,8 @@ def open_signup_modal(page):
     # homepage load renders the real form. The retry covers the token not
     # being minted yet by the time we navigate.
     if prof.register_trigger == "page_url":
-        target = urljoin(page.url or "", prof.register_path)
+        base = site_url or page.url or ""
+        target = tracked_url(urljoin(base, prof.register_path), base)
         for attempt in range(2):
             try:
                 page.goto(target, wait_until="domcontentloaded", timeout=60000)
@@ -690,6 +696,76 @@ def post_load_settle(page, site_url=None, ms=4000, poll_ms=250):
         page.wait_for_timeout(poll_ms)
 
 
+def tracked_url(url, source_url=None):
+    """Carry the site's affiliate parameter (btag=...) from `source_url` onto
+    `url`, so a navigation to an inner page still credits the affiliate.
+
+    urljoin() drops the query, so building the register page URL out of the
+    configured site URL silently threw the btag away -- and on a site that
+    credits the affiliate with a COOKIE set from that parameter
+    (SiteProfile.tracking_cookie), a signup made in a context that never saw
+    it does not count for anybody. winclash serves /join-now?btag=<code> as a
+    302 that sets the cookie and lands on the form, so the tracked URL costs
+    one redirect and nothing else."""
+    src = source_url or SITE_URL
+    param = profile_for(src).tracking_param
+    if not param:
+        return url
+    want = parse_qs(urlsplit(src).query).get(param)
+    if not want:
+        return url
+    parts = urlsplit(url)
+    have = parse_qs(parts.query)
+    if param in have:
+        return url
+    have[param] = want
+    query = urlencode([(k, v) for k, vs in have.items() for v in vs])
+    return urlunsplit(parts._replace(query=query))
+
+
+def tracking_cookie_present(context, site_url=None):
+    """True when this context already carries the site's affiliate cookie (or
+    the site doesn't use one, which is every site but winclash)."""
+    name = profile_for(site_url or SITE_URL).tracking_cookie
+    if not name:
+        return True
+    try:
+        return any(c.get("name") == name for c in context.cookies())
+    except Exception:
+        return True
+
+
+def ensure_tracking_cookie(page, site_url=None):
+    """Make sure the affiliate cookie is in this context BEFORE the account is
+    registered, navigating once to the tracked URL if it isn't.
+
+    The entry navigation normally sets it, but it is exactly the navigation an
+    AWS WAF interstitial answers instead of the site -- observed live: while
+    the wall is up the site's own 302 never runs, so the context ends up
+    holding an aws-waf-token and no btag. Every winclash signup starts behind
+    that wall, so "the first load carried the parameter" is not the same thing
+    as "the cookie is there". This checks the cookie itself, which is what the
+    register POST is judged by. Returns True when it is present.
+
+    No-op on every site with no tracking_cookie set, and a cheap cookie read
+    when it is already there -- the extra navigation only happens when the
+    signup would otherwise go unattributed."""
+    site = site_url or SITE_URL
+    prof = profile_for(site)
+    if not prof.tracking_cookie:
+        return True
+    context = page.context
+    if tracking_cookie_present(context, site):
+        return True
+    target = tracked_url(urljoin(site, prof.register_path or "/"), site)
+    try:
+        page.goto(target, wait_until="domcontentloaded", timeout=60000)
+        post_load_settle(page, site)
+    except PWError:
+        return False
+    return tracking_cookie_present(context, site)
+
+
 def signup_entry_url(site_url=None, token_seeded=False):
     """Where a signup's FIRST navigation should go.
 
@@ -708,7 +784,9 @@ def signup_entry_url(site_url=None, token_seeded=False):
     site = site_url or SITE_URL
     prof = profile_for(site)
     if token_seeded and prof.register_trigger == "page_url" and prof.register_path:
-        return urljoin(site, prof.register_path)
+        # tracked_url, not a bare urljoin: skipping the homepage hop must not
+        # also skip the affiliate parameter (see tracked_url()).
+        return tracked_url(urljoin(site, prof.register_path), site)
     return site
 
 
@@ -902,7 +980,7 @@ def open_signup_form(page, site_url=None, proxy=None, proxy_conf=None):
     reports the plain "couldn't open the form" message rather than a
     misleading WAF one, and no CapSolver credit is ever spent on a
     selector bug."""
-    if open_signup_modal(page):
+    if open_signup_modal(page, site_url):
         return True, page, ""
     if not waf_wall_showing(page):
         return False, page, "Could not open the signup modal (JOIN button)."
@@ -913,7 +991,7 @@ def open_signup_form(page, site_url=None, proxy=None, proxy_conf=None):
                                                settle_secs=0, proxy_conf=proxy_conf)
     if not waf_ok:
         return False, page, waf_msg
-    if open_signup_modal(page):
+    if open_signup_modal(page, site_url):
         return True, page, waf_msg
     return False, page, ("Could not open the signup form even after clearing "
                          "the AWS WAF Human Verification page.")
@@ -1078,7 +1156,11 @@ def submit_register(page, acct, site_url, proxy=None, proxy_conf=None):
         new_page.goto(signup_entry_url(site_url, True),
                       wait_until="domcontentloaded", timeout=60000)
         post_load_settle(new_page, site_url)
-        if not open_signup_modal(new_page):
+        # This context was built from scratch a moment ago, so it holds no
+        # cookies at all -- including the affiliate one the signup is
+        # credited by.
+        ensure_tracking_cookie(new_page, site_url)
+        if not open_signup_modal(new_page, site_url):
             return ("timeout", ["WAF solved but could not reopen the register form"],
                     captured, new_page)
         fill_register_form(new_page, acct)
@@ -2150,6 +2232,14 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     if waf_msg:
         result["messages"].append(waf_msg)
 
+    # The affiliate cookie, not the URL, is what credits the signup -- and the
+    # entry navigation that was meant to set it is the very one the WAF wall
+    # answers. Repair it here, before anything is filled.
+    if not ensure_tracking_cookie(page, site_url):
+        result["messages"].append(
+            "WARNING: the affiliate (btag) cookie could not be set, so this "
+            "signup may not be credited to the referral link.")
+
     form_ok, page, form_msg = open_signup_form(page, site_url, proxy=proxy,
                                                proxy_conf=proxy_conf)
     result["page"] = page
@@ -2409,7 +2499,10 @@ def http_csrf_url(site_url):
     _token belongs to that page."""
     prof = profile_for(site_url)
     path = prof.http_csrf_path or (prof.register_path if prof.register_trigger == "page_url" else "")
-    return urljoin(site_url, path) if path else site_url
+    # Tracked: this GET is the only page the HTTP path loads, so it is the
+    # only chance the session has to be handed the affiliate cookie the
+    # register POST is credited by (see tracked_url()).
+    return tracked_url(urljoin(site_url, path), site_url) if path else site_url
 
 
 def http_fetch_csrf(session, site_url, proxy=None):
@@ -2690,6 +2783,15 @@ def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=
         result["ok"] = False
         result["messages"] = [f"Could not load the site (check the URL/proxy?): {str(e)[:200]}"]
         return result
+
+    # That GET is the only page this path loads, and it is tracked
+    # (http_csrf_url), so the affiliate cookie should have arrived with it.
+    # Say so if it didn't rather than registering an uncredited account
+    # quietly -- there is no screenshot here to notice it in later.
+    if prof.tracking_cookie and prof.tracking_cookie not in session.cookies:
+        result["messages"].append(
+            "WARNING: the affiliate (btag) cookie was not set, so this signup "
+            "may not be credited to the referral link.")
 
     if not submit:
         result["ok"] = True

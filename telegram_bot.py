@@ -158,7 +158,8 @@ from main import (
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_message_of, http_register_call, http_session_for, http_verify_signup_otp,
     is_waf_captcha, maybe_bridge_proxy,
-    ensure_waf_cleared, new_site_context, open_signup_form, open_signup_modal,
+    ensure_tracking_cookie, ensure_waf_cleared, new_site_context,
+    open_signup_form, open_signup_modal,
     normalize_phone, parse_proxy, post_load_settle, read_result,
     seed_waf_token, signup_entry_url,
     run_paired_hedge, save_screenshot, stop_bridge,
@@ -731,6 +732,14 @@ def _blocking_fill_and_register(session, phone):
     marks.mark("waf")
     if not waf_ok:
         return {"ok": False, "message": waf_msg}
+
+    # What credits a signup to the btag link is the affiliate COOKIE, which
+    # the site sets by redirecting a ?btag= URL through /setcookie -- and that
+    # is exactly the navigation an AWS WAF wall answers instead of the site.
+    # Check the cookie itself now, before anything is filled.
+    if not ensure_tracking_cookie(page, site):
+        logger.warning(f"{acct['username']}: affiliate (btag) cookie is NOT set "
+                       f"-- this signup may not be credited to the referral link")
 
     # open_signup_form (not open_signup_modal) so an AWS WAF wall on the
     # signup page itself gets solved rather than reported as a missing form.

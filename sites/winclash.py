@@ -139,6 +139,13 @@ PROFILE = SiteProfile(
     # messages wait_for_register_outcome() captured rather than re-reading.
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
     tracking_param="btag",
+    # Confirmed on the wire 2026-09-04: any winclash URL carrying ?btag=
+    # answers 302 -> /setcookie?btag=<code>, which sets this cookie and
+    # redirects on. /join-now?btag=223278 sets it and lands on the signup
+    # form in one hop, so the tracked URL is what every signup navigation
+    # uses. See SiteProfile.tracking_cookie for why the cookie is the only
+    # thing that credits the affiliate here.
+    tracking_cookie="btag",
     # This site's snackbar carries progress AND success text, not just
     # errors -- the same trait that makes otp_error deliberately None above.
     # "Please wait" appears the instant the login button is clicked and

@@ -109,6 +109,20 @@ class SiteProfile:
     # (cricmatch: "btag"). Drives extract_referral_code().
     tracking_param: str = "btag"
 
+    # The COOKIE the site sets when it is visited with that param, if it
+    # credits the affiliate that way. Set it only where it has been read off
+    # the wire -- it is what makes a signup count for the btag, and the
+    # engine will navigate an extra time to make sure it is present.
+    #
+    # winclash: GET /?btag=223278 answers 302 -> /setcookie?btag=223278,
+    # which sets `btag` (path=/, httponly, effectively permanent) and
+    # redirects on to the site. Nothing else carries the code: /join-now's
+    # markup contains the string "btag" zero times and the register POST
+    # sends only the six form fields, so the COOKIE IS THE ONLY CHANNEL --
+    # a register POST from a context without it is an unattributed signup.
+    # None (the default) leaves every other site's behaviour untouched.
+    tracking_cookie: str = None
+
     # Whether the live-casino selectors below are present/inspected for this
     # site. False -> casino/hedge/tournament commands refuse cleanly instead
     # of mis-clicking uninspected markup.

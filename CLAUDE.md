@@ -615,6 +615,62 @@ below); there is no field to read over HTTP. `normalize_phone()` still runs at
 every entry point, which is what actually prevents the fault — but the safety
 net is browser-only.
 
+### The btag is a COOKIE, and every inner navigation was dropping it
+
+Found 2026-09-04 after signups stopped showing up in the affiliate stats. The
+link itself was right — `bot_settings.winclash.json` holds
+`https://winclash.com?btag=223278` and every log line shows it — but **the
+link is not what credits the signup**:
+
+- `GET /?btag=223278` (or `/join-now?btag=223278`) answers **302 →
+  `/setcookie?btag=223278`**, which sets a `btag` cookie (path=/, httponly,
+  expires year 6954) and redirects on to the page.
+- **Nothing else carries the code.** `/join-now`'s markup contains the string
+  "btag" zero times, and the register POST sends only
+  `_token/user_name/email/password/confirm_password/mobile_number/otp` —
+  read out of the page's own `#signUpButton` handler. So a `POST /sign-up`
+  from a context without that cookie is an **unattributed signup**, and
+  nothing in the response says so.
+
+Three ways the engine was losing it, all now fixed:
+- **`urljoin()` drops the query.** `urljoin("https://winclash.com?btag=223278",
+  "/join-now")` is `https://winclash.com/join-now` — no btag. Every navigation
+  to the register page was untracked. `tracked_url()` copies the profile's
+  `tracking_param` across, and `signup_entry_url()`, `open_signup_modal()`'s
+  `page_url` target and `http_csrf_url()` all use it. `/join-now?btag=<code>`
+  sets the cookie **and** lands on the form in one hop, so it costs a redirect.
+- **The warm path skipped the tracked URL entirely.** A seeded WAF token sends
+  the signup straight to `/join-now`, which never touched a `?btag=` URL at
+  all — so the token-reuse speedup silently made attribution worse.
+- **A WAF wall answers the tracked navigation instead of the site**, so the
+  302 never runs. Confirmed live: behind the wall the context ends up holding
+  an `aws-waf-token` and no `btag`, even after re-loading the tracked URL.
+  Every winclash signup starts behind that wall, and **every WAF solve throws
+  the context away**, cookies included.
+
+So the URL carrying the parameter is not proof of anything —
+`ensure_tracking_cookie()` checks **the cookie**, which is what the register
+POST is judged by, and navigates once to the tracked URL if it is missing. It
+runs after the WAF is cleared and before the form is filled, in the CLI, the
+bot, and `submit_register()`'s fresh-context retry. Same reasoning as
+`fill_register_form()`'s phone read-back: verify what LANDED, not what was
+asked for. If it still can't be set, the signup goes ahead and says so (a
+warning in `messages`, a `logger.warning` in the bot) rather than quietly
+registering an uncredited account.
+
+`SiteProfile.tracking_cookie` (default `None`) is what turns this on, and only
+winclash sets it — the cookie name was read off the wire, not guessed, so no
+other site changes behaviour.
+
+Verified live 2026-09-04, both paths: the HTTP-fast session that would POST
+`/sign-up` holds `btag` after `http_fetch_csrf()`, and a browser context
+loading the warm entry URL lands on `/join-now` with `btag` set. cricmatch
+regression-checked (`--no-submit`, form filled, unchanged).
+
+⚠️ **Accounts registered before this fix are not retro-credited.** Whether the
+site can re-attribute them is a question for winclash's affiliate support, not
+something in this repo.
+
 ### A country-coded phone number is silently truncated (all sites)
 
 Found 2026-08-29 on a live winclash run, and it is worth knowing because
