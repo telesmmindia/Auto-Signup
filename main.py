@@ -763,7 +763,7 @@ def ensure_tracking_cookie(page, site_url=None):
     # accounts the affiliate was never credited for.
     target = tracked_url(site, site)
     try:
-        page.goto(target, wait_until="domcontentloaded", timeout=60000)
+        page.goto(target, wait_until=signup_entry_wait(site), timeout=60000)
         post_load_settle(page, site)
     except PWError:
         return False
@@ -803,6 +803,26 @@ def signup_entry_url(site_url=None, token_seeded=False):
     if token_seeded and prof.register_trigger == "page_url" and prof.register_path:
         return tracked_url(urljoin(site, prof.register_path), site)
     return site
+
+
+def signup_entry_wait(site_url=None):
+    """What to wait for on the entry navigation.
+
+    A site with a `tracking_cookie` is entered at its tracked root for one
+    reason: so the site registers the visit and hands back the affiliate
+    cookie. Both are done the moment the response commits -- the homepage's
+    DOM and everything it pulls are for a page we navigate straight away
+    from, and that cost 6-15s per signup on a residential proxy (measured on
+    the production server: `load 12.5s` for a page nothing reads).
+
+    "commit" returns as soon as the final response of the redirect chain --
+    /?btag= -> /setcookie -> / -- has committed, so the Set-Cookie has landed
+    and the visit is registered. If a WAF wall is what committed instead, the
+    existing ladder (post_load_settle -> ensure_waf_cleared -> open_signup_
+    form) finds it exactly as before, one navigation later.
+
+    Every other site keeps "domcontentloaded" byte-for-byte."""
+    return "commit" if profile_for(site_url or SITE_URL).tracking_cookie else "domcontentloaded"
 
 
 def restart_with_waf_token(page, site_url, token, proxy=None, proxy_conf=None,
@@ -2228,8 +2248,8 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     # real site on its first GET, which also means the register page can be
     # opened directly instead of by way of the homepage.
     seeded = seed_waf_token(page.context, site_url, proxy)
-    page.goto(signup_entry_url(site_url, seeded), wait_until="domcontentloaded",
-              timeout=60000)
+    page.goto(signup_entry_url(site_url, seeded),
+              wait_until=signup_entry_wait(site_url), timeout=60000)
     post_load_settle(page, site_url)
 
     # Some sites (winclash) put an AWS WAF wall in front of the homepage

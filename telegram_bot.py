@@ -161,7 +161,7 @@ from main import (
     ensure_tracking_cookie, ensure_waf_cleared, new_site_context,
     open_signup_form, open_signup_modal,
     normalize_phone, parse_proxy, post_load_settle, read_result,
-    seed_waf_token, signup_entry_url,
+    seed_waf_token, signup_entry_url, signup_entry_wait,
     run_paired_hedge, save_screenshot, stop_bridge,
     submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
 )
@@ -714,8 +714,8 @@ def _blocking_fill_and_register(session, phone):
 
     acct = session.acct
     try:
-        page.goto(signup_entry_url(site, seeded), wait_until="domcontentloaded",
-                  timeout=60000)
+        page.goto(signup_entry_url(site, seeded),
+                  wait_until=signup_entry_wait(site), timeout=60000)
     except PWError as e:
         return {"ok": False, "message": f"Couldn't load the site (check the proxy?): {str(e)[:200]}"}
     post_load_settle(page, site)
