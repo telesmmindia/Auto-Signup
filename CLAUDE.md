@@ -648,6 +648,31 @@ Three ways the engine was losing it, all now fixed:
   Every winclash signup starts behind that wall, and **every WAF solve throws
   the context away**, cookies included.
 
+**The cookie turned out to be necessary and NOT sufficient (2026-09-04, same
+day, after the first fix shipped).** Ten accounts were signed up carrying a
+verified `btag` cookie and **none of them were credited**, while ordinary
+signups done by hand in a normal browser were credited **instantly**. The
+difference is the route, and it is visible in the redirects:
+
+```
+GET /?btag=<code>          -> 302 /setcookie?btag=<code> -> 302 site
+GET /join-now?btag=<code>  -> 302 /join-now
+```
+
+**Only the site root goes through `/setcookie`** — the site's own tracking
+route, which is evidently where the visit is registered. Loading the signup
+page with the parameter sets a cookie *inline* and skips that hop entirely,
+which is exactly what the first fix did. So the rule is: **enter the site the
+way a person clicking the link enters it**, at the tracked root, and let the
+site redirect. `signup_entry_url()` therefore returns the tracked root for any
+profile with a `tracking_cookie` even when a cached WAF token makes the
+homepage hop skippable, `ensure_tracking_cookie()` repairs by re-walking that
+same route, and `http_fetch_csrf()` GETs it once before fetching the csrf.
+It costs one page load per signup. An uncredited signup costs the whole
+signup. Verified from the production server through its own proxy: the entry
+URL's redirect chain is `/?btag=… -> /setcookie?btag=… -> /` and the cookie
+lands.
+
 So the URL carrying the parameter is not proof of anything —
 `ensure_tracking_cookie()` checks **the cookie**, which is what the register
 POST is judged by, and navigates once to the tracked URL if it is missing. It
