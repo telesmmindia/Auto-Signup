@@ -668,7 +668,13 @@ site redirect. `signup_entry_url()` therefore returns the tracked root for any
 profile with a `tracking_cookie` even when a cached WAF token makes the
 homepage hop skippable, `ensure_tracking_cookie()` repairs by re-walking that
 same route, and `http_fetch_csrf()` GETs it once before fetching the csrf.
-It costs one page load per signup. An uncredited signup costs the whole
+It costs one page load per signup — but **not a page WAIT**: the visit is
+registered and the cookie set the moment the response commits, so the entry
+navigation uses `wait_until="commit"` (`signup_entry_wait()`) rather than
+waiting out a homepage it immediately navigates away from. Measured on the
+production server through its own proxy, warm: **22.0s → 10.4s** for the
+browser half (entry 11.9s→3.4s), with the btag cookie set either way. Every
+other site keeps `domcontentloaded`. An uncredited signup costs the whole
 signup. Verified from the production server through its own proxy: the entry
 URL's redirect chain is `/?btag=… -> /setcookie?btag=… -> /` and the cookie
 lands.
