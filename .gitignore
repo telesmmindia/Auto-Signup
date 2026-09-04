@@ -39,6 +39,3 @@ roster*.csv
 *.session
 *.session-journal
 
-# TeraBox bot session cookies -- live login tokens, never commit
-terabox bot/cookies.json
-cookies.json
