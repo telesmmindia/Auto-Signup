@@ -757,7 +757,11 @@ def ensure_tracking_cookie(page, site_url=None):
     context = page.context
     if tracking_cookie_present(context, site):
         return True
-    target = tracked_url(urljoin(site, prof.register_path or "/"), site)
+    # The site ROOT with the parameter, which is the URL that redirects
+    # through the site's own tracking route (/setcookie on winclash) -- not
+    # the register page, which sets a cookie without that hop and produced
+    # accounts the affiliate was never credited for.
+    target = tracked_url(site, site)
     try:
         page.goto(target, wait_until="domcontentloaded", timeout=60000)
         post_load_settle(page, site)
@@ -783,9 +787,20 @@ def signup_entry_url(site_url=None, token_seeded=False):
     later."""
     site = site_url or SITE_URL
     prof = profile_for(site)
+    # A site that credits the affiliate from a visit (tracking_cookie) must be
+    # entered the way a person entering it does, even when a WAF token makes
+    # the homepage hop technically unnecessary. LIVE EVIDENCE, 2026-09-04:
+    #   GET /?btag=<code>          -> 302 /setcookie?btag=<code> -> 302 site
+    #   GET /join-now?btag=<code>  -> 302 /join-now
+    # Only the site root goes through /setcookie, which is the site's own
+    # tracking route -- and a batch of signups made through the second URL
+    # carried a btag cookie yet were NOT credited, while ordinary browser
+    # signups through the first were. So the cookie is necessary and not
+    # sufficient: the visit itself has to be registered. The saved page load
+    # is not worth an uncredited signup.
+    if prof.tracking_cookie:
+        return site
     if token_seeded and prof.register_trigger == "page_url" and prof.register_path:
-        # tracked_url, not a bare urljoin: skipping the homepage hop must not
-        # also skip the affiliate parameter (see tracked_url()).
         return tracked_url(urljoin(site, prof.register_path), site)
     return site
 
@@ -2499,10 +2514,7 @@ def http_csrf_url(site_url):
     _token belongs to that page."""
     prof = profile_for(site_url)
     path = prof.http_csrf_path or (prof.register_path if prof.register_trigger == "page_url" else "")
-    # Tracked: this GET is the only page the HTTP path loads, so it is the
-    # only chance the session has to be handed the affiliate cookie the
-    # register POST is credited by (see tracked_url()).
-    return tracked_url(urljoin(site_url, path), site_url) if path else site_url
+    return urljoin(site_url, path) if path else site_url
 
 
 def http_fetch_csrf(session, site_url, proxy=None):
@@ -2510,6 +2522,19 @@ def http_fetch_csrf(session, site_url, proxy=None):
     meta tag out of the response (also seeds the session's cookies --
     laravel_session/jeet_session, XSRF-TOKEN, AWSALB* -- for the register calls
     that follow). Clears an AWS WAF wall if the site serves one."""
+    # Walk the site's own tracking route FIRST on a site that credits the
+    # affiliate from a visit: GET /?btag=<code>, which redirects through
+    # /setcookie and hands this session the cookie. Loading the signup page
+    # with the parameter instead sets a cookie but skips that hop, and those
+    # signups were not credited (see tracked_url() and SiteProfile.
+    # tracking_cookie). One extra GET, and only on such a site.
+    prof = profile_for(site_url)
+    if prof.tracking_cookie and prof.tracking_cookie not in session.cookies:
+        try:
+            http_get_page(session, tracked_url(site_url, site_url), site_url, proxy)
+        except (requests.RequestException, RuntimeError):
+            pass
+
     resp = http_get_page(session, http_csrf_url(site_url), site_url, proxy)
     resp.raise_for_status()
     m = re.search(r'<meta name="csrf-token" content="([^"]+)"', resp.text)
