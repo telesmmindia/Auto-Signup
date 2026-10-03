@@ -27,7 +27,10 @@ PROFILE = SiteProfile(
         "open_modal_khelo": "button.rj__join_now",
         # Includes the full-screen SPRIBE/aviator intro walkthrough's "skip >>"
         # control, plus the generic closers (harmless if absent).
-        "close_popup": [".skip_right_img", ".mnPopupClose", ".pgSoftClsBtn",
+        # .app_download_close: a full-screen "Download the app" promo added
+        # ~2026-10-03 that covers REGISTER; without it every signup failed with
+        # "Could not open the signup modal (JOIN button)".
+        "close_popup": [".app_download_close", ".skip_right_img", ".mnPopupClose", ".pgSoftClsBtn",
                         ".support_popup_close", ".areSurecancelBtn",
                         "button:has-text('Close')"],
         "username": "#userNameKhelo",
