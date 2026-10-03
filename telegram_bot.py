@@ -608,6 +608,13 @@ def _valid_phone(text):
 def _blocking_ensure_browser(slot):
     """Launch this slot's Chromium instance once; reused by every session
     routed to this slot. Must run on _pw_executors[slot]'s worker thread."""
+    # A Chromium that crashed (or was killed) after days of uptime stays in
+    # _browsers, and every later signup failed instantly on new_context()
+    # with "Target page, context or browser has been closed" until the whole
+    # bot was restarted. Relaunch instead of handing back a dead browser.
+    if _browsers[slot] is not None and not _browsers[slot].is_connected():
+        logger.warning("Chromium for slot %d is gone -- relaunching", slot)
+        _blocking_shutdown_browser(slot)
     if _browsers[slot] is None:
         _playwrights[slot] = sync_playwright().start()
         # Same anti-throttling args tournament seats use: this browser also
