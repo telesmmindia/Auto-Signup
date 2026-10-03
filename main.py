@@ -1363,6 +1363,25 @@ def click_first_visible(page, selectors, timeout=6000):
     return False
 
 
+def click_otp_verify(page, prof):
+    """Click the OTP Verify button. Returns True if it was clicked OR the OTP
+    screen has already closed by itself.
+
+    spin24star sometimes verifies on its own once the last digit is typed, so
+    by the time we look the button is gone with the form. Treating that as
+    "could not find a visible Verify button" reported REAL registrations as
+    failures (2026-10-03: #4174 and #4187 were "failed", yet their numbers
+    came back "already in use" a minute later). wait_for_otp_outcome()
+    decides what actually happened."""
+    if click_first_visible(page, prof.sel["otp_verify"], timeout=6000):
+        return True
+    try:
+        boxes = page.locator(prof.sel["otp_digits"])
+        return not (boxes.count() and boxes.first.is_visible())
+    except Exception:
+        return False
+
+
 def prompt_otp(digits):
     """Ask for the OTP interactively until it's the right number of digits."""
     while True:
@@ -1442,7 +1461,7 @@ def enter_otp(page, acct, result):
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
     save_screenshot(page, otp_filled)
 
-    if not click_first_visible(page, prof.sel["otp_verify"], timeout=6000):
+    if not click_otp_verify(page, prof):
         result["messages"].append("Could not find a visible Verify button.")
         result["shot"] = save_screenshot(page, otp_filled)
         return result

@@ -152,7 +152,7 @@ from sites import profile_for
 from main import (
     SHOTS_DIR, SITE_URL, _ANTI_THROTTLE_ARGS,
     capsolver_key, change_account_password_via_login, check_phone_taken,
-    click_first_visible, extract_referral_code,
+    click_first_visible, click_otp_verify, extract_referral_code,
     fill_otp, fill_register_form, free_account_number, free_phone_number,
     gen_account, gen_password, otp_digit_count,
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
@@ -835,7 +835,7 @@ def _blocking_verify_otp(session, otp):
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
     save_screenshot(page, otp_filled)
 
-    if not click_first_visible(page, prof.sel["otp_verify"], timeout=6000):
+    if not click_otp_verify(page, prof):
         return {"ok": False, "message": "Could not find a visible Verify button.",
                 "shot": save_screenshot(page, otp_filled)}
     outcome = wait_for_otp_outcome(page)

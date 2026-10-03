@@ -21,6 +21,10 @@ PROFILE = SiteProfile(
     # container) with no toast/alert/error class -- add it to the scrape set.
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
     tracking_param="btag",
+    # The default 10s was too short: on a slow evening (register taking
+    # 35-40s) a correct code was reported "wrong/expired" while the account
+    # registered anyway -- the number then came back "already in use".
+    otp_outcome_timeout_ms=30000,
     supports_casino=False,
     sel={
         # ---- signup ----
