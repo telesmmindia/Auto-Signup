@@ -353,8 +353,12 @@ and there is no reason to build one while the Evolution tables are right there.
 - OTP: `input.regOtpKhelo1`, verify `button.submitRegOtpMain`. Do **not** match
   `input.otpNumberkhelo` (login) or `input.otpNumberFp` (forgot password).
 - Errors render as a top-right `div.snackbar-container` — no toast/error class.
-- A taken phone surfaces as a plain `failed`, not cricmatch's `phone_taken`
-  (`.err_phone` is cricmatch-specific markup).
+- A taken phone is the snackbar "The mobile number is already in use", matched
+  via `phone_taken_texts` (2026-10-04) so it records as `phone_taken` and chat
+  shows the reason. There is no `.err_phone` element here (cricmatch-only).
+- A full-screen "Download the app" promo (`.app_download_close`, added
+  ~2026-10-03) covers REGISTER; it is in `close_popup`.
+- No free-number endpoint, so `/freenumber` is set off on this instance.
 
 **winclash** — added 2026-08-29, and the first site here that is **not** the
 cricmatch/khelofun/starexch white-label Laravel template. Everything below was

@@ -14,9 +14,15 @@ PROFILE = SiteProfile(
     register_trigger="forced_join",
     # T&C mark renders pre-checked and isn't a real checkbox -- nothing to click.
     has_terms_checkbox=False,
-    # A taken phone surfaces (if at all) through the snackbar / generic scrape,
-    # not a dedicated element, so there's no distinct phone_taken status here.
+    # A taken phone has no dedicated element; it arrives as the snackbar
+    # "The mobile number is already in use" (seen live 2026-10-04, #4207).
+    # Matching that text makes it a phone_taken outcome, so chat says WHY
+    # instead of a bare "Signup failed." Phone-specific phrase only, same
+    # reasoning as winclash: a taken EMAIL must not be misfiled as a phone
+    # problem.
     phone_taken_selector=None,
+    phone_taken_texts=["mobile number is already in use",
+                       "mobile number has already been taken"],
     # Khelo rejections render as a top-right snackbar (a bare <p> inside this
     # container) with no toast/alert/error class -- add it to the scrape set.
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
