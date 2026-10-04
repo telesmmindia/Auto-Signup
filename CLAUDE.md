@@ -1128,7 +1128,13 @@ earlier per-chat design.
   can be sent again. Rests are in memory; a restart forgets them. With no
   pool set, behaviour is exactly the old single-proxy one. spin24star runs
   main `.114` with backups `.184 → .186 → .87 → .95` (`.95` last: every
-  other bot shares it).
+  other bot shares it), then the DataImpulse rotating gateway
+  (`gw.dataimpulse.com:823`, from `proxies.txt`) as the very last resort.
+  Tested 2026-10-05: through it a register POST got the WAF captcha,
+  CapSolver solved it and the site answered — but its exits are **Amazon
+  datacenter IPs** (`hosting: true`), it picks a new IP per connection, and
+  pages load ~2x slower (~20s vs ~11s), so expect a paid captcha on most
+  signups through it. Fine as a fallback, not as the main proxy.
 - `/stats` groups by `status` and by `referral_code` (`COALESCE(..., '(none)')`);
   `/stats <btag>` shows that one btag's status breakdown.
 
