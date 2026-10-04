@@ -1117,6 +1117,18 @@ earlier per-chat design.
   throwaway context and hits `api.ipify.org`; if an `http(s)://` proxy times out
   it retries once as `socks5://` and says if that fixed it. Replies never echo a
   proxy password (`mask_proxy_display()`).
+- `/proxypool p1 p2 ... | off` (signup modes, 2026-10-05) — backup proxies,
+  stored as `proxy_pool`. When a signup hits the site's firewall block
+  (`register_block_message()` / `result["blocked"]`), `_rest_blocked_proxy()`
+  rests that proxy for `PROXY_BLOCK_REST_SECS` (600, env) and the **next**
+  signup goes out through the first non-resting candidate
+  (`_pick_signup_proxy()`: global proxy first, then the pool, so signups
+  drift back to the main proxy once its rest ends). It does **not** retry the
+  blocked signup in place — the chat reply says the number was unspent and
+  can be sent again. Rests are in memory; a restart forgets them. With no
+  pool set, behaviour is exactly the old single-proxy one. spin24star runs
+  main `.114` with backups `.184 → .186 → .87 → .95` (`.95` last: every
+  other bot shares it).
 - `/stats` groups by `status` and by `referral_code` (`COALESCE(..., '(none)')`);
   `/stats <btag>` shows that one btag's status breakdown.
 
