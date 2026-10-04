@@ -61,6 +61,9 @@ Master-only commands:
     /clearproxy       -> clear the global proxy (direct connection)
     /testproxy [proxy] -> open the proxy in a browser context and report the
                          exit IP; tests the global proxy if none is given
+    /proxypool [p1 p2 ...|off] -> backup proxies for signups: when the site
+                         blocks the current one, it rests and the next signup
+                         uses the next proxy (shows the pool if no args)
     /seturl <url>     -> set the GLOBAL site URL for every admin's signups
     /url              -> show the global site URL
     /clearurl         -> reset to the default site URL
@@ -246,6 +249,12 @@ BOT_CONCURRENCY = max(1, int(os.environ.get("BOT_CONCURRENCY", "1")))
 # that. Env-overridable for tuning without a code change.
 ROUND_COOLDOWN_SECS = float(os.environ.get("ROUND_COOLDOWN_SECS", "12"))
 
+# How long a proxy the site has firewall-blocked (main.is_edge_block: a bare
+# 403 on the register POST) is rested before signups use it again. The block
+# lifted on its own in ~5 minutes in the 2026-10-04 spin24star logs; 10
+# leaves margin, and every attempt made INTO a block seems to extend it.
+PROXY_BLOCK_REST_SECS = float(os.environ.get("PROXY_BLOCK_REST_SECS", "600"))
+
 # Shared across handlers; all handler coroutines run on the same asyncio event
 # loop thread, so one sqlite3 connection is safe to reuse.
 conn = db.get_connection()
@@ -347,6 +356,48 @@ admin_phones = _load_json(ADMIN_PHONES_FILE, {})
 
 def save_admin_ids():
     _save_json(ADMINS_FILE, sorted(admin_ids))
+
+
+# raw proxy string -> time.time() it may be used again. In memory only: a
+# restart forgets the rests, which costs at most one more blocked attempt.
+_proxy_rest_until = {}
+
+
+def _signup_proxy_candidates():
+    """The global proxy first, then the /proxypool backups, deduplicated."""
+    out = []
+    for raw in [global_settings.get("proxy")] + list(global_settings.get("proxy_pool") or []):
+        if raw and raw not in out:
+            out.append(raw)
+    return out
+
+
+def _proxy_resting(raw):
+    return _proxy_rest_until.get(raw, 0) > time.time()
+
+
+def _pick_signup_proxy():
+    """The proxy a NEW signup should use: the first candidate that is not
+    resting after a block, so signups drift back to the main proxy as soon
+    as its rest is over. With no pool this is just the global proxy, exactly
+    as before. If every candidate is resting, the one whose rest ends first
+    -- trying it costs one attempt, which beats refusing to start."""
+    cands = _signup_proxy_candidates()
+    if not cands:
+        return None
+    for raw in cands:
+        if not _proxy_resting(raw):
+            return raw
+    return min(cands, key=lambda r: _proxy_rest_until.get(r, 0))
+
+
+def _rest_blocked_proxy(raw):
+    """Record that the site blocked `raw`. Returns the proxy the next signup
+    will use instead, or None if there is no other one available right now."""
+    if raw:
+        _proxy_rest_until[raw] = time.time() + PROXY_BLOCK_REST_SECS
+    nxt = _pick_signup_proxy()
+    return nxt if nxt and nxt != raw and not _proxy_resting(nxt) else None
 
 
 def save_settings():
@@ -458,6 +509,7 @@ if SIGNUP_ENABLED:
         BotCommand("url", "Show the global site URL"),
         BotCommand("clearurl", "Reset to the default site URL"),
         BotCommand("btag", "Set/show just the btag on the global site URL"),
+        BotCommand("proxypool", "Backup proxies used when the site blocks the main one"),
     ]
 MASTER_COMMANDS += [
     BotCommand("addadmin", "Authorize a new admin"),
@@ -500,6 +552,15 @@ def mask_proxy_display(proxy_str):
     if conf.get("username"):
         text += f" (user: {conf['username']}, password hidden)"
     return text
+
+
+def _proxy_host(raw):
+    """Just the host of a proxy -- enough to tell pool entries apart in chat."""
+    try:
+        conf = parse_proxy(raw)
+        return urlsplit(conf["server"]).hostname or conf["server"]
+    except Exception:
+        return "?"
 
 
 def build_caption(row_dict):
@@ -1018,7 +1079,9 @@ async def begin_signup(update, chat_id, sub_id):
     session.stage = "await_phone"
     # Proxy/URL are set globally by the master admin (/setproxy, /seturl),
     # applying to every admin's signups -- not a per-chat setting.
-    session.proxy = global_settings.get("proxy")
+    # The global proxy, unless the site has blocked it and a /proxypool
+    # backup is free -- see _pick_signup_proxy().
+    session.proxy = _pick_signup_proxy()
     session.site_url = global_settings.get("url")
     session.sub_id = sub_id
     # Pins this session to one (executor, Chromium) slot for its whole life --
@@ -1477,9 +1540,56 @@ async def show_proxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clearproxy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if global_settings.pop("proxy", None) is not None:
         save_settings()
-        await update.message.reply_text("🌐 Global proxy cleared — signups will use a direct connection.")
+        if global_settings.get("proxy_pool"):
+            await update.message.reply_text("🌐 Global proxy cleared — signups will use the "
+                                            "/proxypool backups.")
+        else:
+            await update.message.reply_text("🌐 Global proxy cleared — signups will use a direct connection.")
     else:
         await update.message.reply_text("No proxy was set.")
+
+
+@require_role(is_master)
+async def proxypool_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/proxypool p1 p2 ... sets the backups, /proxypool off clears them,
+    bare /proxypool shows the main proxy and every backup with its state."""
+    args = context.args or []
+    if args and args[0].lower() in ("off", "clear", "none"):
+        global_settings.pop("proxy_pool", None)
+        save_settings()
+        await update.message.reply_text("🌐 Backup proxies cleared — signups use only the global proxy.")
+        return
+    if args:
+        for raw in args:
+            try:
+                parse_proxy(raw)
+            except ValueError as e:
+                await update.message.reply_text(f"Invalid proxy {raw.split(':')[0]}: {e}")
+                return
+        global_settings["proxy_pool"] = list(dict.fromkeys(args))
+        save_settings()
+    cands = _signup_proxy_candidates()
+    if not cands:
+        await update.message.reply_text(
+            "🌐 No proxies set. /setproxy <proxy> sets the main one, then "
+            "/proxypool <p1> <p2> ... adds backups the bot switches to when the "
+            "site blocks the main one.")
+        return
+    main_raw = global_settings.get("proxy")
+    lines = ["🌐 Signup proxies (used top to bottom; a blocked one rests "
+             f"{int(round(PROXY_BLOCK_REST_SECS / 60))} min):"]
+    for raw in cands:
+        role = "main" if raw == main_raw else "backup"
+        if _proxy_resting(raw):
+            left = int((_proxy_rest_until[raw] - time.time()) // 60) + 1
+            state = f"⛔ resting, ~{left} min left"
+        else:
+            state = "✅ ready"
+        lines.append(f"• {mask_proxy_display(raw)} — {role}, {state}")
+    nxt = _pick_signup_proxy()
+    if nxt:
+        lines.append(f"Next signup uses: {_proxy_host(nxt)}")
+    await update.message.reply_text("\n".join(lines))
 
 
 @require_role(is_master)
@@ -2440,11 +2550,25 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
         if result.get("blocked"):
             # The one failure worth explaining in chat: retrying straight
             # away is what keeps the block going, and the number is unspent.
+            # Rest the blocked proxy so the NEXT signup goes out through a
+            # /proxypool backup instead of straight back into the block.
+            nxt = _rest_blocked_proxy(session.proxy)
+            mins = int(round(PROXY_BLOCK_REST_SECS / 60))
+            if nxt:
+                logger.warning(f"#{session.row_id}: proxy {mask_proxy_display(session.proxy)} "
+                               f"blocked by the site -- resting it {mins} min, next signup "
+                               f"uses {mask_proxy_display(nxt)}")
+                follow = (f"🔁 That proxy is resting for {mins} min; the next signup will use "
+                          f"the backup {_proxy_host(nxt)} automatically.")
+            else:
+                logger.warning(f"#{session.row_id}: proxy {mask_proxy_display(session.proxy)} "
+                               f"blocked by the site -- no backup proxy free")
+                follow = ("Wait a few minutes, or add backup proxies with /proxypool so the "
+                          "bot can switch by itself.")
             await update.message.reply_text(
                 f"⛔ [#{sub_id}] Signup failed (#{session.row_id}): the site is blocking "
-                f"signups from this proxy right now (too many in a short time). Wait a "
-                f"few minutes, or switch proxy with /setproxy. No SMS was sent — you can "
-                f"use {session.acct.get('phone', phone)} again.")
+                f"signups from this proxy right now (too many in a short time). {follow} "
+                f"No SMS was sent — you can use {session.acct.get('phone', phone)} again.")
         else:
             await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
         await end_session(session)
@@ -2585,6 +2709,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings_lines.append("/freenum <user> <pass> — log into an account and free its phone number")
         settings_lines.append("/setproxy <proxy> · /proxy · /clearproxy · /testproxy [proxy]")
         if SIGNUP_ENABLED:
+            settings_lines.append("/proxypool [p1 p2 ... | off] — backup proxies; when the site "
+                                  "blocks one, the next signup switches by itself")
             settings_lines.append("/seturl <url> · /url · /clearurl · /btag [code]")
         sections.append("\n".join(settings_lines))
         sections.append("👥 Admins\n/addadmin <id> · /removeadmin <id> · /admins")
@@ -2714,6 +2840,7 @@ def main():
         app.add_handler(CommandHandler("url", show_url))
         app.add_handler(CommandHandler("clearurl", clearurl))
         app.add_handler(CommandHandler("btag", btag_cmd))
+        app.add_handler(CommandHandler("proxypool", proxypool_cmd))
         # Phone/OTP replies only exist for signup sessions -- a gameplay-only
         # instance has no sessions, so plain text is just ignored there.
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
