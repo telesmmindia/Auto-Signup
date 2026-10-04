@@ -359,6 +359,28 @@ and there is no reason to build one while the Evolution tables are right there.
 - A full-screen "Download the app" promo (`.app_download_close`, added
   ~2026-10-03) covers REGISTER; it is in `close_popup`.
 - No free-number endpoint, so `/freenumber` is set off on this instance.
+- **The OTP step is judged by the site's reply, not the screen**
+  (`otp_verify_endpoint="/verifyOtpSignup"`, 2026-10-04). The page's own
+  `otpVerify()` is a **synchronous** XHR (`async:false`): `statusCode` 201 =
+  registered (then it redirects to `/`), 301 = wrong code (it clears the boxes
+  and *disables* Verify). The sync request freezes the page, so on a slow
+  server the Verify click itself times out and the OTP screen stays up — the
+  old screen-based check reported "Could not find a visible Verify button" /
+  "OTP screen still showing" for accounts that were in fact created (proved
+  by the same number coming back "already in use" a minute later).
+  `submit_otp()` in `main.py` listens for the reply from before the code is
+  typed and is shared by the CLI and the bot; sites without an endpoint keep
+  the old screen-based judgement unchanged.
+- **Cloudflare rate-limits `POST /sign-up` per exit IP.** After a burst of
+  signups the register call answers a bare `403 Forbidden` (`server:
+  cloudflare`, no `x-amzn-waf-action`) within 0.5s — even from a fresh
+  context with no token, and even right after a CapSolver solve. Nothing to
+  solve; it lifted on its own in ~5 minutes in the 2026-10-04 logs.
+  `is_edge_block()` / `register_block_message()` name it (it used to read
+  "REGISTER click had no effect" after a 12s wait), and the bot says so in
+  chat so nobody keeps retrying into it. The real fix for volume is more
+  proxy IPs. `click_register_and_wait()` also stops waiting the moment a
+  captcha or 403 reply lands, instead of sitting out the full 12s.
 
 **winclash** — added 2026-08-29, and the first site here that is **not** the
 cricmatch/khelofun/starexch white-label Laravel template. Everything below was

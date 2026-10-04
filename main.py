@@ -1040,6 +1040,36 @@ def is_waf_captcha(captured):
     return "gokuProps" in (captured.get("body") or "")
 
 
+def is_edge_block(captured):
+    """True if the register POST was refused outright with a bare 403 and no
+    WAF action -- a firewall block on the exit IP, not a CAPTCHA.
+
+    Seen live on spin24star 2026-10-04: after a burst of signups from one
+    proxy, POST /sign-up answers `403 Forbidden` from `server: cloudflare`
+    within half a second, even from a brand-new context carrying no token, so
+    there is nothing for CapSolver to solve. The page shows nothing, which is
+    why it used to surface as "REGISTER click had no effect" after the full
+    12s wait. It lifted on its own within ~5 minutes in that day's logs."""
+    resp = captured.get("response")
+    if not resp or captured.get("action"):
+        return False
+    try:
+        return resp.status == 403
+    except Exception:
+        return False
+
+
+def register_block_message(captured):
+    """A plain-English reason when the register POST was blocked at the edge,
+    or None. Shared by the CLI and the bot so they say the same thing."""
+    if is_edge_block(captured):
+        return ("Blocked by the site's firewall (HTTP 403): too many signups "
+                "from this proxy address in a short time. It lifts on its own "
+                "after a few minutes; a different proxy gets round it at once. "
+                "No SMS was sent, so the number is still unused.")
+    return None
+
+
 def normalize_phone(phone, site_url=None):
     """Reduce a typed phone number to the digits the site's mobile field can
     actually hold. Returns the cleaned number (or the original text if there
@@ -1124,19 +1154,29 @@ def click_register_and_wait(page):
                 return
             action = resp.headers.get("x-amzn-waf-action")
             if action or url.rstrip("/").endswith("/sign-up"):
-                captured["response"] = resp
-                captured["action"] = action
                 try:
-                    captured["body"] = resp.text()
+                    body = resp.text()
                 except Exception:
-                    captured["body"] = ""
+                    body = ""
+                # Body first, response last: the outcome poll below treats
+                # "response" being present as "this reply is complete".
+                captured["action"] = action
+                captured["body"] = body
+                captured["response"] = resp
         except Exception:
             pass
+
+    def blocked():
+        # A WAF wall or a firewall 403 on the register call is final for this
+        # click: nothing will render, so waiting out the full 12s only delays
+        # the CapSolver retry (captcha) or the report (403).
+        return bool(captured.get("response")) and (
+            is_waf_captcha(captured) or is_edge_block(captured))
 
     page.on("response", on_resp)
     try:
         page.click(profile_for(page.url).sel["submit"])
-        outcome, msgs = wait_for_register_outcome(page)
+        outcome, msgs = wait_for_register_outcome(page, stop=blocked)
     finally:
         try:
             page.remove_listener("response", on_resp)
@@ -1280,7 +1320,7 @@ def _looks_like_phone_taken(page, msgs):
     return any(t.lower() in joined for t in texts)
 
 
-def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
+def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250, stop=None):
     """After clicking REGISTER, poll for whichever outcome shows up first
     instead of blindly sleeping: the OTP screen, the phone-taken error, or any
     other toast/inline error. Measured live: phone-taken typically renders in
@@ -1290,13 +1330,18 @@ def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250):
     Returns (outcome, messages): messages is the read_result() snapshot taken
     the instant the error was spotted. Callers must use it rather than calling
     read_result() again -- snackbar-style toasts (spin24star) auto-dismiss, so
-    a re-read moments later can come back empty ("unknown error")."""
+    a re-read moments later can come back empty ("unknown error").
+
+    `stop`, if given, is polled too; when it answers True the wait ends at
+    once as ("error", []) -- the caller already knows why from the network."""
     deadline = time.time() + timeout_ms / 1000
     while time.time() < deadline:
         if check_phone_taken(page):
             return "phone_taken", []
         if _otp_screen_showing(page):
             return "otp", []
+        if stop is not None and stop():
+            return "error", []
         msgs = read_result(page)
         if msgs and not _looks_like_otp_sent(msgs):
             # One last look before calling it a rejection. On a site whose
@@ -1382,6 +1427,124 @@ def click_otp_verify(page, prof):
         return False
 
 
+def submit_otp(page, otp, filled_shot=None):
+    """Type the signup OTP, press Verify, and decide what happened. Shared by
+    the CLI (enter_otp) and the bot so the two can't drift.
+
+    Returns (outcome, detail):
+      "ok"        -- the account is registered
+      "rejected"  -- the site refused the code; detail is its message, if any
+      "blocked"   -- a firewall/WAF refused the verify call itself
+      "no_input"  -- the code could not be typed in
+      "no_button" -- no clickable Verify button, and nothing was submitted
+      "timeout"   -- still on the OTP screen with no verdict
+
+    On a site with `otp_verify_endpoint`, the site's reply to that call is the
+    verdict. It is listened for from BEFORE the code is typed, so a reply is
+    caught whether it came from our click, from the page submitting by
+    itself, or from a click that "timed out" because the page froze in a
+    synchronous request. Without a reply (or on any other site) it falls back
+    to the screen: OTP boxes gone = registered."""
+    prof = profile_for(page.url)
+    endpoint = prof.otp_verify_endpoint
+    verdict = {}
+
+    def on_resp(resp):
+        try:
+            if verdict or resp.request.method != "POST":
+                return
+            if not urlsplit(resp.url).path.rstrip("/").endswith(endpoint.rstrip("/")):
+                return
+            action = resp.headers.get("x-amzn-waf-action")
+            try:
+                data = resp.json()
+            except Exception:
+                data = None
+            if not isinstance(data, dict):
+                where = f"x-amzn-waf-action: {action}" if action else f"HTTP {resp.status}"
+                verdict["v"] = ("blocked", f"The OTP check was blocked by the site's firewall "
+                                           f"({where}). The account was NOT created.")
+                return
+            code = data.get("statusCode", data.get("status"))
+            try:
+                code = int(code)
+            except (TypeError, ValueError):
+                pass
+            if code in prof.otp_verify_ok_codes:
+                verdict["v"] = ("ok", http_message_of(data))
+            else:
+                verdict["v"] = ("rejected", http_message_of(data))
+        except Exception:
+            pass
+
+    def wait_verdict(secs):
+        end = time.time() + secs
+        while not verdict and time.time() < end:
+            page.wait_for_timeout(250)
+        return verdict.get("v")
+
+    if endpoint:
+        page.on("response", on_resp)
+    try:
+        if not fill_otp(page, otp):
+            return "no_input", ""
+        if filled_shot:
+            save_screenshot(page, filled_shot)
+
+        if endpoint:
+            # A page that submits on its own once the last box fills has
+            # answered by now; clicking Verify on top of that would send the
+            # (already used) code a second time.
+            got = wait_verdict(1.5)
+            if got:
+                return got
+            clicked = click_otp_verify(page, prof)
+            got = wait_verdict(prof.otp_outcome_timeout_ms / 1000)
+            if got:
+                return got
+            # No readable reply at all: judge by the screen, like any site.
+            if not _otp_screen_showing(page):
+                return "ok", ""
+            return ("timeout" if clicked else "no_button"), ""
+
+        if not click_otp_verify(page, prof):
+            return "no_button", ""
+        outcome = wait_for_otp_outcome(page)
+        if outcome == "closed":
+            return "ok", ""
+        if outcome == "error":
+            err = ""
+            try:
+                err_sel = prof.sel.get("otp_error")
+                if err_sel:
+                    e = page.locator(err_sel).first
+                    if e.count() and e.is_visible():
+                        err = (e.inner_text() or "").strip()
+            except Exception:
+                pass
+            return "rejected", err
+        return "timeout", ""
+    finally:
+        if endpoint:
+            try:
+                page.remove_listener("response", on_resp)
+            except Exception:
+                pass
+
+
+def otp_outcome_message(outcome, detail):
+    """The one-line notes/log text for a submit_otp() result that is not ok."""
+    if outcome == "rejected":
+        return f"OTP rejected: {detail}" if detail else "OTP rejected."
+    if outcome == "blocked":
+        return detail
+    if outcome == "no_input":
+        return "Could not type the OTP into the form."
+    if outcome == "no_button":
+        return "Could not find a visible Verify button."
+    return "OTP screen still showing — likely wrong/expired code."
+
+
 def prompt_otp(digits):
     """Ask for the OTP interactively until it's the right number of digits."""
     while True:
@@ -1453,47 +1616,20 @@ def enter_otp(page, acct, result):
     print(f"\nOTP screen is up — an SMS code was sent to {acct.get('phone', 'your phone')}.")
     otp = prompt_otp(n)
 
-    if not fill_otp(page, otp):
-        result["messages"].append("Could not type the OTP into the form.")
-        return result
-
     stamp = time.strftime("%Y%m%d-%H%M%S")
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
-    save_screenshot(page, otp_filled)
-
-    if not click_otp_verify(page, prof):
-        result["messages"].append("Could not find a visible Verify button.")
-        result["shot"] = save_screenshot(page, otp_filled)
-        return result
-    outcome = wait_for_otp_outcome(page)
+    outcome, detail = submit_otp(page, otp, filled_shot=otp_filled)
 
     otp_result = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-result.png"
     result["shot"] = save_screenshot(page, otp_result)
 
-    # Did the site reject the OTP?
-    err = ""
-    if outcome == "error":
-        try:
-            err_sel = prof.sel.get("otp_error")
-            if err_sel:
-                e = page.locator(err_sel).first
-                if e.count() and e.is_visible():
-                    err = (e.inner_text() or "").strip()
-        except Exception:
-            pass
-    still_open = outcome in ("error", "timeout")
-
     msgs = read_result(page)
-    if err:
-        result["ok"] = False
-        result["messages"].append(f"OTP rejected: {err}")
-    elif still_open:
-        result["ok"] = False
-        result["messages"].append("OTP screen still showing after Verify — "
-                                   "likely wrong/expired code.")
-    else:
+    if outcome == "ok":
         result["ok"] = True
         result["messages"].append("OTP verified — account appears registered.")
+    else:
+        result["ok"] = False
+        result["messages"].append(otp_outcome_message(outcome, detail))
     result["messages"].extend(m for m in msgs if m not in result["messages"])
     return result
 
@@ -2330,8 +2466,8 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
     # so every use below (screenshots, phone-taken retry, enter_otp) targets
     # whichever page is actually live, and stash it in `result` so the caller
     # knows which context to close (the original may already be closed).
-    outcome, msgs, _, page = submit_register(page, acct, site_url, proxy=proxy,
-                                             proxy_conf=proxy_conf)
+    outcome, msgs, captured, page = submit_register(page, acct, site_url, proxy=proxy,
+                                                    proxy_conf=proxy_conf)
     result["page"] = page
 
     attempts = 0
@@ -2370,7 +2506,9 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
 
     if outcome in ("error", "timeout"):
         result["ok"] = False
-        result["messages"] = msgs or ["REGISTER did not lead to the OTP screen (check the screenshot)."]
+        block = register_block_message(captured)
+        result["messages"] = msgs or ([block] if block else
+                                      ["REGISTER did not lead to the OTP screen (check the screenshot)."])
         return result
 
     result["messages"] = msgs

@@ -31,6 +31,13 @@ PROFILE = SiteProfile(
     # 35-40s) a correct code was reported "wrong/expired" while the account
     # registered anyway -- the number then came back "already in use".
     otp_outcome_timeout_ms=30000,
+    # Read out of the page's own otpVerify(): POST /verifyOtpSignup ->
+    # {"statusCode":201} = registered (then it redirects to /), 301 = wrong
+    # code (it clears the boxes and DISABLES Verify). The call is
+    # async:false, so judge by this reply, not by the screen -- see
+    # SiteProfile.otp_verify_endpoint.
+    otp_verify_endpoint="/verifyOtpSignup",
+    otp_verify_ok_codes=(201,),
     supports_casino=False,
     sel={
         # ---- signup ----

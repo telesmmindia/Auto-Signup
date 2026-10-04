@@ -54,6 +54,18 @@ class SiteProfile:
     # full navigation to "/", so it gets a wider window.
     otp_outcome_timeout_ms: int = 10000
 
+    # The URL path the page POSTs the signup OTP to, when its JSON reply is
+    # worth reading. Set, submit_otp() judges the OTP step by that reply's
+    # `statusCode` (otp_verify_ok_codes = registered, anything else = refused,
+    # with the site's own message) instead of by whether the OTP screen went
+    # away. None (the default) keeps the screen-based judgement every other
+    # site has always had. spin24star needs it: its Verify is a SYNCHRONOUS
+    # XHR that freezes the page while the server thinks, so the click itself
+    # times out and the screen stays up -- both read as a failure for an
+    # account the server had in fact just created.
+    otp_verify_endpoint: str | None = None
+    otp_verify_ok_codes: tuple = (201,)
+
     # Longest username the site's register form accepts, or 0 for "no limit
     # worth enforcing here". winclash's #userName carries
     # pattern="...{5,12}$", so gen_account() has to build a SHORTER username

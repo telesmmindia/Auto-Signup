@@ -152,8 +152,8 @@ from sites import profile_for
 from main import (
     SHOTS_DIR, SITE_URL, _ANTI_THROTTLE_ARGS,
     capsolver_key, change_account_password_via_login, check_phone_taken,
-    click_first_visible, click_otp_verify, extract_referral_code,
-    fill_otp, fill_register_form, free_account_number, free_phone_number,
+    extract_referral_code, submit_otp, otp_outcome_message, register_block_message,
+    fill_register_form, free_account_number, free_phone_number,
     gen_account, gen_password, otp_digit_count,
     http_fetch_csrf, http_free_phone_number, http_is_error, http_is_phone_taken,
     http_message_of, http_register_call, http_session_for, http_verify_signup_otp,
@@ -163,7 +163,7 @@ from main import (
     normalize_phone, parse_proxy, post_load_settle, read_result,
     seed_waf_token, signup_entry_url, signup_entry_wait,
     run_paired_hedge, save_screenshot, stop_bridge,
-    submit_register, test_baccarat, wait_for_otp_outcome, wait_for_register_outcome,
+    submit_register, test_baccarat, wait_for_register_outcome,
 )
 from sites.games import BACCARAT, STOCKMARKET
 
@@ -810,6 +810,10 @@ def _blocking_fill_and_register(session, phone):
                     else " -- set CAPSOLVER_API_KEY in .env to auto-solve it")
             message += (f" | BLOCKED by AWS WAF (x-amzn-waf-action: {action}, "
                         f"HTTP {status}){hint}")
+        elif not msgs and register_block_message(captured):
+            return {"ok": False, "blocked": True,
+                    "message": "Register rejected: " + register_block_message(captured),
+                    "shot": result_shot}
         elif not msgs and outcome == "timeout":
             message += " (no register API call was made -- REGISTER click had no effect)"
         return {"ok": False, "message": message,
@@ -826,37 +830,14 @@ def _blocking_verify_otp(session, otp):
     """Runs on the SAME worker thread as _blocking_fill_and_register."""
     page = session.page
     acct = session.acct
-    prof = profile_for(page.url)
-    if not fill_otp(page, otp):
-        return {"ok": False, "message": "Could not type the OTP into the form.",
-                "shot": None}
-
     stamp = time.strftime("%Y%m%d-%H%M%S")
     otp_filled = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-filled.png"
-    save_screenshot(page, otp_filled)
-
-    if not click_otp_verify(page, prof):
-        return {"ok": False, "message": "Could not find a visible Verify button.",
-                "shot": save_screenshot(page, otp_filled)}
-    outcome = wait_for_otp_outcome(page)
+    outcome, detail = submit_otp(page, otp, filled_shot=otp_filled)
 
     otp_result = SHOTS_DIR / f"{acct['username']}-{stamp}-otp-result.png"
     shot = save_screenshot(page, otp_result)
-
-    if outcome == "error":
-        err = ""
-        try:
-            err_sel = prof.sel.get("otp_error")
-            if err_sel:
-                e = page.locator(err_sel).first
-                if e.count() and e.is_visible():
-                    err = (e.inner_text() or "").strip()
-        except Exception:
-            pass
-        return {"ok": False, "message": f"OTP rejected: {err}" if err else "OTP rejected.",
-                "shot": shot}
-    if outcome == "timeout":
-        return {"ok": False, "message": "OTP screen still showing — likely wrong/expired code.",
+    if outcome != "ok":
+        return {"ok": False, "message": otp_outcome_message(outcome, detail),
                 "shot": shot}
 
     message = "OTP verified — account registered."
@@ -2456,7 +2437,16 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
                      f"{result['message']} (screenshot: {result.get('shot')})")
         db.update_status(conn, session.row_id, "failed", notes=result["message"],
                          screenshot=result.get("shot"))
-        await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
+        if result.get("blocked"):
+            # The one failure worth explaining in chat: retrying straight
+            # away is what keeps the block going, and the number is unspent.
+            await update.message.reply_text(
+                f"⛔ [#{sub_id}] Signup failed (#{session.row_id}): the site is blocking "
+                f"signups from this proxy right now (too many in a short time). Wait a "
+                f"few minutes, or switch proxy with /setproxy. No SMS was sent — you can "
+                f"use {session.acct.get('phone', phone)} again.")
+        else:
+            await update.message.reply_text(f"❌ [#{sub_id}] Signup failed. (#{session.row_id})")
         await end_session(session)
         _pop_session(chat_id, sub_id)
         await _auto_restart(update, chat_id, sub_id)
