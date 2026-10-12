@@ -2233,12 +2233,61 @@ It now runs `concurrency` **lanes** pulling from a shared counter:
 - Each lane gets its own thread from a **per-job** `ThreadPoolExecutor` sized to
   `concurrency` — not `asyncio.to_thread`'s shared pool, which caps ~32 threads
   and would silently throttle a high `parallel`.
-- A thread-local `requests.Session` per lane reuses the proxy tunnel + TLS
-  handshake. **Cookies are cleared before each request** — don't drop that
-  `clear()`, persisted cookies risk bit.ly deduping clicks.
+- **Every click builds its OWN `requests.Session` and closes it** — see the
+  next section. It used to be a thread-local session reused for a lane's whole
+  run, which is faster and is exactly what stopped the clicks counting.
 
-`WORKER_COUNT` multiplies this (3 jobs × 20 lanes = 60 concurrent requests through
-one proxy). If 502s climb, lower `CONCURRENCY` — one proxy endpoint is the ceiling.
+`WORKER_COUNT` multiplies this, so the real concurrency is `WORKER_COUNT ×
+CONCURRENCY` through one gateway. Production runs **1 worker × 5 lanes**; three
+jobs at once just split the same ~5 usable connections three ways.
+
+### The clicks were not counting: one exit IP per LANE, not per click
+
+Found 2026-10-12 after "bit.ly shows no clicks" while the bot was reporting
+thousands sent — 18,865 answered redirects in five days, dashboard barely
+moving. The engine was fine; the addresses were not.
+
+**The proxy is a ROTATING residential gateway: it hands out a new exit IP per
+new CONNECTION, never per request.** Keeping a session alive to save the tunnel
+and TLS handshake therefore pinned a lane to one IP for its whole run. Measured
+live through the production proxy:
+
+| 8 clicks on … | distinct exit IPs |
+|---|---|
+| one reused `Session` (what the bot did) | **1** |
+| a fresh `Session` each time | **8** |
+
+So a 2,574-click job reached bit.ly from ~20 addresses, every one of them
+carrying the same handful of fingerprints, and bit.ly binned it as repeat
+traffic. **Nothing about the proxy was wrong** — `ip-api.com` reports genuine
+Reliance Jio residential IPs, `proxy:false hosting:false`. Don't go buying
+another proxy for this symptom; check the IP-per-click first
+(`_session()` + `api.ipify.org`, eight times).
+
+Two changes:
+- `send_clicks()` builds a session per click and closes it in a `finally`. The
+  bit.ly hop and the destination hop share it, which is what a real visitor
+  does. The old `session.cookies.clear()` is gone because a new session has no
+  cookies to clear.
+- **The random `X-Forwarded-For` header is gone.** A real browser never sends
+  one, so it was a plain automation tell — and bit.ly may attribute the click
+  to that made-up address and discard it. The exit IP is the proxy's job.
+
+**More lanes is now SLOWER, and the number is measured.** A new tunnel costs
+~1-3s and the gateway refuses them past about 5 at once with a **`503` after
+CONNECT** (the bot log shows these as `Tunnel connection failed` / read
+timeouts). 45s per run, counting only answered clicks:
+
+| lanes | 3 | 4 | 5 | 6 | 8 | 10 | 20 |
+|---|---|---|---|---|---|---|---|
+| answered | 90% | 84% | **95%** | 71% | 46% | 48% | 30% |
+| clicks/min | 50 | 56 | **78** | 40 | 19 | 37 | 35 |
+
+20 lanes delivers **half** what 5 does, because four fifths of the attempts are
+refused and handed back. Hence `CONCURRENCY=5`. Re-run that sweep on a new
+proxy before raising it — and note this ceiling is on **new connections**, not
+throughput: the same gateway sustains ~2,700 req/min on *reused* sessions,
+which is the trap that made session reuse look like a free win.
 
 ### A failed request isn't a click
 
@@ -2273,11 +2322,25 @@ bit.ly redirect 2.4s median; cricmatch247 page ~5.2s / **441 KB**; one full clic
 
 **The proxy is healthy — the drops are a capacity limit.** Exit IP checks clean on
 `ip-api.com` and cricmatch247 answers 200 through it, so this is **not** the AWS
-WAF 403 problem. 20 lanes × 441 KB ≈ 1 MB/s sustained through one residential
-line, which is what produces the `RemoteDisconnected`/`502`. The retry logic
-contains the damage but can't fix the cause. **Tune `CONCURRENCY` against the
-`missed the site` counter** — that's the feedback signal. Raising the real ceiling
-needs more proxy IPs, not more lanes.
+WAF 403 problem. The retry logic contains the damage but can't fix the cause.
+**Tune `CONCURRENCY` against the `missed the site` counter** — that's the
+feedback signal. Raising the real ceiling needs more proxy IPs, not more lanes.
+
+⚠️ Those per-click timings are from the old reused-session path and are now
+optimistic — a click pays its own tunnel. The current measured figure is the
+table above: **~78 clicks/min at 5 lanes**, every click from its own IP.
+
+⚠️ **`FOLLOW_REDIRECTS` is OFF on the production box** (`prince bot/.env` there
+has carried only the token, admin id and worker count since 2026-08-30),
+despite what this file said. bit.ly counts the click when it SERVES the
+redirect, so clicks still count — but the destination site never sees the
+visit or its btag. Turn it on only knowingly: it doubles the requests per
+click, and the second hop goes through the same ~5-connection ceiling.
+
+⚠️ **`prince bot/config.py` is tracked and holds proxy credentials in a public
+repo.** The pair in git history is burnt; the one the server actually runs is
+a local uncommitted edit, so it has not leaked. Keep it that way — new
+credentials belong in the untracked `.env`, not in `config.py`.
 
 ### Daily schedules (`schedules.py`)
 
