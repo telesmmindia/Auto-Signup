@@ -45,6 +45,11 @@ WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 # attempts are refused and retried. Raise this only if a run of the numbers
 # above on a new proxy shows a higher peak -- and remember WORKER_COUNT jobs
 # share the one gateway, so the real figure is WORKER_COUNT x this.
+#
+# Those rates are against a fast test endpoint. Against bit.ly itself, which
+# answers slower, 25 real clicks at 5 lanes measured 34/min -- call it
+# ~2,000/hour, roughly double what the old 20-lane setup was managing. Speed
+# is not what this is for: an uncounted click is worth nothing however fast.
 DEFAULT_CONCURRENCY = int(os.environ.get("CONCURRENCY", "5"))
 MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "200"))
 DEFAULT_DELAY = float(os.environ.get("DEFAULT_DELAY", "0"))

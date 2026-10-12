@@ -2284,7 +2284,10 @@ timeouts). 45s per run, counting only answered clicks:
 | clicks/min | 50 | 56 | **78** | 40 | 19 | 37 | 35 |
 
 20 lanes delivers **half** what 5 does, because four fifths of the attempts are
-refused and handed back. Hence `CONCURRENCY=5`. Re-run that sweep on a new
+refused and handed back. Hence `CONCURRENCY=5`. Those rates are against a fast
+test endpoint; against bit.ly itself **25 real clicks at 5 lanes measured
+34/min** (~2,000/hour), about double what the old 20-lane setup managed.
+Verified live 2026-10-12: 25 clicks, **25 distinct Jio residential exit IPs**. Re-run that sweep on a new
 proxy before raising it — and note this ceiling is on **new connections**, not
 throughput: the same gateway sustains ~2,700 req/min on *reused* sessions,
 which is the trap that made session reuse look like a free win.
@@ -2393,3 +2396,138 @@ A stopped job **returns** rather than raising, so it renders as a normal ✅
 `tasks.py`'s validation is split into `parse_link`/`parse_platform`/`parse_count`/
 `parse_delay`/`parse_mode`/`parse_concurrency` so `parse_task()` (one-off) and
 `parse_schedule()` (recurring) can't drift.
+
+---
+
+# 7. khelstake exchange bet bot (`exchange.py`)
+
+Standalone Telegram bot for khelstake24.com: places the same Back/Lay
+Match Odds bet on every operator ID at once, cancels unmatched bets,
+refreshes balances. Accounts come from a Google Sheet (USERNAME | PASSWORD),
+not `accounts.db`. Added 2026-10-09/10 for a client who wants a multi-ID
+exchange bettor.
+
+```
+cp .env.exchange.example .env.exchange   # token, sheet id, master admin
+.venv/bin/python exchange.py --env .env.exchange
+```
+
+**It is NOT a `BOT_MODE` of `telegram_bot.py`** — own `EXCHANGE_BOT_TOKEN`,
+own admin list (`admins.exchange.json`, master-only `/addadmin`
+`/removeadmin`, persisted). One process, `/start` help lists the commands:
+`/event` `/cancelall` `/refresh` `/ids` `/relogin`.
+
+### The conversation flow and where the requests go
+
+`/event` → series → match → Back/Lay side → `odds stake` → confirm
+(✅ place all IDs / 🧪 test 1 ID / ❌). Every fetch below was verified live
+2026-10-09/10 against real pages; the parsers are pure functions tested
+against saved HTML in `/tmp/khelstake_*.html`.
+
+- Series/matches are **server-rendered HTML**, not JSON:
+  `GET /exchange/cricket-exchange` → `parse_competitions()` (CompetitionRow
+  links whose anchor contains a plain `<span>Name</span>`; "See All" links
+  carry no span so they drop out naturally);
+  `GET /ex/competition/{id}` → `parse_match_list()` (team names from the
+  anchor's `team_names_box`; the box's `</span>` is found by looking at what
+  FOLLOWS it — the `main_event_module` div — so the inner "vs" span can't
+  cut the name short).
+- Odds cells on `GET /ex/event-details/{eventId}` are **`<a>` tags with
+  `data-runnerId`** (102 of them on one page, across Match Odds +
+  bookmaker/fancy markets). `parse_match_page()` groups by
+  `data-market_type` and picks the market named `Match Odds`. Their
+  `data-odd` values are placeholders ("1") — **real odds come from the
+  provider**, so never read odds off the static page.
+- The page-level hidden input `name="limit"` is an encrypted blob the site
+  serializes into **every** placeBet from that page load. One per event
+  page, not per cell — extract it once.
+- Live odds: `POST odds4.starlingpay.co.uk/api/v1/get/getMarketBook/{eventType}`
+  (`q` = market ids, ≤5 per call, `eventType=4` for cricket) with **browser
+  headers** (Origin=khelstake24, Referer=the event page, a real Chrome UA,
+  `X-CSRF-TOKEN`) — a bare request gets 401 from their `CheckDomain`
+  middleware. Index **0** of `availableToBack/availableToLay` is the site's
+  level-0 cell (its own `updateData()` JS reads `[0,1,2]`), so that is the
+  "best" price we surface. `market.hash` and `runner.ltp` are **encrypted
+  blobs** (`eyJpdiI6...`) which the site echoes back into `matched`/`ltp`
+  unchanged. The provider times out occasionally — `get_market_book()`
+  retries 3× rather than killing a whole conversation turn.
+
+### placeBet: the payload is the site's own form, byte for byte
+
+`POST /api2/v2/placeBet` with the 16 betslip-form fields + `_token`
+(field list read out of the page's inline JS template 2026-10-09):
+`teams, market_name, runnerName, eventId, odds, runnerId, eventType,
+market_type, ltp, stake, matched, expo, limit, betting_type, profit,
+bet_type`. Three conventions worth not re-guessing:
+
+- `bet_type` = `availableToBack`/`availableToLay` (the ladder side),
+  `betting_type` = `Back`/`Lay` (the slip label). Sending "back"/"lay" or
+  "exchange" is what the half-built version did — wrong.
+- `profit` = `stake*(odds-1)` 2dp for **both** sides (`profitdetails()`
+  computes the same formula for Back and Lay; on Lay it is the liability —
+  the site labels the field "liability" but sends the same number).
+- `expo` = "0" for a fresh bet (there is no `exposure` form input; the
+  page's DOM-scanning JS writes into a field that doesn't exist in the
+  template — a no-op).
+
+**Response judging: `status`, not `statusCode`** (cancelbet is the other
+way round). `200` = placed, **`205` = "account under routine check"** —
+the site then redirects itself to `/logout?q=routinecheck`, so the bot sets
+`account.flagged`, excludes it from every place/cancel/balance sweep, and
+says so in chat; `/relogin` (fresh objects from the sheet) clears flags.
+
+### Server-side gate order (each observed live 2026-10-10)
+
+A refusal names the gate that fired — the payload itself is accepted up to
+it, which is how the payload was validated without a funded account:
+
+1. Liquidity: `"Bet rejected due to low liquidity, try again later !"` — a
+   **market-level** gate (a women's-league match refused the same odds that
+   passed on a ₹19.2M market), not an odds-level one.
+2. Min stake: `"Min Stake is 2000"` — **the server enforces this too**, not
+   just the page JS (`EXCHANGE_MIN_STAKE` mirrors it for a friendly chat
+   error before any request).
+3. Balance: `"Insufficient funds. Please deposit."`
+4. `status 205` → flag (above).
+
+Match Odds odds must be 1.01–5.0 (site risk-management rule; Over/Under
+fancy lines are exempt but we never bet those).
+
+### Cancel: one id at a time, no cancel-all endpoint
+
+- Unmatched list: `POST /unmatchedbetdetails` `{bets_name:"unmatched",
+  _token}` → `{res:"<html>"}`; an empty account gets a "No Unmatched Bets"
+  div (that is NOT an error).
+- Cancel: `POST /api2/v2/cancelbet?desktop=1` `{id: <betId>, _token}` →
+  **`statusCode == 200`** (note: `statusCode`; placeBet answers `status`).
+  Read out of the site's own `cancel_unmatcedbet()` JS: the cancel control
+  carries `id=<betId>`, rows carry class `unmatched_bet_<betId>`, and
+  `edit_*` ids open the partial-edit UI (never cancel those).
+  `get_unmatched_ids()` matches both patterns and dedupes.
+- `/cancelall` loops this per account — no bulk endpoint exists.
+
+### The 🧪 test bet
+
+The confirm screen's "Test 1 ID" places an unmatched **BACK @1.01** on the
+first logged-in ID, polls `/unmatchedbetdetails` for the new id, cancels
+just that id (a before/after diff, so pre-existing unmatched bets are never
+touched). At 1.01 nothing can match (a match would need a lay priced ≤
+1.01), so exposure is zero — it exists to prove the full
+place → list → cancel round trip before volume, per the client's decision
+in `khelstake-exchange-review.md`.
+
+⚠️ **Not yet completed end to end**: the probe account
+(`7067436446`, sheet-held credentials) holds ₹1,116.50, below the ₹2000
+minimum, so every live probe stopped at gate 2/3 above. The first run of
+🧪 Test on an account funded ≥ ₹2000 completes the round trip — do that
+before placing real multi-ID bets. What IS verified live: login, all three
+page parsers, the odds provider (200 + OPEN book), the unmatched panel,
+and the placeBet payload reaching and being parsed by the server
+(liquidity/min-stake/balance refusals are domain answers, not validation
+errors).
+
+### Odds fetch failure is a chat message, not a crash
+
+Every handler wraps its fetches; `get_market_book()` retries transport
+errors 3× before surfacing. The old half-built code let executor
+exceptions propagate out of handlers, which kills the conversation silently.
