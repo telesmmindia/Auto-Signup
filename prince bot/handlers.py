@@ -1,6 +1,5 @@
 import asyncio
 import random
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urljoin
@@ -199,8 +198,10 @@ def realistic_headers(referer) -> dict:
         "Sec-Fetch-Mode": "navigate",
         "Sec-Fetch-Site": "cross-site" if referer else "none",
         "Sec-Fetch-User": "?1",
-        "X-Forwarded-For": f"{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}.{random.randint(1,255)}",
     }
+    # No X-Forwarded-For. A real browser never sends one, so a random value is
+    # a plain automation tell -- and bit.ly may attribute the click to that
+    # made-up address and bin it. The exit IP is the proxy's job, not a header's.
     
     # Chrome/Edge specific headers
     if is_chrome or is_edge:
@@ -224,22 +225,29 @@ def realistic_headers(referer) -> dict:
 
 
 # --- One request ---------------------------------------------------------
-# Every lane runs on its own thread and keeps its own connection pool, so the
-# proxy tunnel and TLS handshake are paid once per lane instead of once per
-# click. Cookies are cleared before each request so every click still looks
-# like a brand-new visitor.
-
-_local = threading.local()
+# Every click gets its OWN session, which is then closed. That is deliberate
+# and it is what makes the click count.
+#
+# The proxy is a ROTATING residential gateway: it hands out a new exit IP per
+# new connection, never per request. Lanes used to keep a thread-local session
+# alive to save the proxy tunnel and TLS handshake, which pinned each lane to
+# a single IP for its whole run -- measured live 2026-10-12: 8 clicks on a
+# reused session came from 1 IP, 8 clicks on fresh sessions came from 8. So a
+# 2,500-click job reached bit.ly from ~20 addresses, all with the same
+# fingerprint, and bit.ly discarded them as repeat traffic: the bot reported
+# thousands of clicks and the dashboard moved by a handful.
+#
+# A new tunnel per click costs ~1-3s and the gateway refuses them (503 after
+# CONNECT) past about 5 at once, so CONCURRENCY must stay small -- see the
+# measurements in config.py. Paying that is the entire point: an uncounted
+# click is worth nothing however fast it was sent.
 
 
 def _session() -> requests.Session:
-    session = getattr(_local, "session", None)
-    if session is None:
-        session = requests.Session()
-        adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        _local.session = session
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=1, pool_maxsize=1, max_retries=0)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
     return session
 
 
@@ -260,8 +268,15 @@ def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> tuple[int, 
     counted.
     """
     session = _session()
-    session.cookies.clear()
     proxies = {"http": proxy, "https": proxy} if proxy else None
+    try:
+        return _one_click(session, headers, BITLY_URL, proxies)
+    finally:
+        # Drops the tunnel, so the next click is handed a different exit IP.
+        session.close()
+
+
+def _one_click(session, headers, BITLY_URL, proxies) -> tuple[int, str, bool]:
     try:
         r = session.get(
             BITLY_URL,

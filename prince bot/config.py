@@ -28,10 +28,24 @@ WORKER_COUNT = int(os.environ.get("WORKER_COUNT", "3"))
 
 # --- Click speed ---------------------------------------------------------
 # How many requests one job keeps in flight at the same time. THIS is what
-# sets the speed, not `delay`: a single request through the proxy takes
-# roughly 0.5-2 seconds, so 20 lanes is about 20x the clicks per second.
-# `delay` is only a pause inside each lane, and defaults to none.
-DEFAULT_CONCURRENCY = int(os.environ.get("CONCURRENCY", "20"))
+# sets the speed, not `delay`; `delay` is only a pause inside each lane, and
+# defaults to none.
+#
+# MORE LANES IS SLOWER HERE, AND THE NUMBER IS MEASURED, NOT GUESSED. Each
+# click now opens its own tunnel so it gets its own residential exit IP (see
+# handlers.py), and the gateway refuses new tunnels past about 5 at once with
+# a 503 after CONNECT. Measured on the production proxy 2026-10-12, 45s per
+# run, counting only clicks the server actually answered:
+#
+#     lanes:   3     4     5     6     8    10    20
+#     ok:     90%   84%   95%   71%   46%   48%   30%
+#     rate:   50    56    78    40    19    37    35   clicks/min
+#
+# So 20 lanes delivers HALF of what 5 does, because four fifths of the
+# attempts are refused and retried. Raise this only if a run of the numbers
+# above on a new proxy shows a higher peak -- and remember WORKER_COUNT jobs
+# share the one gateway, so the real figure is WORKER_COUNT x this.
+DEFAULT_CONCURRENCY = int(os.environ.get("CONCURRENCY", "5"))
 MAX_CONCURRENCY = int(os.environ.get("MAX_CONCURRENCY", "200"))
 DEFAULT_DELAY = float(os.environ.get("DEFAULT_DELAY", "0"))
 
