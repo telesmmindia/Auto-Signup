@@ -206,9 +206,10 @@ def require_admin(func):
 class AccountSession:
     """One khelstake24 account, logged in over plain HTTP (no browser)."""
 
-    def __init__(self, username: str, password: str):
+    def __init__(self, username: str, password: str, sheet_row: int | None = None):
         self.username = username
         self.password = password
+        self.sheet_row = sheet_row    # 1-based row in the accounts sheet
         self.session = None
         self.csrf: str | None = None
         self.balance: float | None = None
@@ -370,19 +371,58 @@ class AccountSession:
 
 # Global account list
 accounts: list[AccountSession] = []
+_sheet = None          # gspread worksheet handle, set by load_accounts_from_sheet()
 
 def load_accounts_from_sheet() -> list[AccountSession]:
+    global _sheet
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     book = client.open_by_key(SPREADSHEET_ID)
-    ws = book.worksheet(WORKSHEET_NAME) if WORKSHEET_NAME else book.sheet1
-    rows = ws.get_all_values()
+    _sheet = book.worksheet(WORKSHEET_NAME) if WORKSHEET_NAME else book.sheet1
+    rows = _sheet.get_all_values()
     result = []
-    for row in rows[1:]:
+    # row numbers recorded so balances can be written back later; empty rows
+    # are skipped but the real row index is kept.
+    for idx, row in enumerate(rows[1:], start=2):
         if len(row) >= 2 and row[0].strip() and row[1].strip():
-            result.append(AccountSession(row[0].strip(), row[1].strip()))
+            result.append(AccountSession(row[0].strip(), row[1].strip(),
+                                         sheet_row=idx))
+    # Make sure a BALANCE column header exists (col C).
+    try:
+        if rows and (len(rows[0]) < 3 or not rows[0][2].strip()):
+            _sheet.update_cell(1, 3, "BALANCE")
+    except Exception as exc:
+        logger.warning("Could not set BALANCE header: %s", exc)
     return result
+
+def write_balances_to_sheet():
+    """Push each account's last balance into column C (best-effort).
+
+    One batch_update for all rows -- Google's per-minute write quota is the
+    real ceiling, same reasoning as channel_info.py. A failure is logged,
+    never raised: a sheet hiccup must not break a bet conversation.
+    """
+    if _sheet is None:
+        return
+    cells = [(a.sheet_row, a.balance) for a in accounts
+             if a.sheet_row is not None and a.balance is not None]
+    if not cells:
+        return
+    try:
+        lo = min(r for r, _ in cells)
+        hi = max(r for r, _ in cells)
+        values = [[""] for _ in range(hi - lo + 1)]
+        for r, b in cells:
+            values[r - lo][0] = f"{b:.2f}"
+        _sheet.batch_update([{"range": f"C{lo}:C{hi}", "values": values}])
+    except Exception as exc:
+        logger.warning("Could not write balances to sheet: %s", exc)
+
+def _refresh_balances_and_write():
+    """Refresh every ready account's balance, then push to the sheet."""
+    _run_parallel(lambda a: a.refresh_balance(), _logged_in())
+    write_balances_to_sheet()
 
 def login_all_accounts() -> tuple[int, int]:
     ok = fail = 0
@@ -400,6 +440,7 @@ def login_all_accounts() -> tuple[int, int]:
             except Exception as e:
                 fail += 1
                 a.error = str(e)[:200]
+    write_balances_to_sheet()
     return ok, fail
 
 
@@ -562,6 +603,11 @@ def place_bet_on_account(
         "bet_type": bet_type,
     }
     resp = account.api_post("/api2/v2/placeBet", data)
+    # Logged in full: the chat only shows a trimmed message, and the site's
+    # generic "Something went wrong" says nothing on its own.
+    logger.info("placeBet %s %s %s @%s x%s -> %s", account.username,
+                betting_type, runner_name, data["odds"], data["stake"],
+                str(resp)[:300])
     status = resp.get("status")
     if status == 205:
         # The site itself redirects to /logout?q=routinecheck for this.
@@ -669,7 +715,7 @@ async def refresh_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text(f"🔄 Refreshing {len(active)} accounts…")
     try:
         await asyncio.get_running_loop().run_in_executor(
-            None, lambda: _run_parallel(lambda a: a.refresh_balance(), active))
+            None, _refresh_balances_and_write)
     except Exception as exc:
         await msg.edit_text(f"❌ Refresh failed: {str(exc)[:100]}")
         return
@@ -698,6 +744,7 @@ async def relogin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ {str(exc)[:150]}")
         return
     accounts = new_accounts
+    write_balances_to_sheet()
     await msg.edit_text(f"✅ {ok} logged in, ❌ {fail} failed. /ids for details.")
 
 def login_all_accounts_with(pool_accounts: list[AccountSession]) -> tuple[int, int]:
@@ -989,7 +1036,36 @@ async def _on_bet_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     side = state.get("side", "back")
     odds = state.get("odds")
     stake = state.get("stake")
-    book = state.get("book") or {}
+
+    # Re-read the book now. Its encrypted "hash" goes into placeBet as
+    # `matched`, and the site's own page copies a fresh one in at click
+    # time; the copy from when the match was picked can be minutes old,
+    # and a stale one is refused with "Something went wrong, please try
+    # refreshing the page".
+    await query.edit_message_text("🔄 Refreshing odds…")
+    try:
+        raw = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: active[0].get_market_book(
+                state.get("event_type", "4"), [state["market_id"]],
+                referer=f"{SITE_URL}/ex/event-details/{state.get('event_id', '')}"))
+        fresh = parse_odds_response(raw).get(state["market_id"])
+    except Exception as exc:
+        fresh = None
+        logger.warning("Fresh odds fetch failed: %s", exc)
+    if not fresh:
+        await query.edit_message_text(
+            "❌ Could not refresh the odds just before placing. "
+            "Nothing was placed — try /event again.")
+        _user_state.pop(chat_id, None)
+        return ConversationHandler.END
+    if fresh.get("status") != "OPEN":
+        await query.edit_message_text(
+            f"⚠️ Match Odds market is {fresh.get('status') or 'unknown'} now. "
+            "Nothing was placed.")
+        _user_state.pop(chat_id, None)
+        return ConversationHandler.END
+    state["book"] = fresh
+    book = fresh
     rr = (book.get("runners") or {}).get(str(state.get("runner_id")), {})
 
     if action == "test":
@@ -1048,7 +1124,7 @@ async def _on_bet_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("⚠️ Flagged IDs are excluded until /relogin.")
 
     def _ref():
-        _run_parallel(lambda a: a.refresh_balance(), _logged_in())
+        _refresh_balances_and_write()
     try:
         await asyncio.get_running_loop().run_in_executor(None, _ref)
         ready = _logged_in()
@@ -1095,11 +1171,7 @@ async def _run_test_bet(query, acc: AccountSession, state: dict, book: dict):
 
     lines = [f"🧪 *Test bet on* {acc.username}\n"]
     if not res.get("ok"):
-        # A refusal still proves the payload parsed server-side (e.g. the
-        # balance check fired) -- report it honestly.
         lines.append(f"{'⚠️' if res.get('flagged') else '❌'} Place: {res.get('message')}")
-        if not res.get("flagged"):
-            lines.append("_Payload reached the server._")
         await query.edit_message_text("\n".join(lines), parse_mode="Markdown")
         return
     lines.append(f"✅ Place: {res.get('message')}")
@@ -1183,7 +1255,7 @@ async def cancelall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.append(f"\n🗑 Total cancelled: {total}")
 
     def _ref():
-        _run_parallel(lambda a: a.refresh_balance(), _logged_in())
+        _refresh_balances_and_write()
     try:
         await asyncio.get_running_loop().run_in_executor(None, _ref)
         ready = _logged_in()
