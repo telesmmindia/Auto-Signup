@@ -9,7 +9,7 @@ Architecture (every line below confirmed live 2026-10-09 via probe_exchange.py
 against real pages/accounts -- the site's own inline JS was read for the
 exact request shapes):
   * Series/matches are SERVER-RENDERED HTML, not JSON APIs:
-      GET /exchange/cricket-exchange     -> series list (CompetitionRow links)
+      GET /exchange/{cricket,football,tennis}-exchange -> series list
       GET /ex/competition/{compId}       -> matches of one series
       GET /ex/event-details/{eventId}    -> match page, market cells + limit blob
   * Live odds come from an EXTERNAL provider (Betfair-style):
@@ -67,7 +67,7 @@ balance gate ("Insufficient funds"); run the test once on an account funded
 >= 2000 to complete the round trip.
 
 Commands:
-  /event      -- browse series -> match -> Back/Lay side -> odds+amount ->
+  /event      -- pick sport -> browse series -> match -> Back/Lay side -> odds+amount ->
                  confirm (place on all IDs / test on 1 ID / cancel)
   /cancelall  -- cancel every unmatched bet on every ID
   /refresh    -- balances + exposure for every ID
@@ -292,7 +292,7 @@ class AccountSession:
         """GET an HTML page (series / competition / event-details pages)."""
         parts = urlsplit(SITE_URL)
         url = f"{parts.scheme}://{parts.netloc}{path}"
-        r = self.session.get(url, headers=self._headers(), timeout=20)
+        r = self.session.get(url, headers=self._headers(), timeout=45)
         return r.text
 
     def api_post(self, path: str, data: dict | None = None,
@@ -669,8 +669,25 @@ def cancel_all_on_account(account: AccountSession) -> dict:
 #  TELEGRAM HANDLERS
 # ═══════════════════════════════════════════════════════════════════════
 
-ST_SELECT_SERIES, ST_SELECT_MATCH, ST_SELECT_SIDE, ST_ENTER_BET = range(4)
+ST_SELECT_SPORT, ST_SELECT_SERIES, ST_SELECT_MATCH, ST_SELECT_SIDE, ST_ENTER_BET = range(5)
+
+# Sports whose exchange pages share cricket's layout (series -> matches ->
+# a "Match Odds" market). Checked live 2026-10-15: football (eventType 1,
+# 3 runners incl. The Draw) and tennis (eventType 2) parse with the same
+# functions, and the site applies the same 1.01-5.0 odds rule and 2000
+# minimum stake to both. Horse racing is laid out differently (no series
+# links at all) and is deliberately left out.
+SPORTS = {
+    "cricket": ("Cricket", "🏏", "/exchange/cricket-exchange"),
+    "football": ("Football", "⚽", "/exchange/football-exchange"),
+    "tennis": ("Tennis", "🎾", "/exchange/tennis-exchange"),
+}
+SERIES_PAGE_SIZE = 30
 _user_state: dict[int, dict] = {}
+
+def _sport_emoji(chat_id: int) -> str:
+    return SPORTS[(_user_state.get(chat_id) or {}).get("sport", "cricket")][1]
+
 
 def _logged_in() -> list[AccountSession]:
     # flagged = placeBet answered 205 ("routine check"); the site logged the
@@ -794,33 +811,74 @@ def login_all_accounts_with(pool_accounts: list[AccountSession]) -> tuple[int, i
 # ── /event → series ──
 @require_admin
 async def event_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    active = _logged_in()
-    if not active:
+    if not _logged_in():
         await update.message.reply_text("❌ No accounts logged in. /relogin")
         return ConversationHandler.END
+    _user_state[update.effective_chat.id] = {}
+    buttons = [[InlineKeyboardButton(f"{emoji} {label}", callback_data=f"sp:{key}")]
+               for key, (label, emoji, _path) in SPORTS.items()]
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="sp:_cancel")])
+    await update.message.reply_text(
+        "Select a sport:", reply_markup=InlineKeyboardMarkup(buttons))
+    return ST_SELECT_SPORT
 
-    msg = await update.message.reply_text("🔍 Loading cricket series…")
+
+def _series_keyboard(series: list[dict], page: int) -> InlineKeyboardMarkup:
+    """One page of series buttons (football lists ~150 series, more than a
+    Telegram message should carry), with Prev/Next when there are more."""
+    chunk = series[page * SERIES_PAGE_SIZE:(page + 1) * SERIES_PAGE_SIZE]
+    buttons = [[InlineKeyboardButton(s["name"][:48], callback_data=f"sr:{s['comp_id']}")]
+               for s in chunk]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"sr:_page:{page - 1}"))
+    if (page + 1) * SERIES_PAGE_SIZE < len(series):
+        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"sr:_page:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="sr:_cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _series_title(state: dict, page: int) -> str:
+    series = state.get("series") or []
+    pages = max(1, -(-len(series) // SERIES_PAGE_SIZE))
+    label, emoji, _ = SPORTS[state.get("sport", "cricket")]
+    more = f" — page {page + 1}/{pages}" if pages > 1 else ""
+    return f"{emoji} *{label} Series* ({len(series)} found{more})\nSelect a series:"
+
+
+# ── sport → series ──
+async def _on_sport_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    key = query.data.split(":", 1)[1]
+    if key == "_cancel" or key not in SPORTS:
+        await query.edit_message_text("Cancelled.")
+        return ConversationHandler.END
+
+    label, emoji, path = SPORTS[key]
+    active = _logged_in()
+    if not active:
+        await query.edit_message_text("❌ No accounts logged in. /relogin")
+        return ConversationHandler.END
+    await query.edit_message_text(f"🔍 Loading {label.lower()} series…")
     try:
         html = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: active[0].get_page("/exchange/cricket-exchange"))
+            None, lambda: active[0].get_page(path))
         series = parse_competitions(html)
     except Exception as exc:
-        await msg.edit_text(f"❌ Could not load series: {str(exc)[:120]}")
+        await query.edit_message_text(f"❌ Could not load series: {str(exc)[:120]}")
         return ConversationHandler.END
 
     if not series:
-        await msg.edit_text("❌ No series found on the cricket exchange page.")
+        await query.edit_message_text(f"❌ No series found on the {label.lower()} exchange page.")
         return ConversationHandler.END
 
-    buttons = [[InlineKeyboardButton(
-        s["name"][:48], callback_data=f"sr:{s['comp_id']}")]
-        for s in series[:40]]
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="sr:_cancel")])
-    _user_state[update.effective_chat.id] = {}
-
-    await msg.edit_text(
-        f"🏏 *Cricket Series* ({len(series)} found)\nSelect a series:",
-        reply_markup=InlineKeyboardMarkup(buttons),
+    state = _user_state.setdefault(update.effective_chat.id, {})
+    state.update({"sport": key, "series": series})
+    await query.edit_message_text(
+        _series_title(state, 0), reply_markup=_series_keyboard(series, 0),
         parse_mode="Markdown")
     return ST_SELECT_SERIES
 
@@ -835,6 +893,14 @@ async def _on_series_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
         return ConversationHandler.END
 
     chat_id = update.effective_chat.id
+    if data.startswith("_page:"):
+        state = _user_state.get(chat_id) or {}
+        page = int(data.split(":", 1)[1])
+        await query.edit_message_text(
+            _series_title(state, page),
+            reply_markup=_series_keyboard(state.get("series") or [], page),
+            parse_mode="Markdown")
+        return ST_SELECT_SERIES
     _user_state.setdefault(chat_id, {})["comp_id"] = data
     await query.edit_message_text("🔍 Loading matches…")
 
@@ -858,7 +924,7 @@ async def _on_series_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
     buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="mt:_cancel")])
 
     await query.edit_message_text(
-        f"🏏 *Matches* ({len(matches)} found)\nSelect a match:",
+        f"{_sport_emoji(chat_id)} *Matches* ({len(matches)} found)\nSelect a match:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown")
     return ST_SELECT_MATCH
@@ -939,7 +1005,7 @@ async def _on_match_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
     match_name = _user_state.get(chat_id, {}).get("matches", {}).get(data, "")
     title = match_name or market["teams"] or f"Match {data}"
     await query.edit_message_text(
-        f"🏏 *{html_unescape(title)[:60]}*\nMatch Odds:\n" + "\n".join(odds_lines) +
+        f"{_sport_emoji(chat_id)} *{html_unescape(title)[:60]}*\nMatch Odds:\n" + "\n".join(odds_lines) +
         "\n\nPick team + Back/Lay:",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown")
@@ -971,7 +1037,7 @@ async def _on_side_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cur_s = f"{cur:g}" if isinstance(cur, (int, float)) else "—"
 
     await query.edit_message_text(
-        f"🏏 *{side.upper()} {html_unescape(team)}*\n"
+        f"{_sport_emoji(chat_id)} *{side.upper()} {html_unescape(team)}*\n"
         f"Current best: @{cur_s}\n\n"
         f"Enter odds and stake:\n"
         f"Example: `1.55 2000`\n"
@@ -1028,7 +1094,7 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❌ Cancel", callback_data="confirm:no")],
     ]
     await update.message.reply_text(
-        f"🏏 *Confirm bet:*\n\n"
+        f"{_sport_emoji(chat_id)} *Confirm bet:*\n\n"
         f"*{side}* {team}\n"
         f"Odds: *{odds:g}*  |  Stake: *₹{stake:,.0f}* each\n"
         f"Accounts: *{len(active)}*\n"
@@ -1361,6 +1427,9 @@ def main():
     event_conv = ConversationHandler(
         entry_points=[CommandHandler("event", event_cmd)],
         states={
+            ST_SELECT_SPORT: [
+                CallbackQueryHandler(_on_sport_selected, pattern=r"^sp:"),
+            ],
             ST_SELECT_SERIES: [
                 CallbackQueryHandler(_on_series_selected, pattern=r"^sr:"),
             ],
