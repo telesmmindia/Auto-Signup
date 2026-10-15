@@ -203,6 +203,12 @@ def require_admin(func):
 #  ACCOUNT SESSION
 # ═══════════════════════════════════════════════════════════════════════
 
+def _session_expired(resp: dict) -> bool:
+    """The site's answer once a login session has ended (Laravel 419)."""
+    msg = str((resp or {}).get("message") or "")
+    return "CSRF token mismatch" in msg or "Non-JSON (419)" in msg
+
+
 class AccountSession:
     """One khelstake24 account, logged in over plain HTTP (no browser)."""
 
@@ -236,18 +242,23 @@ class AccountSession:
                 return False
             self.logged_in = True
             self.error = None
-            self.refresh_balance()
+            self.refresh_balance(_retried=True)
             return True
         except Exception as exc:
             self.error = str(exc)[:200]
             self.logged_in = False
             return False
 
-    def refresh_balance(self):
+    def refresh_balance(self, _retried: bool = False):
         if not self.logged_in or not self.session:
             return
         try:
             resp = engine.http_get_balance(self.session, self.csrf, SITE_URL)
+            if _session_expired(resp) and not _retried:
+                # Otherwise the old figure stays on screen as if current.
+                logger.info("Session expired for %s, logging in again", self.username)
+                if self.login():   # login() refreshes the balance itself
+                    return
             if resp.get("status") == 200:
                 bal = resp.get("balance") or {}
                 wallet = bal.get("wallet")
@@ -286,7 +297,22 @@ class AccountSession:
 
     def api_post(self, path: str, data: dict | None = None,
                  params: dict | None = None) -> dict:
-        """POST to a JSON API endpoint (auto-attaches the csrf _token)."""
+        """POST to a JSON API endpoint (auto-attaches the csrf _token).
+
+        The site ends a login session after some hours, and every POST then
+        answers "CSRF token mismatch." (Laravel's 419) -- refused before the
+        app runs, so nothing happened and retrying once after a fresh login
+        is safe, a placeBet included.
+        """
+        resp = self._api_post_once(path, data, params)
+        if _session_expired(resp):
+            logger.info("Session expired for %s, logging in again", self.username)
+            if self.login():
+                resp = self._api_post_once(path, data, params)
+        return resp
+
+    def _api_post_once(self, path: str, data: dict | None,
+                       params: dict | None) -> dict:
         parts = urlsplit(SITE_URL)
         url = f"{parts.scheme}://{parts.netloc}{path}"
         payload = dict(data or {})
