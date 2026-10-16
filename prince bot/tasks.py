@@ -39,6 +39,17 @@ PLATFORMS: dict[str, str] = {
     "cm": "cricmatch",
     "khelofun": "khelofun",
     "kf": "khelofun",
+    # One referer site each (also pooled under cricmatch/khelofun below).
+    "hindixxx": "hindixxx",
+    "hindichudaivideos": "hindichudaivideos",
+    "xmishti": "xmishti",
+    "desiboobs": "desiboobs",
+    "desisex": "desisex",
+    "marathisexyvideo": "marathisexyvideo",
+    "indianxxxbf": "indianxxxbf",
+    "antarvasnaphotos2": "antarvasnaphotos2",
+    "xxxvasna": "xxxvasna",
+    "desisex2": "desisex2",
 }
 
 PLATFORM_URLS: dict[str, str] = {
@@ -54,23 +65,28 @@ PLATFORM_URLS: dict[str, str] = {
     "whatsapp": "https://web.whatsapp.com/",
 }
 
+# Single-site platforms, kept out of PLATFORM_URLS for the same reason as the
+# pools below: "random" stays on the social sites.
+SITE_URLS: dict[str, str] = {
+    "hindixxx": "https://hindixxx.club/",
+    "hindichudaivideos": "https://hindichudaivideos.com/",
+    "xmishti": "https://xmishti.com/",
+    "desiboobs": "https://desiboobs.club/",
+    "desisex": "https://desisex.site/",
+    "marathisexyvideo": "https://marathisexyvideo.com/",
+    "indianxxxbf": "https://indianxxxbf.com/",
+    "antarvasnaphotos2": "https://antarvasnaphotos2.com/",
+    "xxxvasna": "https://xxxvasna.com/",
+    "desisex2": "https://desisex2.com/",
+}
+
 # Platforms that rotate through several referer sites, one picked per click.
 # Kept out of PLATFORM_URLS so the "random" platform stays on the social sites.
 PLATFORM_URL_POOLS: dict[str, list[str]] = {
-    "cricmatch": [
-        "https://hindixxx.club/",
-        "https://hindichudaivideos.com/",
-        "https://xmishti.com/",
-        "https://desiboobs.club/",
-        "https://desisex.site/",
-    ],
-    "khelofun": [
-        "https://marathisexyvideo.com/",
-        "https://indianxxxbf.com/",
-        "https://antarvasnaphotos2.com/",
-        "https://xxxvasna.com/",
-        "https://desisex2.com/",
-    ],
+    "cricmatch": [SITE_URLS[k] for k in
+                  ("hindixxx", "hindichudaivideos", "xmishti", "desiboobs", "desisex")],
+    "khelofun": [SITE_URLS[k] for k in
+                 ("marathisexyvideo", "indianxxxbf", "antarvasnaphotos2", "xxxvasna", "desisex2")],
 }
 MAX_COUNT = 1_000_000
 
