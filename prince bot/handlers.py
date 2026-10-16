@@ -11,7 +11,7 @@ from config import (
     PROXIES,
     REQUEST_TIMEOUT,
 )
-from tasks import PLATFORMS, Progress, Task, handler, PLATFORM_URLS
+from tasks import PLATFORMS, Progress, Task, handler, PLATFORM_URLS, PLATFORM_URL_POOLS
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -338,6 +338,8 @@ PROGRESS_EVERY_SECONDS = 3.0  # Telegram rate-limits message edits
 def pick_referer(task: Task) -> str:
     if task.platform == "random":
         return random.choice(list(PLATFORM_URLS.values()))
+    if task.platform in PLATFORM_URL_POOLS:
+        return random.choice(PLATFORM_URL_POOLS[task.platform])
     if task.mode in ("random", "variety"):
         return random.choice(REFERERS)
     return PLATFORM_URLS[task.platform]

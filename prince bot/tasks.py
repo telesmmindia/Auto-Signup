@@ -35,6 +35,10 @@ PLATFORMS: dict[str, str] = {
     "ttv": "twitch",
     "whatsapp": "whatsapp",
     "wa": "whatsapp",
+    "cricmatch": "cricmatch",
+    "cm": "cricmatch",
+    "khelofun": "khelofun",
+    "kf": "khelofun",
 }
 
 PLATFORM_URLS: dict[str, str] = {
@@ -48,6 +52,25 @@ PLATFORM_URLS: dict[str, str] = {
     "kick": "https://kick.com/",
     "twitch": "https://www.twitch.tv/",
     "whatsapp": "https://web.whatsapp.com/",
+}
+
+# Platforms that rotate through several referer sites, one picked per click.
+# Kept out of PLATFORM_URLS so the "random" platform stays on the social sites.
+PLATFORM_URL_POOLS: dict[str, list[str]] = {
+    "cricmatch": [
+        "https://hindixxx.club/",
+        "https://hindichudaivideos.com/",
+        "https://xmishti.com/",
+        "https://desiboobs.club/",
+        "https://desisex.site/",
+    ],
+    "khelofun": [
+        "https://marathisexyvideo.com/",
+        "https://indianxxxbf.com/",
+        "https://antarvasnaphotos2.com/",
+        "https://xxxvasna.com/",
+        "https://desisex2.com/",
+    ],
 }
 MAX_COUNT = 1_000_000
 
