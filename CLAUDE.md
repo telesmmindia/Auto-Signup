@@ -2292,6 +2292,39 @@ proxy before raising it — and note this ceiling is on **new connections**, not
 throughput: the same gateway sustains ~2,700 req/min on *reused* sessions,
 which is the trap that made session reuse look like a free win.
 
+### The tunnel no longer sits on the click's critical path (2026-10-17)
+
+Two changes, both verified mechanically from the laptop (the repo's proxy
+creds are dead, so the through-gateway gain still needs one production run to
+measure — the summary line now prints a `cold` count to check it with):
+
+- **The next click's tunnel opens DURING the current click.** Each lane keeps
+  one click AND one tunnel-open in flight at once: `warm_click_session()`
+  pre-opens the CONNECT + TLS and parks the live connection in the session's
+  pool (`_warm()` — urllib3 has no public pre-open; `_get_conn()`/`_put_conn()`
+  are wrapped so a failure just degrades to a cold click), and the next
+  `session.get()` provably reuses that exact connection (verified by counting
+  `_new_conn` calls: 1 per click). The exit IP is bound at CONNECT time, so
+  every click still gets its own private IP — the property the 2026-10-12
+  measurement demanded. Concurrent CONNECTs stay at or below `lanes`, the
+  same ceiling the 5-lane number was measured against. `demo_job`'s executor
+  is sized `2 × lanes` so the warm never queues behind clicks, and leftover
+  warmed sessions are closed on every exit path.
+- **The destination page body is no longer downloaded.** With
+  `FOLLOW_REDIRECTS` on, the visit's redirect chain — including the btag's
+  `/setcookie` hop — is followed while *resolving* the response; only the
+  final ~440 KB page body was dead time, so it is streamed and dropped
+  (`stream=True` + `d.close()`). The visit lands; the click count was never
+  affected (bit.ly counts at hop 1).
+
+Net effect at 5 lanes: the serial per-click cost drops from
+tunnel(1-3s) + bit.ly(~2.4s) + body(~4s) to roughly max(tunnel, HTTP) +
+redirects-only — expect roughly 2x, and the `cold` counter in the job
+summary should read ~`lanes` per job (each lane's first click) once warm
+pipelining is healthy on production. A refused warm retries 3× quickly
+(`WARM_ATTEMPTS`) and then falls back to a cold click, so nothing about the
+retry/failure accounting changed.
+
 ### A failed request isn't a click
 
 `count` means that many **answered** requests: a lane that gets a non-2xx/3xx or

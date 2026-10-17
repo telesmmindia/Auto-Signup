@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -225,22 +226,32 @@ def realistic_headers(referer) -> dict:
 
 
 # --- One request ---------------------------------------------------------
-# Every click gets its OWN session, which is then closed. That is deliberate
-# and it is what makes the click count.
+# Every click gets its OWN connection, which is then closed. That is
+# deliberate and it is what makes the click count.
 #
 # The proxy is a ROTATING residential gateway: it hands out a new exit IP per
 # new connection, never per request. Lanes used to keep a thread-local session
-# alive to save the proxy tunnel and TLS handshake, which pinned each lane to
-# a single IP for its whole run -- measured live 2026-10-12: 8 clicks on a
+# alive to save the proxy tunnel and TLS handshake, which pinned each lane to a
+# single IP for its whole run -- measured live 2026-10-12: 8 clicks on a
 # reused session came from 1 IP, 8 clicks on fresh sessions came from 8. So a
 # 2,500-click job reached bit.ly from ~20 addresses, all with the same
 # fingerprint, and bit.ly discarded them as repeat traffic: the bot reported
 # thousands of clicks and the dashboard moved by a handful.
 #
-# A new tunnel per click costs ~1-3s and the gateway refuses them (503 after
-# CONNECT) past about 5 at once, so CONCURRENCY must stay small -- see the
-# measurements in config.py. Paying that is the entire point: an uncounted
-# click is worth nothing however fast it was sent.
+# A new tunnel costs ~1-3s, so paying it SERIALLY per click put it on every
+# lane's critical path. Each lane now keeps one click AND one tunnel-open in
+# flight at once: while click N runs on its already-open tunnel, the tunnel
+# for click N+1 is being opened next to it, so the lane cycles at request
+# speed instead of request + tunnel. The exit IP is bound at CONNECT time, so
+# a pre-opened tunnel is still this click's own private IP -- the property the
+# 2026-10-12 measurement demanded is untouched. Concurrent CONNECTs stay at or
+# below `lanes` (one per lane), the same ceiling the gateway was measured
+# against; the warm never sends any HTTP, it just opens the connection.
+#
+# The gateway refuses new tunnels (503 after CONNECT) past about 5 at once,
+# so CONCURRENCY must stay small -- see the measurements in config.py. A
+# refused warm is not a lost click: the click opens its own tunnel cold, and
+# that attempt is what the retry logic sees.
 
 
 def _session() -> requests.Session:
@@ -251,6 +262,60 @@ def _session() -> requests.Session:
     return session
 
 
+def _proxies(proxy: str | None) -> dict | None:
+    return {"http": proxy, "https": proxy} if proxy else None
+
+
+def _pool_for(session: requests.Session, url: str, proxies: dict | None):
+    """The urllib3 connection pool `session.get` will use for this URL."""
+    adapter = session.get_adapter(url)
+    try:
+        prepared = requests.Request("GET", url).prepare()
+        return adapter.get_connection_with_tls_context(prepared, False, proxies)
+    except AttributeError:  # requests < 2.32
+        return adapter.get_connection(url, proxies)
+
+
+def _warm(session: requests.Session, url: str, proxies: dict | None) -> bool:
+    """Open the tunnel (proxy CONNECT) and TLS to `url` now, and park the
+    live connection in the session's pool, so the next `session.get` reuses
+    it instead of paying the handshake. Sends no HTTP. Returns False (and
+    leaves the session usable cold) if the gateway refuses the CONNECT."""
+    try:
+        pool = _pool_for(session, url, proxies)
+        conn = pool._get_conn()  # noqa: SLF001 -- no public way to pre-open
+    except Exception:
+        return False
+    try:
+        conn.timeout = REQUEST_TIMEOUT  # bounds a hung CONNECT/TLS
+        conn.connect()
+        pool._put_conn(conn)  # parked; the next get() pops this exact conn
+        return True
+    except Exception:
+        with contextlib.suppress(Exception):
+            conn.close()
+        return False
+
+
+WARM_ATTEMPTS = 3  # the gateway 503s a CONNECT at the ceiling; it answers fast
+WARM_RETRY_PAUSE = 0.25
+
+
+def warm_click_session(BITLY_URL: str, proxy: str = None) -> requests.Session | None:
+    """Pre-open the NEXT click's tunnel + TLS. Returns a session whose next
+    GET rides that connection, or None if the gateway refused -- the click then
+    opens its own tunnel cold, exactly the old behaviour."""
+    proxies = _proxies(proxy)
+    session = _session()
+    for attempt in range(1, WARM_ATTEMPTS + 1):
+        if _warm(session, BITLY_URL, proxies):
+            return session
+        if attempt < WARM_ATTEMPTS:
+            time.sleep(WARM_RETRY_PAUSE * attempt)
+    session.close()
+    return None
+
+
 # With FOLLOW_REDIRECTS on, the destination is fetched as its OWN request and
 # retried on its own. Retrying the whole click instead would ask bit.ly for a
 # second redirect, and bit.ly counts every one it serves -- so a flaky
@@ -259,21 +324,24 @@ DESTINATION_ATTEMPTS = 3
 DESTINATION_RETRY_PAUSE = 0.5
 
 
-def send_clicks(headers: dict, BITLY_URL: str, proxy: str = None) -> tuple[int, str, bool]:
+def send_clicks(
+    headers: dict, BITLY_URL: str, proxy: str = None, session: requests.Session | None = None
+) -> tuple[int, str, bool]:
     """Fire one click. Returns (status code, where it pointed / the error,
     whether the destination visit failed).
 
     A status of -1 means the request never reached the server at all. The
     status is the bit.ly hop only -- that is what decides whether the click
-    counted.
+    counted. `session`, if given, is a tunnel pre-opened by
+    warm_click_session(); it is used and closed either way.
     """
-    session = _session()
-    proxies = {"http": proxy, "https": proxy} if proxy else None
+    s = session if session is not None else _session()
+    proxies = _proxies(proxy)
     try:
-        return _one_click(session, headers, BITLY_URL, proxies)
+        return _one_click(s, headers, BITLY_URL, proxies)
     finally:
         # Drops the tunnel, so the next click is handed a different exit IP.
-        session.close()
+        s.close()
 
 
 def _one_click(session, headers, BITLY_URL, proxies) -> tuple[int, str, bool]:
@@ -308,8 +376,15 @@ def _one_click(session, headers, BITLY_URL, proxies) -> tuple[int, str, bool]:
                 allow_redirects=True,
                 timeout=REQUEST_TIMEOUT,
                 proxies=proxies,
+                stream=True,
             )
             print(f"     -> site {d.status_code} -> {d.url}")
+            # The visit has landed by the time the response resolves: any
+            # redirect chain (the btag's /setcookie hop included) was followed
+            # while getting here. The body is dead weight -- ~440 KB down a
+            # residential tunnel was most of a click's wall time -- so it is
+            # dropped instead of downloaded.
+            d.close()
             return r.status_code, target, False
         except requests.RequestException as e:
             print(f"     -> site ERROR (try {attempt}/{DESTINATION_ATTEMPTS}): {e}")
@@ -356,6 +431,7 @@ async def demo_job(task: Task, progress: Progress) -> str:
     ok = 0  # clicks the server actually answered
     failed = 0  # attempts that errored and were retried
     missed_site = 0  # clicks that counted, but never reached the destination
+    cold = 0  # attempts that had to open their own tunnel (no warm one waiting)
     remaining = total  # clicks not yet claimed by a lane
     attempts_left = total * ATTEMPT_MULTIPLIER + 20
     streak = 0  # failures in a row, across all lanes
@@ -381,25 +457,38 @@ async def demo_job(task: Task, progress: Progress) -> str:
         await progress(line)
 
     loop = asyncio.get_running_loop()
-    pool = ThreadPoolExecutor(max_workers=lanes, thread_name_prefix=f"click{task.id}")
+    # Each lane keeps one click AND one tunnel-open in flight at once, so the
+    # pool needs two workers per lane or the warm would queue behind clicks
+    # and the overlap would collapse back to serial.
+    pool = ThreadPoolExecutor(max_workers=2 * lanes, thread_name_prefix=f"click{task.id}")
 
-    async def lane() -> None:
-        nonlocal ok, failed, missed_site, remaining, attempts_left, streak, stopped
+    async def lane() -> requests.Session | None:
+        """One lane. Returns its leftover pre-warmed session for cleanup."""
+        nonlocal ok, failed, missed_site, cold, remaining, attempts_left, streak, stopped
+        warm = None  # this lane's next click, tunnel already open
         while stopped is None and ok < total and attempts_left > 0:
             if task.stopping:  # /stopschedule
                 stopped = "stopped on request"
-                return
+                return warm
             if remaining <= 0:
                 # Other lanes are still in flight; one may hand work back.
                 await asyncio.sleep(0.1)
                 continue
             remaining -= 1
             attempts_left -= 1
+            if warm is None:
+                cold += 1  # first click in the lane, or the gateway refused the warm
 
             headers = realistic_headers(pick_referer(task))
-            status, detail, site_missed = await loop.run_in_executor(
-                pool, send_clicks, headers, task.link, get_proxy()
+            # Click N rides the tunnel opened while click N-1 was running;
+            # the tunnel for click N+1 opens while this click is in flight.
+            click_fut = loop.run_in_executor(
+                pool, send_clicks, headers, task.link, get_proxy(), warm
             )
+            warm_fut = loop.run_in_executor(pool, warm_click_session, task.link, get_proxy())
+            warm = None
+            status, detail, site_missed = await click_fut
+            warm = await warm_fut
 
             if 200 <= status < 400:
                 ok += 1
@@ -417,19 +506,24 @@ async def demo_job(task: Task, progress: Progress) -> str:
             streak += 1
             if status in DEAD_LINK_STATUSES:
                 stopped = f"the link returned {status} — there is nothing to retry"
-                return
+                return warm
             if streak >= MAX_CONSECUTIVE_FAILURES:
                 stopped = (
                     f"{streak} failures in a row — the proxy or the link looks down "
                     f"(last: {detail[:120]})"
                 )
-                return
+                return warm
             await asyncio.sleep(min(RETRY_PAUSE * streak, MAX_RETRY_PAUSE))
+        return warm
 
+    leftovers: list[requests.Session | None] = []
     try:
-        await asyncio.gather(*(lane() for _ in range(lanes)))
+        leftovers = await asyncio.gather(*(lane() for _ in range(lanes)))
     finally:
         pool.shutdown(wait=False)
+        for session in leftovers:
+            if session is not None:
+                session.close()
 
     await report(force=True)
     elapsed = time.monotonic() - started
@@ -453,6 +547,8 @@ async def demo_job(task: Task, progress: Progress) -> str:
         f"{total} clicks delivered for {task.link} ({task.platform}) in "
         f"{elapsed:.0f}s — {rate:.1f}/s, {lanes} at a time, {failed} retried"
     )
+    if cold:
+        summary += f", {cold} cold (tunnel not pre-opened in time)"
     if missed_site:
         summary += f" — but {missed_site} never reached the destination site"
     return summary
