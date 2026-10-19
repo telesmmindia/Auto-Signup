@@ -347,19 +347,31 @@ class AccountSession:
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "*/*",
         }
-        last_exc: Exception | None = None
-        for attempt in range(3):
+        # A 502/503/504 is the provider's own gateway timing out (an HTML
+        # page, not JSON) -- as transient as a dropped connection, so it is
+        # retried the same way instead of failing the conversation at once.
+        last_err = ""
+        attempts = 4
+        for attempt in range(attempts):
             try:
                 r = self.session.post(url, headers=headers, timeout=30)
-                return r.json()
-            except ValueError:
-                raise RuntimeError(
-                    f"odds provider non-JSON ({r.status_code}): {r.text[:120]}")
             except Exception as exc:      # timeout / connection reset
-                last_exc = exc
-                if attempt < 2:
-                    time.sleep(1.5)
-        raise RuntimeError(f"odds provider unreachable: {str(last_exc)[:120]}")
+                last_err = str(exc)[:120]
+            else:
+                if r.status_code in (502, 503, 504):
+                    last_err = f"gateway error {r.status_code}"
+                else:
+                    try:
+                        return r.json()
+                    except ValueError:
+                        raise RuntimeError(
+                            f"odds provider sent a non-JSON reply "
+                            f"(HTTP {r.status_code})")
+            if attempt < attempts - 1:
+                time.sleep(2 * (attempt + 1))
+        raise RuntimeError(
+            f"odds provider is not responding ({last_err}) -- "
+            f"their server is busy, try again in a minute")
 
     def get_unmatched_ids(self) -> list[str]:
         """Bet ids of every currently-unmatched bet, via the site's own
