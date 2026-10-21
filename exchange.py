@@ -1419,7 +1419,12 @@ async def cancelall_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 @require_admin
 async def addadmin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_master(update.effective_user.id):
-        await update.message.reply_text("⛔ Master only.")
+        # Say where masters come from: they are deliberately not settable
+        # from inside the bot, so "Master only" alone leaves no way forward.
+        await update.message.reply_text(
+            "⛔ Master only. Admins can use the bot but not add others.\n"
+            "A master is added by putting their ID in MASTER_ADMIN_ID in the "
+            "bot's env file and restarting it.")
         return
     if not context.args:
         await update.message.reply_text("Usage: `/addadmin <id>`", parse_mode="Markdown")
