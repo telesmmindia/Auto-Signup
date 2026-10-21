@@ -1143,6 +1143,30 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = html_unescape(state.get("runner_name", "?"))
     side = state.get("side", "?").upper()
 
+    # Check what the IDs can actually afford BEFORE offering to place.
+    # Every gate here is the server's (see the module docstring), and the
+    # balance one fires per account: without this the confirm screen
+    # happily offers "place on 22 IDs" and then every one of them comes
+    # back "Insufficient funds", which reads as a broken bot rather than
+    # an underfunded one. A balance we could not read is not counted as
+    # short -- unknown is not the same as too low.
+    known = [a for a in active if a.balance is not None]
+    short = [a for a in known if a.balance < stake]
+    if known and len(short) == len(known):
+        poorest, richest = min(a.balance for a in known), max(a.balance for a in known)
+        held = (f"₹{poorest:,.0f}" if poorest == richest
+                else f"₹{poorest:,.0f}–₹{richest:,.0f}")
+        await update.message.reply_text(
+            f"❌ None of your {len(known)} IDs can cover ₹{stake:,.0f}.\n"
+            f"They hold {held} each, and the site will refuse every bet "
+            f"with \"Insufficient funds\".\n\n"
+            f"The site's own minimum is ₹{MIN_STAKE:,}, so an ID needs at "
+            f"least that much to bet at all. Top them up, then /refresh.")
+        return ST_ENTER_BET
+    short_line = (f"\n⚠️ {len(short)} of {len(known)} IDs hold less than "
+                  f"₹{stake:,.0f} and will be refused."
+                  if short else "")
+
     buttons = [
         [InlineKeyboardButton(f"✅ Place on {len(active)} IDs",
                               callback_data="confirm:yes")],
@@ -1155,7 +1179,7 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"*{side}* {team}\n"
         f"Odds: *{odds:g}*  |  Stake: *₹{stake:,.0f}* each\n"
         f"Accounts: *{len(active)}*\n"
-        f"Total stake: *₹{stake * len(active):,.0f}*\n\n"
+        f"Total stake: *₹{stake * len(active):,.0f}*{short_line}\n\n"
         f"🧪 Test places an unmatched BACK @1.01 on the first ID only,\n"
         f"then cancels it — proves place→list→cancel with no exposure.",
         reply_markup=InlineKeyboardMarkup(buttons),
