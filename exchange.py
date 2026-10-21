@@ -844,7 +844,12 @@ async def relogin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ {str(exc)[:150]}")
         return
     accounts = new_accounts
-    write_balances_to_sheet()
+    # Off the event loop: a gspread write of every row is a blocking network
+    # call, and on the loop it freezes the WHOLE bot (no replies, no
+    # polling) until Google answers. Every other sheet write here is already
+    # in an executor; this one was missed.
+    await asyncio.get_running_loop().run_in_executor(
+        None, write_balances_to_sheet)
     await msg.edit_text(f"✅ {ok} logged in, ❌ {fail} failed. /ids for details.")
 
 def login_all_accounts_with(pool_accounts: list[AccountSession]) -> tuple[int, int]:
