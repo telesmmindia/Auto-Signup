@@ -343,6 +343,44 @@ chips' `data-disabled` flips between rounds, which would be a better
 betting-window signal than the timer — but that is a whole second game driver
 and there is no reason to build one while the Evolution tables are right there.
 
+**funcrash** — added 2026-10-21 for a client who wants a Baccarat gameplay
+bot only (no signup). It is the **same platform as winclash** (the "rjm"/jeet
+white-label), which is why `sites/funcrash.py` is a copy of `sites/winclash.py`
+with the ids re-read rather than a new mapping:
+- The homepage sets a `jeet_session` cookie and carries winclash's exact login
+  markup (`button.clsLoginClick`/`button.btnLogin`, `#user_login`,
+  `#pass_eye_user`), `/join-now`, the `casinoLink` tile class and the
+  `/casinoRedirect?q=<id>&provider=<prov>` launch URL.
+- **Same AWS WAF** (`server: awselb/2.0`, `x-amzn-waf-action: challenge`), with
+  winclash's two signatures intact: an XHR-shaped `GET /join-now` answers
+  **202 with an empty body**, the navigation-shaped one gets the 2407-byte
+  `gokuProps` interstitial. So `waf_on_navigation=True` and
+  **`CAPSOLVER_API_KEY` is required** — though both verification runs got only
+  the soft `challenge`, which clears itself for free.
+- Game ids come from funcrash's own `POST /casinoGamesList`
+  (`provider=evolution`, paginated): **Baccarat A is 86**, Baccarat B 87 — the
+  same ids winclash uses, as a shared template predicts.
+- **Verified live 2026-10-21 with `verify_baccarat.py`** (read-only, no bets),
+  from a laptop with no proxy, on both client ids: seat to live table in 35s
+  and 32s, and **both land on the same physical table `nx7ecktjzywdqwwt`** —
+  the one cricmatch's and winclash's Baccarat A also reach, so the hedge's
+  same-table guard passes. Chip rail 100/500/2500/10000/50000/100000, so the
+  **table minimum is ₹100 a side** (the in-game footer says
+  "Baccarat A ₹100–500,000"). Both bet spots present, 2 betting windows in 60s
+  on a ~35s cycle. **No engine change was needed** — the table is the ordinary
+  Evolution client.
+- **No bet has been placed here yet.** Do one `/run <pair> 100 1` and read
+  `/runlog` before scaling.
+- `supports_http_login` stays False (the WAF blocks a bare `requests.Session`),
+  so balances come from the header selector, same as winclash. `/api2/v2/login`
+  and `/api/getBalance` both exist; `/api2/v2/getBalance` does not.
+- **Signup is uninspected here** — the `sel` signup keys are winclash's,
+  inherited as a starting point for `inspect_form.py`, and
+  `supports_http_fast` is False.
+- Config: `.env.funcrash.gameplay.example` → `BOT_MODE=gameplay`,
+  `BOT_SITE_URL=https://funcrash.com/`, its own admins/settings/pairs/pair_runs
+  files.
+
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a
   game section overlays it — the click **must be forced**. There's a fast-path
