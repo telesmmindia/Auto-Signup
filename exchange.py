@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-"""exchange.py -- Multi-ID exchange bet bot for khelstake24.com.
+"""exchange.py -- Multi-ID exchange bet bot (khelstake24, starexch555).
 
 A standalone Telegram bot (its own EXCHANGE_BOT_TOKEN, NOT a BOT_MODE of
 telegram_bot.py) that places the same Back/Lay Match Odds bet on every
 operator ID at once, cancels unmatched bets, and refreshes balances.
+
+ONE PROCESS PER SITE, picked entirely by env -- there is no per-site code
+here. khelstake24.com and starexch555.com run the SAME exchange
+white-label: verified live 2026-10-21 against starexch555 that every route,
+parser and rule below is byte-compatible (same /exchange/*-exchange and
+/ex/* pages, the same page-level encrypted "limit" blob, the same
+odds4.starlingpay.co.uk provider, the same min stake 2000 / max 5,000,000
+and odds 1.01-5.0 rules read out of its own inline JS). parse_competitions
+/ parse_match_list / parse_match_page were each run against real starexch
+HTML unchanged, and a real account logged in, read its balance + exposure
+and listed its (empty) unmatched panel over plain HTTP. So a third site on
+this template needs an env file, not a fork -- confirm it with
+probe_exchange.py first.
 
 Architecture (every line below confirmed live 2026-10-09 via probe_exchange.py
 against real pages/accounts -- the site's own inline JS was read for the
@@ -123,6 +136,10 @@ logger = logging.getLogger("exchange")
 # ── Config ──
 BOT_TOKEN = os.environ.get("EXCHANGE_BOT_TOKEN", "")
 SITE_URL = os.environ.get("EXCHANGE_SITE_URL", "https://khelstake24.com")
+# Shown in /start. Defaults to the site's hostname without www/TLD noise, so
+# a new site needs no code change -- only an env file.
+SITE_NAME = os.environ.get("EXCHANGE_SITE_NAME", "") or (
+    urlsplit(SITE_URL).netloc.replace("www.", "").split(".")[0] or "exchange")
 SPREADSHEET_ID = os.environ.get("EXCHANGE_SHEET_ID", "")
 WORKSHEET_NAME = os.environ.get("EXCHANGE_WORKSHEET_NAME", "")
 CREDENTIALS_FILE = os.environ.get("SHEET_CREDENTIALS_FILE", "service_account.json")
@@ -134,14 +151,17 @@ ADMINS_FILE = os.environ.get("ADMINS_FILE", "admins.exchange.json")
 
 # Site rules, read from the site's own JS 2026-10-09 (see module docstring).
 MIN_STAKE = int(os.environ.get("EXCHANGE_MIN_STAKE", "2000"))
-MIN_ODDS = 1.01
-MAX_ODDS = 5.0
+MIN_ODDS = float(os.environ.get("EXCHANGE_MIN_ODDS", "1.01"))
+MAX_ODDS = float(os.environ.get("EXCHANGE_MAX_ODDS", "5.0"))
 
 # The odds provider 401s requests without a browser-ish header set; this is
 # the UA the successful probe request carried.
 _ODDS_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-ODDS_HOST = "https://odds4.starlingpay.co.uk"
+# Both sites verified so far use this same provider; env'd so a third one
+# that points elsewhere needs no code change.
+ODDS_HOST = os.environ.get(
+    "EXCHANGE_ODDS_HOST", "https://odds4.starlingpay.co.uk").rstrip("/")
 
 
 # ── Proxy pool ──
@@ -210,7 +230,7 @@ def _session_expired(resp: dict) -> bool:
 
 
 class AccountSession:
-    """One khelstake24 account, logged in over plain HTTP (no browser)."""
+    """One exchange account, logged in over plain HTTP (no browser)."""
 
     def __init__(self, username: str, password: str, sheet_row: int | None = None):
         self.username = username
@@ -417,7 +437,20 @@ def load_accounts_from_sheet() -> list[AccountSession]:
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     book = client.open_by_key(SPREADSHEET_ID)
-    _sheet = book.worksheet(WORKSHEET_NAME) if WORKSHEET_NAME else book.sheet1
+    if WORKSHEET_NAME:
+        try:
+            _sheet = book.worksheet(WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            # Naming the tabs that DO exist, because the bare gspread error
+            # is just the missing title -- and a new site instance usually
+            # fails here first (its accounts tab has not been made yet).
+            have = ", ".join(w.title for w in book.worksheets())
+            raise RuntimeError(
+                f"no tab named {WORKSHEET_NAME!r} in that spreadsheet. "
+                f"Tabs it has: {have}. Make one with USERNAME | PASSWORD | "
+                f"BALANCE columns, or change EXCHANGE_WORKSHEET_NAME.") from None
+    else:
+        _sheet = book.sheet1
     rows = _sheet.get_all_values()
     result = []
     # row numbers recorded so balances can be written back later; empty rows
@@ -726,7 +759,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     flag_line = (f"\n⚠️ {n_flag} flagged (routine check) -- /relogin to retry"
                  if n_flag else "")
     await update.message.reply_text(
-        "🏏 *Exchange Bet Bot — khelstake24*\n\n"
+        f"🏏 *Exchange Bet Bot — {SITE_NAME}*\n\n"
         f"Accounts: {len(accounts)} loaded, {n_ok} ready{flag_line}\n"
         f"Proxies: {len(_proxies)}\n"
         f"Min stake: ₹{MIN_STAKE}\n\n"

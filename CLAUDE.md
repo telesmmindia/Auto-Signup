@@ -2332,36 +2332,51 @@ which is the trap that made session reuse look like a free win.
 
 ### The tunnel no longer sits on the click's critical path (2026-10-17)
 
-Two changes, both verified mechanically from the laptop (the repo's proxy
-creds are dead, so the through-gateway gain still needs one production run to
-measure — the summary line now prints a `cold` count to check it with):
+Two changes, then the production post-mortem — read all three before touching:
 
 - **The next click's tunnel opens DURING the current click.** Each lane keeps
   one click AND one tunnel-open in flight at once: `warm_click_session()`
   pre-opens the CONNECT + TLS and parks the live connection in the session's
   pool (`_warm()` — urllib3 has no public pre-open; `_get_conn()`/`_put_conn()`
   are wrapped so a failure just degrades to a cold click), and the next
-  `session.get()` provably reuses that exact connection (verified by counting
-  `_new_conn` calls: 1 per click). The exit IP is bound at CONNECT time, so
-  every click still gets its own private IP — the property the 2026-10-12
-  measurement demanded. Concurrent CONNECTs stay at or below `lanes`, the
-  same ceiling the 5-lane number was measured against. `demo_job`'s executor
+  `session.get()` reuses that exact connection. The exit IP is bound at CONNECT
+  time, so every click still gets its own private IP. `demo_job`'s executor
   is sized `2 × lanes` so the warm never queues behind clicks, and leftover
   warmed sessions are closed on every exit path.
 - **The destination page body is no longer downloaded.** With
   `FOLLOW_REDIRECTS` on, the visit's redirect chain — including the btag's
   `/setcookie` hop — is followed while *resolving* the response; only the
   final ~440 KB page body was dead time, so it is streamed and dropped
-  (`stream=True` + `d.close()`). The visit lands; the click count was never
-  affected (bit.ly counts at hop 1).
+  (`stream=True` + `d.close()`).
 
-Net effect at 5 lanes: the serial per-click cost drops from
-tunnel(1-3s) + bit.ly(~2.4s) + body(~4s) to roughly max(tunnel, HTTP) +
-redirects-only — expect roughly 2x, and the `cold` counter in the job
-summary should read ~`lanes` per job (each lane's first click) once warm
-pipelining is healthy on production. A refused warm retries 3× quickly
-(`WARM_ATTEMPTS`) and then falls back to a cold click, so nothing about the
-retry/failure accounting changed.
+**Two bugs shipped in the first version, both proxy-only and both invisible
+direct (which is how they survived laptop testing). Don't re-introduce either:**
+1. `_pool_for()` must pass `verify=True` — requests keys its pools by TLS
+   settings, so `verify=False` returned a DIFFERENT pool than the click's GET
+   used, and the warmed connection was parked where no request would ever find
+   it.
+2. `_warm()` must call `pool._prepare_proxy(conn)` before `conn.connect()`.
+   urllib3 stamps the CONNECT target + `Proxy-Authorization` onto the conn
+   inside `urlopen()` only; a manually connected conn without the stamp does
+   TLS **straight to the proxy's port 8080** (not a TLS endpoint →
+   `SSLEOFError`). Symptom on production: every warm failed, every click fell
+   back to cold, plus up to 3 wasted CONNECTs per click — which tripped the
+   gateway into `429 Too Many Requests`/`503`/`504` storms and made jobs
+   *slower* than the old code. The fix is verified live on the production
+   gateway: warm succeeds, the GET pops the same pooled connection (one
+   `_new_conn` per click), 0.77s GET after warm vs 1.45-6.91s cold.
+
+**Honest expectation: the gateway, not the client, is the ceiling.** With
+warm pipelining, each lane holds ~2 tunnels and CONNECTs twice as often as the
+serial pattern, so a 5-lane pipelined job pressures the gateway like the old
+~10-lane one (the 2026-10-12 table: 46% answered there). If a job's summary
+shows high `cold` counts or many retried, drop `CONCURRENCY` to 3 in `.env` —
+pipelined 3 lanes ≈ old 5-lane pressure with a shorter cycle. Measured on the
+gateway 2026-10-17: cold click 1.45-6.91s; the real fix for volume stays
+**more proxy IPs**. `REQUEST_TIMEOUT` default dropped 12→8s (bit.ly median
+2.4s; a dead request no longer pins a lane for 12s). The job summary's
+`cold` counter should read ~`lanes` (each lane's first click) when warm is
+healthy; a much larger number means the gateway is refusing warms.
 
 ### A failed request isn't a click
 
@@ -2470,7 +2485,7 @@ A stopped job **returns** rather than raising, so it renders as a normal ✅
 
 ---
 
-# 7. khelstake exchange bet bot (`exchange.py`)
+# 7. Exchange bet bot (`exchange.py`) — khelstake24, starexch555
 
 Standalone Telegram bot for khelstake24.com: places the same Back/Lay
 Match Odds bet on every operator ID at once, cancels unmatched bets,
@@ -2602,3 +2617,66 @@ errors).
 Every handler wraps its fetches; `get_market_book()` retries transport
 errors 3× before surfacing. The old half-built code let executor
 exceptions propagate out of handlers, which kills the conversation silently.
+
+### starexch555 is the SAME exchange white-label — an env file, not a fork
+
+Added 2026-10-21. starexch555.com runs the identical exchange platform as
+khelstake24, so there is **no per-site code in `exchange.py` at all** —
+a second site is a second env file and a second process, like every other
+bot here.
+
+Verified live 2026-10-21 against starexch555, read-only (no bet placed):
+- **Every route matches**: `/exchange/cricket-exchange` (200, 20 series),
+  `/ex/competition/{id}`, `/ex/event-details/{id}` (200 **anonymously**,
+  30 `data-runnerId` cells, the page-level encrypted `limit` blob, 400
+  chars). `/api2/v2/placeBet`, `/unmatchedbetdetails` and
+  `/api2/v2/cancelbet?desktop=1` are all in its own inline JS, with the
+  same `statusCode == 200` convention on cancel.
+- **The betslip template is field-for-field the same** (`teams`,
+  `market_name`, `runnerName`, `eventId`, `odds`, `runnerId`, `eventType`,
+  `market_type`, `ltp`, `stake`, `matched`, `expo`, `limit`), read out of
+  its own `$(form).serialize()` handler.
+- **`parse_competitions()` / `parse_match_list()` / `parse_match_page()`
+  all ran on real starexch HTML unchanged** — 20 series, 25 matches, Match
+  Odds market `1.264137365` with both runners.
+- **Same odds provider**, `odds4.starlingpay.co.uk`, read off starexch's
+  own page. Live book came back `OPEN`, liquidity ₹666k, real back/lay
+  prices with the usual encrypted `ltp` blobs.
+- **Same rules in its own JS**: `stake < 2000`, `stake > 5000000`,
+  `odds > 5`, `odds < 1.01`. So the khelstake defaults carry over.
+- A real account (`KrishnaChandran5457`) logged in over plain HTTP,
+  read **balance and exposure**, and listed its (empty) unmatched panel.
+  starexch's `getBalance` has no `wallet` key — the `totalBalance`/
+  `balance` fallback already in `refresh_balance()` is what covers it,
+  the same reason `http_check_account_balance()` needs it.
+
+What changed in the code, all site-agnostic:
+- `EXCHANGE_SITE_NAME` (shown in `/start`, defaults to the hostname),
+  `EXCHANGE_ODDS_HOST`, `EXCHANGE_MIN_ODDS`/`EXCHANGE_MAX_ODDS` are env
+  now. `EXCHANGE_SITE_URL` and `EXCHANGE_MIN_STAKE` already were.
+- `load_accounts_from_sheet()` names the tabs that DO exist when
+  `EXCHANGE_WORKSHEET_NAME` is missing — a new instance fails there first,
+  and gspread's bare error is just the title.
+- `probe_exchange.py` takes `--url/--user/--pass/--event`, so the same
+  read-only probe verifies any site on this template. Stale event ids 404
+  once a match ends; pass a current one.
+
+**Give the instance its own accounts tab.** The bot writes each ID's
+balance into **column C**, and the starexch workbook's `BAL UPDATE` tab is
+already written by `balance_checker.py` — sharing it would have the two
+processes overwrite each other. `.env.starexch.exchange.example` points at
+a separate `EXCHANGE IDS` tab (USERNAME | PASSWORD | BALANCE), which has to
+be created by hand. Its `ADMINS_FILE` is `admins.exchange.starexch.json`,
+distinct from the khelstake instance's for the same reason as everywhere
+else here.
+
+```
+cp .env.starexch.exchange.example .env.starexch.exchange   # add the token
+.venv/bin/python exchange.py --env .env.starexch.exchange
+```
+
+⚠️ **No bet has been placed on starexch yet**, for the same reason as
+khelstake: the available probe account holds ₹765, below the site's own
+₹2000 minimum. Fund one ID ≥ ₹2000 and run the confirm screen's
+**🧪 Test 1 ID** (unmatched BACK @1.01, cancelled immediately — no
+exposure) before any multi-ID bet.
