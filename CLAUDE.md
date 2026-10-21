@@ -2661,6 +2661,11 @@ What changed in the code, all site-agnostic:
   read-only probe verifies any site on this template. Stale event ids 404
   once a match ends; pass a current one.
 
+The accounts tab can be named by **gid** (`EXCHANGE_WORKSHEET_GID`, what a
+sheet URL carries — it survives a rename and wins over
+`EXCHANGE_WORKSHEET_NAME`) or by title. The starexch instance uses the
+shared workbook's `EXCHANGE` tab, gid **1162463240**.
+
 **Give the instance its own accounts tab.** The bot writes each ID's
 balance into **column C**, and the starexch workbook's `BAL UPDATE` tab is
 already written by `balance_checker.py` — sharing it would have the two

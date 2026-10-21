@@ -142,6 +142,10 @@ SITE_NAME = os.environ.get("EXCHANGE_SITE_NAME", "") or (
     urlsplit(SITE_URL).netloc.replace("www.", "").split(".")[0] or "exchange")
 SPREADSHEET_ID = os.environ.get("EXCHANGE_SHEET_ID", "")
 WORKSHEET_NAME = os.environ.get("EXCHANGE_WORKSHEET_NAME", "")
+# A tab can be named either way: the gid is what a sheet URL carries
+# (…/edit?gid=1162463240), so it survives a tab rename. It wins over the
+# name when both are set.
+WORKSHEET_GID = os.environ.get("EXCHANGE_WORKSHEET_GID", "").strip()
 CREDENTIALS_FILE = os.environ.get("SHEET_CREDENTIALS_FILE", "service_account.json")
 MASTER_ADMIN_IDS = set(
     os.environ.get("MASTER_ADMIN_ID", "").replace(",", " ").split())
@@ -437,7 +441,15 @@ def load_accounts_from_sheet() -> list[AccountSession]:
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     book = client.open_by_key(SPREADSHEET_ID)
-    if WORKSHEET_NAME:
+    if WORKSHEET_GID:
+        try:
+            _sheet = book.get_worksheet_by_id(int(WORKSHEET_GID))
+        except (ValueError, gspread.WorksheetNotFound):
+            have = ", ".join(f"{w.title} (gid {w.id})" for w in book.worksheets())
+            raise RuntimeError(
+                f"no tab with gid {WORKSHEET_GID} in that spreadsheet. "
+                f"Tabs it has: {have}. Fix EXCHANGE_WORKSHEET_GID.") from None
+    elif WORKSHEET_NAME:
         try:
             _sheet = book.worksheet(WORKSHEET_NAME)
         except gspread.WorksheetNotFound:
