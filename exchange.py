@@ -51,8 +51,13 @@ exact request shapes):
 Site rules enforced client-side here because the server reuses one generic
 refusal message ("Sorry the bet cannot be accepted by our risk management
 team") for both violations -- read from the site's own JS 2026-10-09:
-  * stake >= 2000 (env EXCHANGE_MIN_STAKE) -- the SERVER enforces this too,
-    verbatim "Min Stake is 2000" (probed live 2026-10-10).
+  * stake >= EXCHANGE_MIN_STAKE, a client-side convenience only. khelstake's
+    betslip JS says 2000 and the server has answered "Min Stake is 2000"
+    (probed live 2026-10-10) -- but smaller stakes ARE accepted in practice
+    (operator, 2026-10-22), so the 2000 is not the gate it looks like.
+    **Set it to 0 to disable the check and let the server decide**, which is
+    the authority regardless: it names its own figure when it refuses.
+    starexch runs with 0 for exactly this reason.
   * Match Odds: 1.01 <= odds <= 5.0
   * profit field = stake * (odds - 1), 2dp, for Back AND Lay (on Lay it is
     the liability -- the site labels it that way but sends the same formula).
@@ -774,7 +779,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏏 *Exchange Bet Bot — {SITE_NAME}*\n\n"
         f"Accounts: {len(accounts)} loaded, {n_ok} ready{flag_line}\n"
         f"Proxies: {len(_proxies)}\n"
-        f"Min stake: ₹{MIN_STAKE}\n\n"
+        + (f"Min stake: ₹{MIN_STAKE}\n\n" if MIN_STAKE
+           else "Min stake: set by the site\n\n")
+        +
         "*Commands:*\n"
         "/event — Series → match → Back/Lay → odds+amount → place on all IDs\n"
         "🧪 on the confirm screen places one unmatched test bet and cancels it\n"
@@ -1102,8 +1109,11 @@ async def _on_side_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{_sport_emoji(chat_id)} *{side.upper()} {html_unescape(team)}*\n"
         f"Current best: @{cur_s}\n\n"
         f"Enter odds and stake:\n"
-        f"Example: `1.55 2000`\n"
-        f"(stake min ₹{MIN_STAKE}; odds {MIN_ODDS}–{MAX_ODDS})\n\n"
+        f"Example: `1.55 500`\n"
+        + (f"(stake min ₹{MIN_STAKE}; odds {MIN_ODDS}–{MAX_ODDS})\n\n"
+           if MIN_STAKE else
+           f"(odds {MIN_ODDS}–{MAX_ODDS}; the site decides the min stake)\n\n")
+        +
         f"Or /cancel to abort.",
         parse_mode="Markdown")
     return ST_ENTER_BET
@@ -1136,7 +1146,12 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ Odds must be {MIN_ODDS}–{MAX_ODDS} for Match Odds "
             f"(site risk-management rule).")
         return ST_ENTER_BET
-    if stake < MIN_STAKE:
+    # EXCHANGE_MIN_STAKE=0 turns this off and lets the SERVER decide, which
+    # is the authority anyway: it answers "Min Stake is N" when it refuses.
+    # The 2000 read out of the betslip JS is not the gate it looked like --
+    # smaller stakes are accepted in practice, and a client-side copy of a
+    # rule we cannot see in full only blocks bets the site would have taken.
+    if MIN_STAKE and stake < MIN_STAKE:
         await update.message.reply_text(
             f"❌ Stake amount should be minimum {MIN_STAKE} (site rule).")
         return ST_ENTER_BET
@@ -1165,8 +1180,8 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"❌ None of your {len(known)} IDs can cover ₹{stake:,.0f}.\n"
             f"They hold {held} each, and the site will refuse every bet "
             f"with \"Insufficient funds\".\n\n"
-            f"The site's own minimum is ₹{MIN_STAKE:,}, so an ID needs at "
-            f"least that much to bet at all. Top them up, then /refresh.")
+            f"Try a stake at or under ₹{poorest:,.0f}, or top the IDs up "
+            f"and /refresh.")
         return ST_ENTER_BET
     short_line = (f"\n⚠️ {len(short)} of {len(known)} IDs hold less than "
                   f"₹{stake:,.0f} and will be refused."

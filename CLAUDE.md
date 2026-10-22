@@ -2680,6 +2680,16 @@ cp .env.starexch.exchange.example .env.starexch.exchange   # add the token
 .venv/bin/python exchange.py --env .env.starexch.exchange
 ```
 
+**The ₹2000 minimum is not the gate it looks like.** Both sites' betslip JS
+refuses `stake < 2000`, and khelstake's server has answered "Min Stake is
+2000" — but smaller stakes are accepted in practice (operator, 2026-10-22),
+so the client-side copy was blocking bets the site would have taken.
+`EXCHANGE_MIN_STAKE=0` disables the check and lets the server decide, which
+is the authority regardless: it names its own figure when it refuses one.
+starexch runs with `0`. The separate affordability check stays — it only
+refuses when **no** ID can cover the stake, which is real insufficient
+funds, and it names a stake that would fit.
+
 ⚠️ **No bet has been placed on starexch yet**, for the same reason as
 khelstake: the available probe account holds ₹765, below the site's own
 ₹2000 minimum. Fund one ID ≥ ₹2000 and run the confirm screen's
