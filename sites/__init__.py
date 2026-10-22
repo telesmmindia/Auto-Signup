@@ -5,13 +5,13 @@ from urllib.parse import urlsplit
 
 from .base import SiteProfile
 from . import (cricmatch, spin24star, khelofun, starexch, winclash,
-               khelstake, funcrash)
+               khelstake, funcrash, playcric365)
 
 # Register each site here. To add one: create sites/<site>.py with a PROFILE and
 # append it below.
 PROFILES = [cricmatch.PROFILE, spin24star.PROFILE, khelofun.PROFILE,
             starexch.PROFILE, winclash.PROFILE, khelstake.PROFILE,
-            funcrash.PROFILE]
+            funcrash.PROFILE, playcric365.PROFILE]
 
 # Used when a URL matches nothing (None, about:blank before navigation, a WAF
 # challenge host, etc.) so no engine call site can crash on selector lookup.
