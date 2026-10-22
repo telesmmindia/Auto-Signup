@@ -1182,13 +1182,21 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else f"₹{poorest:,.0f}–₹{richest:,.0f}")
         # Name the stake that fits, which on a lay is bigger than the risk.
         fits = poorest if state.get("side") == "back" else poorest / (odds - 1)
+        # A balance near zero usually means the money is TIED UP in bets
+        # already placed, not spent -- say so, or this reads as "the IDs are
+        # empty" when in fact they are fully committed to a live market.
+        tied = sum(a.exposure or 0 for a in known)
+        tied_line = (f"\n\n💡 ₹{tied:,.0f} across these IDs is held as "
+                     f"exposure on bets already placed — that is not lost, "
+                     f"it frees up when those bets settle. /refresh to "
+                     f"re-check." if tied else "")
         await update.message.reply_text(
             f"❌ This bet risks ₹{risk:,.0f} per ID{risk_note}, and none of "
             f"your {len(known)} IDs can cover it.\n"
-            f"They hold {held} each, so the site would refuse every one "
-            f"with \"Insufficient funds\".\n\n"
+            f"They have {held} free each, so the site would refuse every "
+            f"one with \"Insufficient funds\".\n\n"
             f"Try a stake at or under ₹{fits:,.0f}, or top the IDs up "
-            f"and /refresh.")
+            f"and /refresh.{tied_line}")
         return ST_ENTER_BET
     short_line = (f"\n⚠️ {len(short)} of {len(known)} IDs hold less than the "
                   f"₹{risk:,.0f} this risks{risk_note} and will be refused."
