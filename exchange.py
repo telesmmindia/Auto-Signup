@@ -1213,8 +1213,9 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + ("" if state.get("side") == "back"
            else f"  |  Total risk: *₹{risk * len(active):,.0f}*")
         + f"{short_line}\n\n"
-        f"🧪 Test places an unmatched BACK @1.01 on the first ID only,\n"
-        f"then cancels it — proves place→list→cancel with no exposure.",
+        f"🧪 Test places an unmatched BACK @1.01 on the first ID only\n"
+        f"(stake capped to what that ID holds), then cancels it —\n"
+        f"proves place→list→cancel with no exposure.",
         reply_markup=InlineKeyboardMarkup(buttons),
         parse_mode="Markdown")
     return ST_ENTER_BET
@@ -1350,9 +1351,27 @@ async def _run_test_bet(query, acc: AccountSession, state: dict, book: dict):
     then cancel only the bet that appeared. Proves the full
     place -> unmatched-list -> cancel round trip with no real exposure
     (a match would require a lay priced <= 1.01, i.e. a closed market)."""
+    # The test is a BACK, which risks its full stake -- unlike the LAY the
+    # operator may have just sized, where the stake is several times the
+    # liability. Reusing a lay-sized stake here asks the ID to cover money
+    # it never had to, and the server rightly answers "Insufficient funds",
+    # which reads as the bot failing rather than the probe being missized.
+    # The probe only has to prove place -> list -> cancel, so it is capped
+    # at what the ID can actually cover.
     stake = state.get("stake")
+    capped = False
+    if acc.balance is not None and acc.balance < stake:
+        stake = float(int(acc.balance))      # whole rupees, within balance
+        capped = True
+    if stake < 1:
+        await query.edit_message_text(
+            f"❌ `{acc.username}` holds ₹{acc.balance or 0:,.2f} — too little "
+            f"to place even a test bet.".replace("`", ""))
+        return
     await query.edit_message_text(
-        f"🧪 Test: BACK @1.01 ₹{stake:,.0f} on `{acc.username}`…".replace("`", ""))
+        (f"🧪 Test: BACK @1.01 ₹{stake:,.0f} on {acc.username}…"
+         + (f"\n(capped from ₹{state.get('stake'):,.0f} to what this ID holds — "
+            f"a back risks its whole stake)" if capped else "")))
 
     try:
         before = set(acc.get_unmatched_ids())
