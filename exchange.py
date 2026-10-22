@@ -1171,36 +1171,31 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # against the stake refused a bet the site would have taken.
     # A balance we could not read is not counted as short -- unknown is not
     # the same as too low.
+    # This WARNS, it never blocks. A free balance smaller than the risk does
+    # NOT mean the site will refuse: on an exchange a further bet on a market
+    # the ID is already in can be netted against the exposure it already
+    # holds (lay A then back A offsets), so it may cost little or nothing
+    # extra. Only the server knows that netting, the same reason
+    # EXCHANGE_MIN_STAKE defers to it -- blocking here refused bets the site
+    # would have taken, which is exactly what khelstake's bot (no check at
+    # all) places happily. A balance we could not read is not counted short.
     risk = stake if state.get("side") == "back" else stake * (odds - 1)
     risk_note = ("" if state.get("side") == "back"
                  else f" (liability on a lay @{odds:g})")
     known = [a for a in active if a.balance is not None]
     short = [a for a in known if a.balance < risk]
-    if known and len(short) == len(known):
-        poorest, richest = min(a.balance for a in known), max(a.balance for a in known)
-        held = (f"₹{poorest:,.0f}" if poorest == richest
-                else f"₹{poorest:,.0f}–₹{richest:,.0f}")
-        # Name the stake that fits, which on a lay is bigger than the risk.
-        fits = poorest if state.get("side") == "back" else poorest / (odds - 1)
-        # A balance near zero usually means the money is TIED UP in bets
-        # already placed, not spent -- say so, or this reads as "the IDs are
-        # empty" when in fact they are fully committed to a live market.
-        tied = sum(a.exposure or 0 for a in known)
-        tied_line = (f"\n\n💡 ₹{tied:,.0f} across these IDs is held as "
-                     f"exposure on bets already placed — that is not lost, "
-                     f"it frees up when those bets settle. /refresh to "
-                     f"re-check." if tied else "")
-        await update.message.reply_text(
-            f"❌ This bet risks ₹{risk:,.0f} per ID{risk_note}, and none of "
-            f"your {len(known)} IDs can cover it.\n"
-            f"They have {held} free each, so the site would refuse every "
-            f"one with \"Insufficient funds\".\n\n"
-            f"Try a stake at or under ₹{fits:,.0f}, or top the IDs up "
-            f"and /refresh.{tied_line}")
-        return ST_ENTER_BET
-    short_line = (f"\n⚠️ {len(short)} of {len(known)} IDs hold less than the "
-                  f"₹{risk:,.0f} this risks{risk_note} and will be refused."
-                  if short else "")
+    tied = sum(a.exposure or 0 for a in known)
+    if short:
+        warn = (f"\n\n⚠️ {len(short)} of {len(known)} IDs have less free than "
+                f"the ₹{risk:,.0f} this risks{risk_note}.")
+        if tied:
+            warn += (f" ₹{tied:,.0f} is held as exposure on bets already "
+                     f"placed — a further bet on the same market may still "
+                     f"go through, since the site nets it off.")
+        warn += " Place and the site decides."
+    else:
+        warn = ""
+    short_line = warn
 
     buttons = [
         [InlineKeyboardButton(f"✅ Place on {len(active)} IDs",

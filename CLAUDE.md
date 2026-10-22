@@ -2686,9 +2686,19 @@ refuses `stake < 2000`, and khelstake's server has answered "Min Stake is
 so the client-side copy was blocking bets the site would have taken.
 `EXCHANGE_MIN_STAKE=0` disables the check and lets the server decide, which
 is the authority regardless: it names its own figure when it refuses one.
-starexch runs with `0`. The separate affordability check stays — it only
-refuses when **no** ID can cover the stake, which is real insufficient
-funds, and it names a stake that would fit.
+starexch runs with `0`. The affordability check **warns and never blocks** (2026-10-22). A free
+balance smaller than the bet's risk does NOT mean the site will refuse:
+on an exchange a further bet on a market the ID is already in is netted
+against the exposure it already holds, so it can cost little or nothing
+extra. Only the server knows that netting — blocking on the balance
+refused bets the site would have taken, which khelstake's bot (no check
+at all) places happily. The warning names how many IDs are short, how
+much is held as exposure, and that the site decides.
+
+Two things the check still gets right and should keep: the risk of a
+**lay is its liability** `stake*(odds-1)`, not its stake (a 2000 lay @1.4
+risks 800), and the 🧪 test bet is a **back**, so it is capped at the
+ID's balance rather than reusing a lay-sized stake.
 
 ⚠️ **No bet has been placed on starexch yet**, for the same reason as
 khelstake: the available probe account holds ₹765, below the site's own
