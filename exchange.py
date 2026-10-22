@@ -1163,28 +1163,35 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     team = html_unescape(state.get("runner_name", "?"))
     side = state.get("side", "?").upper()
 
-    # Check what the IDs can actually afford BEFORE offering to place.
-    # Every gate here is the server's (see the module docstring), and the
-    # balance one fires per account: without this the confirm screen
-    # happily offers "place on 22 IDs" and then every one of them comes
-    # back "Insufficient funds", which reads as a broken bot rather than
-    # an underfunded one. A balance we could not read is not counted as
-    # short -- unknown is not the same as too low.
+    # What an ID must actually hold is its EXPOSURE, not the stake, and the
+    # two differ on a Lay: backing risks the stake, laying risks the
+    # liability stake*(odds-1) -- the same formula the site puts in the
+    # bet's "profit" field (see place_bet_on_account). A LAY 2000 @1.4
+    # therefore risks 800, which a 1010 balance covers easily; comparing it
+    # against the stake refused a bet the site would have taken.
+    # A balance we could not read is not counted as short -- unknown is not
+    # the same as too low.
+    risk = stake if state.get("side") == "back" else stake * (odds - 1)
+    risk_note = ("" if state.get("side") == "back"
+                 else f" (liability on a lay @{odds:g})")
     known = [a for a in active if a.balance is not None]
-    short = [a for a in known if a.balance < stake]
+    short = [a for a in known if a.balance < risk]
     if known and len(short) == len(known):
         poorest, richest = min(a.balance for a in known), max(a.balance for a in known)
         held = (f"₹{poorest:,.0f}" if poorest == richest
                 else f"₹{poorest:,.0f}–₹{richest:,.0f}")
+        # Name the stake that fits, which on a lay is bigger than the risk.
+        fits = poorest if state.get("side") == "back" else poorest / (odds - 1)
         await update.message.reply_text(
-            f"❌ None of your {len(known)} IDs can cover ₹{stake:,.0f}.\n"
-            f"They hold {held} each, and the site will refuse every bet "
+            f"❌ This bet risks ₹{risk:,.0f} per ID{risk_note}, and none of "
+            f"your {len(known)} IDs can cover it.\n"
+            f"They hold {held} each, so the site would refuse every one "
             f"with \"Insufficient funds\".\n\n"
-            f"Try a stake at or under ₹{poorest:,.0f}, or top the IDs up "
+            f"Try a stake at or under ₹{fits:,.0f}, or top the IDs up "
             f"and /refresh.")
         return ST_ENTER_BET
-    short_line = (f"\n⚠️ {len(short)} of {len(known)} IDs hold less than "
-                  f"₹{stake:,.0f} and will be refused."
+    short_line = (f"\n⚠️ {len(short)} of {len(known)} IDs hold less than the "
+                  f"₹{risk:,.0f} this risks{risk_note} and will be refused."
                   if short else "")
 
     buttons = [
@@ -1198,8 +1205,14 @@ async def _on_bet_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{_sport_emoji(chat_id)} *Confirm bet:*\n\n"
         f"*{side}* {team}\n"
         f"Odds: *{odds:g}*  |  Stake: *₹{stake:,.0f}* each\n"
-        f"Accounts: *{len(active)}*\n"
-        f"Total stake: *₹{stake * len(active):,.0f}*{short_line}\n\n"
+        # On a lay the stake is not what is at risk, so say both.
+        + ("" if state.get("side") == "back"
+           else f"Liability: *₹{risk:,.0f}* each (what it risks)\n")
+        + f"Accounts: *{len(active)}*\n"
+        f"Total stake: *₹{stake * len(active):,.0f}*"
+        + ("" if state.get("side") == "back"
+           else f"  |  Total risk: *₹{risk * len(active):,.0f}*")
+        + f"{short_line}\n\n"
         f"🧪 Test places an unmatched BACK @1.01 on the first ID only,\n"
         f"then cancels it — proves place→list→cancel with no exposure.",
         reply_markup=InlineKeyboardMarkup(buttons),
