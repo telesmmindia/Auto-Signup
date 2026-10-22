@@ -1451,22 +1451,46 @@ Differences, all confirmed live:
   `_open_via_provider_lobby()` **polls** for the button.
 - `read_game_balance()` and `_read_total_bet()` work unchanged.
 
-**Cash-out is OFF (`needs_cashout = False`) and should stay off.** Four real
-₹10/side rounds netted ~zero across the pair (3749→3748→3748→3749): both sides
-hold equal opposite positions, so settling is already a complete hedge. Not
-cashing out is also *cheaper* (the 1% fee is charged on cash-out) and removes all
-timing risk. An un-cashed position settles normally, it isn't forfeited.
+**Cash-out is ON (`needs_cashout = True`), and that is deliberate.** ⚠️ This
+paragraph said the opposite until 2026-10-22, and the stale version cost real
+confusion — it was written on 2026-07-20/21 while cash-out was off, was never
+updated when the fix landed hours later on 2026-07-21 (`bf4b9a7`), and then
+survived the 2026-08-11 condensing pass unchanged. **Read the comment on
+`STOCKMARKET.needs_cashout` in `sites/games.py` as the authority**, not this
+file, if the two ever disagree again.
 
-The cash-out code is retained and structurally correct but **its click doesn't
-reliably register**. It was flipped back to `True` once on the strength of a real
-fix (`_cashout_ready()` no longer gates on the CASH OUT label's CSS opacity, which
-doesn't track enablement) and **re-broke** on a real ₹100/side run. So the opacity
-gate was *a* cause, not *the* cause, and it isn't root-caused. Don't flip it back
-without a fresh live-verified fix. If it ever is re-enabled: cash out as **early**
-as possible and fire both clicks concurrently; a side that doesn't close is
-retried once, then `cashout_partial` names the exposed account; a
-`cashout_tolerance` (5%) divergence guard stops with `cashout_divergence` — it
-**detects** after the fact, it can't prevent. Note `read_portfolio()` is the
+Why it is on: the client for this deployment **requires** cash-out, and the
+failure WAS root-caused on 2026-07-21 with click-level diagnostics
+(`cashout_click_diag` in `main.py`), added specifically to see *why* a click
+failed rather than only *that* it did. Two independent bugs, both fixed:
+1. The round loop treated a position as cashable the moment betting closed,
+   while the portfolio still read exactly the staked amount (not yet moving
+   server-side). The click found the button and fired with no exception and
+   never registered. Each side's portfolio must now visibly diverge from its
+   first-seen value before any click is attempted.
+2. One or two clicks were never enough — the isolated probe needed clicks
+   roughly every 1.5s over up to ~75s before one landed, and the loop only
+   tried twice. Now a persistent retry (`CASHOUT_CLICK_WINDOW_SECS=30`,
+   ~1.5s cadence), each side stopping once ITS OWN portfolio confirms closed.
+
+Verified end to end live 2026-07-21 (pair #1, ali789/asha788, ₹10/side, one
+round): both sides cashed out after 9 attempts (~24s), 1490→1484 and
+2198→2204, net ~zero across the pair with the 1% fee reflected. **Only one
+round has ever been tested**, which is exactly the situation that looked fixed
+twice before and re-broke — treat it as promising, not bulletproof.
+
+The case for turning it off, if the client requirement ever lapses: four real
+₹10/side rounds settled naturally netted ~zero across the pair
+(3749→3748→3748→3749), because both sides hold equal opposite positions, so
+settling is already a complete hedge — and not cashing out is *cheaper* (the
+1% fee is charged on cash-out) and removes all timing risk. An un-cashed
+position settles normally; it is not forfeited.
+
+Operational notes while it is on: cash out as **early** as possible and fire
+both clicks concurrently; a side that doesn't close is retried once, then
+`cashout_partial` names the exposed account; a `cashout_tolerance` (5%)
+divergence guard stops with `cashout_divergence` — it **detects** after the
+fact, it can't prevent. Note `read_portfolio()` is the
 "is there a position" signal, **not** the button state — the button reports
 `disabled=false`/`opacity=1` with nothing staked, and its text is
 `"PORTFOLIO\n1% FEE\n₹0.00"`, hence parsing the **last** number.
