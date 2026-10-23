@@ -90,9 +90,36 @@ PROFILE = SiteProfile(
     # fact for whoever needs them, not as the active route.
     casino_game_ids={"Baccarat A": 85, "Baccarat B": 86},
 
-    # All False: never probed on this site. See the module docstring.
+    # VERIFIED LIVE 2026-10-23 on a real account, and this flag is
+    # LOAD-BEARING -- it is not just a speed option.
+    #
+    # login() can only confirm a session is genuinely authenticated when a
+    # profile offers an auth endpoint (main.py: can_verify_auth =
+    # supports_http_login or verify_auth_in_page). Without one it falls back
+    # to the header indicator, #acctSec -- and on this site #acctSec is
+    # VISIBLE WHILE LOGGED OUT (measured: 1 visible before login, 1 after),
+    # exactly the false positive CLAUDE.md warns about for this white-label
+    # family. The engine could therefore believe it was logged in, walk to
+    # the live-casino lobby, be served the GUEST lobby (which lists no live
+    # tables), fail to find the tile, and then -- because a LOGIN button is
+    # on screen -- report "the site dropped your login session ... an
+    # account-level restriction". That message blamed the account for what
+    # was really an unverified login. Turning this on makes login() poll the
+    # balance endpoint for up to 30s and only return ok on a real session.
+    #
+    # Measured on playcric365 with an in-page fetch:
+    #   logged out -> POST /api2/v2/getBalance  401 {"message":"Unauthenticated."}
+    #   logged in  -> POST /api2/v2/getBalance  200 {"status":200,"balance":{...}}
+    # so it cleanly separates the two states. The figure lives in
+    # balance.balance / balance.main_balance (no balance.wallet key here,
+    # same as starexch -- http_check_account_balance()'s totalBalance/balance
+    # fallback is what reads it).
+    supports_http_login=True,
+    http_login_path="/login",
+    http_balance_path="/api2/v2/getBalance",
+
+    # Still never probed on this site. See the module docstring.
     supports_http_fast=False,
-    supports_http_login=False,
     supports_change_password=False,
     supports_free_number=False,
 
