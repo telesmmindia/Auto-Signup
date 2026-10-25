@@ -70,12 +70,21 @@ class GameProfile:
     instruction_open: tuple = ()
 
     # Whether the table exposes a clickable chip rail
-    # ([data-role="chip"][data-value=...]). When True the engine selects the
-    # chip matching the requested amount before betting; when False it bets
-    # whatever the table has pre-selected and relies on the amount_mismatch
-    # check to catch a wrong size. Baccarat's rail was never identified (its
-    # data-role="chip" nodes were hidden 0-value templates), so it stays False
-    # there and that game's behavior is unchanged.
+    # ([data-role="chip"][data-value=...]). When True the engine reads both
+    # sides' rails, plans the stake and SELECTS the chip on each side before
+    # betting; when False it bets whatever the table has pre-selected.
+    #
+    # ⚠️ False is dangerous on any table with a real rail, and it cost real
+    # money on 2026-10-24 (playcric365 run #9): the pre-selected chip is
+    # PER-ACCOUNT UI STATE and the two accounts had different ones, so every
+    # hand landed 500 on the Banker side against 100 on the Player side --
+    # identically, five hands running. That is not a hedge, it is a one-sided
+    # 400 bet each time; the pair went 9,560 -> 8,735, i.e. 825 lost, before
+    # the unhedged-exposure guard stopped it. The engine never asked for 100
+    # anywhere: it clicked once per side and the table supplied the size.
+    #
+    # So this must be True for every game whose rail is real. See BACCARAT
+    # below for why its False was wrong.
     selectable_chips: bool = False
 
     # --- cash-out (stock market only) -----------------------------------
@@ -108,6 +117,29 @@ BACCARAT = GameProfile(
     side_b_label="Player",
     table_ready_role="bet-spot-Banker",
     window_mode="timer",
+    # TRUE since 2026-10-24. It was False on the belief that "baccarat's rail
+    # was never identified -- its data-role=chip nodes were hidden 0-value
+    # templates". That premise was wrong, and CLAUDE.md's tournament section
+    # already said so ("Baccarat's chip rail IS real ... contradicting
+    # sites/games.py's selectable_chips=False"): the rail is only INTERACTIVE
+    # during the betting window, so a probe run between rounds sees display
+    # nodes and concludes it is fake. tournament.py has been selecting chips
+    # on baccarat successfully all along; only run_paired_hedge wasn't.
+    #
+    # Measured live on playcric365's Baccarat A (the same physical table
+    # cricmatch/winclash/funcrash reach, table nx7ecktjzywdqwwt): the real
+    # rail is 100/500/2500/10000/50000/100000, and two different accounts
+    # seated on it reported DIFFERENT pre-selected chips -- one 100, one 500.
+    # That difference is exactly the unhedged 500-vs-100 above.
+    #
+    # Safe to enable: both of the paths this opens abort BEFORE any bet --
+    # amount_mismatch (the rail can't reach the amount) and
+    # chip_select_failed (the chip wouldn't select). Neither can place a
+    # wrong-sized bet; the worst case is a run that refuses to start. The
+    # pre-loop select_chip() call carries a 75s deadline, which spans a full
+    # ~40s baccarat cycle, so it waits for a betting window rather than
+    # failing on the between-rounds display state.
+    selectable_chips=True,
 )
 
 # Evolution Stock Market Live. Roles captured live 2026-07-20 -- SM_Up/SM_Down
