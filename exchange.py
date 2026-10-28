@@ -1,25 +1,33 @@
 #!/usr/bin/env python3
-"""exchange.py -- Multi-ID exchange bet bot (khelstake24, starexch555).
+"""exchange.py -- Multi-ID exchange bet bot.
 
 A standalone Telegram bot (its own EXCHANGE_BOT_TOKEN, NOT a BOT_MODE of
 telegram_bot.py) that places the same Back/Lay Match Odds bet on every
 operator ID at once, cancels unmatched bets, and refreshes balances.
 
-ONE PROCESS PER SITE, picked entirely by env -- there is no per-site code
-here. khelstake24.com and starexch555.com run the SAME exchange
-white-label: verified live 2026-10-21 against starexch555 that every route,
-parser and rule below is byte-compatible (same /exchange/*-exchange and
-/ex/* pages, the same page-level encrypted "limit" blob, the same
-odds4.starlingpay.co.uk provider, the same min stake 2000 / max 5,000,000
-and odds 1.01-5.0 rules read out of its own inline JS). parse_competitions
-/ parse_match_list / parse_match_page were each run against real starexch
-HTML unchanged, and a real account logged in, read its balance + exposure
-and listed its (empty) unmatched panel over plain HTTP. So a third site on
-this template needs an env file, not a fork -- confirm it with
-probe_exchange.py first.
+ONE PROCESS PER SITE, picked by env. Two platforms are supported, and
+**which one is in play is decided by EXCHANGE_SITE_URL's hostname**, in
+exchange_sites.py:
 
-Architecture (every line below confirmed live 2026-10-09 via probe_exchange.py
-against real pages/accounts -- the site's own inline JS was read for the
+  * khelstake24.com / starexch555.com -- the Laravel exchange white-label
+    this bot was written for. These two are byte-compatible with each
+    other (verified live 2026-10-21), so a third site on that template is
+    an env file, not a fork; confirm with probe_exchange.py.
+  * playinmatch99.com -- the "jeetwin" white-label, a genuinely different
+    platform: different routes, no series level, a different odds provider
+    and a different betslip field list. Mapped read-only 2026-10-28;
+    confirm an account with probe_playinmatch.py. See PlayinmatchSite in
+    exchange_sites.py for what is and is not verified live.
+
+Everything site-specific -- login, page routes, parsers, the odds URL, the
+placeBet payload, listing and cancelling unmatched bets -- lives in
+exchange_sites.py. What is left here is the Telegram UI, the accounts
+sheet, the admin list, the proxy pool and the betting rules, none of which
+care which platform is underneath.
+
+Architecture of the LARAVEL platform (khelstake/starexch; playinmatch's is
+in exchange_sites.PlayinmatchSite). Every line below confirmed live
+2026-10-09 via probe_exchange.py against real pages/accounts -- the site's own inline JS was read for the
 exact request shapes):
   * Series/matches are SERVER-RENDERED HTML, not JSON APIs:
       GET /exchange/{cricket,football,tennis}-exchange -> series list
@@ -131,6 +139,7 @@ from telegram.ext import (
 )
 
 import main as engine
+import exchange_sites
 
 # ── Logging ──
 logging.basicConfig(
@@ -164,13 +173,17 @@ MIN_ODDS = float(os.environ.get("EXCHANGE_MIN_ODDS", "1.01"))
 MAX_ODDS = float(os.environ.get("EXCHANGE_MAX_ODDS", "5.0"))
 
 # The odds provider 401s requests without a browser-ish header set; this is
-# the UA the successful probe request carried.
-_ODDS_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
-# Both sites verified so far use this same provider; env'd so a third one
-# that points elsewhere needs no code change.
-ODDS_HOST = os.environ.get(
-    "EXCHANGE_ODDS_HOST", "https://odds4.starlingpay.co.uk").rstrip("/")
+# the UA the successful probe requests carried on both platforms.
+_ODDS_UA = exchange_sites.ODDS_UA
+
+# Which platform this instance is talking to. khelstake24/starexch555 run
+# the Laravel exchange white-label; playinmatch99 runs the jeetwin one,
+# which differs in every route, in the betslip fields and in the odds
+# provider -- exchange_sites.py holds that half. Left unset,
+# EXCHANGE_ODDS_HOST takes the chosen platform's own default.
+SITE = exchange_sites.site_for(
+    SITE_URL, os.environ.get("EXCHANGE_ODDS_HOST", ""))
+ODDS_HOST = SITE.odds_host
 
 
 # ── Proxy pool ──
@@ -257,16 +270,9 @@ class AccountSession:
     def login(self) -> bool:
         self.proxy = next_proxy()
         try:
-            self.session = engine.http_session_for(self.proxy)
-            self.csrf = engine.http_fetch_csrf(self.session, SITE_URL, self.proxy)
-            resp = engine.http_login_call(
-                self.session, self.csrf, self.username, self.password, SITE_URL)
-            if resp.get("status") != 200:
-                # status None = non-JSON/403 at the edge, not an app refusal.
-                if resp.get("status") is None:
-                    self.error = f"edge blocked: {(resp.get('message') or '')[:80]}"
-                else:
-                    self.error = resp.get("message") or f"Login failed: {resp}"
+            ok, err = SITE.login(self)
+            if not ok:
+                self.error = err
                 self.logged_in = False
                 return False
             self.logged_in = True
@@ -282,28 +288,17 @@ class AccountSession:
         if not self.logged_in or not self.session:
             return
         try:
-            resp = engine.http_get_balance(self.session, self.csrf, SITE_URL)
-            if _session_expired(resp) and not _retried:
+            read = SITE.read_balance(self)
+            if read and read.get("_expired") and not _retried:
                 # Otherwise the old figure stays on screen as if current.
                 logger.info("Session expired for %s, logging in again", self.username)
                 if self.login():   # login() refreshes the balance itself
                     return
-            if resp.get("status") == 200:
-                bal = resp.get("balance") or {}
-                wallet = bal.get("wallet")
-                if wallet is None:
-                    raw = bal.get("totalBalance") or bal.get("balance")
-                    try:
-                        wallet = float(str(raw).replace(",", ""))
-                    except (TypeError, ValueError):
-                        wallet = None
-                self.balance = float(wallet) if wallet is not None else None
-                exp = bal.get("exposure")
-                if exp is not None:
-                    try:
-                        self.exposure = float(str(exp).replace(",", ""))
-                    except (TypeError, ValueError):
-                        self.exposure = None
+                read = None
+            if read and not read.get("_expired"):
+                self.balance = read.get("balance")
+                if read.get("exposure") is not None:
+                    self.exposure = read.get("exposure")
         except Exception as exc:
             logger.warning("Balance refresh failed for %s: %s", self.username, exc)
 
@@ -324,8 +319,7 @@ class AccountSession:
         r = self.session.get(url, headers=self._headers(), timeout=45)
         return r.text
 
-    def api_post(self, path: str, data: dict | None = None,
-                 params: dict | None = None) -> dict:
+    def api_post(self, path: str, data=None, params: dict | None = None) -> dict:
         """POST to a JSON API endpoint (auto-attaches the csrf _token).
 
         The site ends a login session after some hours, and every POST then
@@ -340,12 +334,17 @@ class AccountSession:
                 resp = self._api_post_once(path, data, params)
         return resp
 
-    def _api_post_once(self, path: str, data: dict | None,
-                       params: dict | None) -> dict:
+    def _api_post_once(self, path: str, data, params: dict | None) -> dict:
         parts = urlsplit(SITE_URL)
         url = f"{parts.scheme}://{parts.netloc}{path}"
-        payload = dict(data or {})
-        payload["_token"] = self.csrf or ""
+        # A list of (name, value) pairs, not a dict, when a site's own form
+        # sends the same field name twice -- playinmatch's betslip emits
+        # `limit` twice and we reproduce its serialize() exactly.
+        if isinstance(data, (list, tuple)):
+            payload = list(data) + [("_token", self.csrf or "")]
+        else:
+            payload = dict(data or {})
+            payload["_token"] = self.csrf or ""
         headers = self._headers()
         headers["Accept"] = "application/json"
         r = self.session.post(url, data=payload, params=params,
@@ -357,7 +356,8 @@ class AccountSession:
                     "message": f"Non-JSON ({r.status_code}): {r.text[:160]}"}
 
     def get_market_book(self, event_type: str, market_ids: list[str],
-                        referer: str | None = None) -> dict:
+                        referer: str | None = None,
+                        event_id: str = "") -> dict:
         """POST the odds provider for live MarketBooks (<=5 ids per call).
 
         Returns the parsed {"odds": [...]} body. The provider times out
@@ -365,9 +365,7 @@ class AccountSession:
         dead odds fetch otherwise aborts a whole bet conversation. Raises
         on non-JSON after the retries.
         """
-        q = ",".join(market_ids[:5])
-        url = (f"{ODDS_HOST}/api/v1/get/getMarketBook/{event_type}"
-               f"?q={q}&api_mode=1&eventType={event_type}")
+        url = SITE.market_book_url(event_type, market_ids, event_id)
         headers = {
             "Origin": SITE_URL,
             "Referer": referer or SITE_URL,
@@ -403,37 +401,14 @@ class AccountSession:
             f"their server is busy, try again in a minute")
 
     def get_unmatched_ids(self) -> list[str]:
-        """Bet ids of every currently-unmatched bet, via the site's own
-        /unmatchedbetdetails panel (HTML). Extracted the same way the site's
-        cancel_unmatcedbet() JS reads them: the cancel control carries
-        id=<betId>, and rows carry class unmatched_bet_<betId>."""
-        resp = self.api_post("/unmatchedbetdetails", {"bets_name": "unmatched"})
-        if resp.get("_error"):
-            raise RuntimeError(resp.get("message") or "unmatchedbetdetails failed")
-        res = resp.get("res") or ""
-        ids: list[str] = []
-        # Primary: elements wired to the site's cancel handler.
-        for m in re.finditer(r"<\w+[^>]*\bcancel_unmatcedbet\b[^>]*>", res):
-            tag = m.group(0)
-            im = re.search(r'\bid=["\']([^"\']+)["\']', tag)
-            # edit_<id> buttons open the partial-edit UI, never cancel.
-            if im and not im.group(1).startswith("edit_"):
-                ids.append(im.group(1))
-        # Secondary: row classes (same id the JS derives as main_id).
-        ids.extend(re.findall(r"unmatched_bet_(\d+)", res))
-        seen, out = set(), []
-        for i in ids:
-            if i not in seen:
-                seen.add(i)
-                out.append(i)
-        return out
+        """Bet ids of every currently-unmatched bet (per-platform: scraped
+        from an HTML panel on one, plain JSON on the other)."""
+        return SITE.unmatched_ids(self)
 
     def cancel_bet(self, bet_id: str) -> tuple[bool, str]:
-        """Cancel one unmatched bet. Response key is statusCode (not status)."""
-        resp = self.api_post("/api2/v2/cancelbet", {"id": bet_id},
-                             params={"desktop": "1"})
-        ok = resp.get("statusCode") == 200
-        return ok, resp.get("message") or ("cancelled" if ok else str(resp)[:100])
+        """Cancel one unmatched bet."""
+        cancelled, errors = SITE.cancel_bets(self, [bet_id])
+        return (cancelled == 1), (errors[0] if errors else "cancelled")
 
 
 # Global account list
@@ -536,116 +511,20 @@ def login_all_accounts() -> tuple[int, int]:
 #  PARSERS  (pure functions, verified against saved live HTML 2026-10-09)
 # ═══════════════════════════════════════════════════════════════════════
 
-def parse_competitions(html: str) -> list[dict]:
-    """Series list from /exchange/cricket-exchange.
-
-    Named series are CompetitionRow links whose anchor contains a plain
-    <span>Name</span>. The per-section "See All" links carry no span name,
-    so they drop out naturally. Deduped by comp id (a series can appear in
-    more than one section).
-    """
-    out, seen = [], set()
-    for m in re.finditer(
-            r'href="[^"]*/ex/competition/(\d+)"[^>]*>\s*<span>([^<]+)</span>',
-            html):
-        cid, name = m.group(1), html_unescape(m.group(2)).strip()
-        if not name or name.lower() == "see all" or cid in seen:
-            continue
-        seen.add(cid)
-        out.append({"comp_id": cid, "name": name})
-    return out
-
-
-def parse_match_list(html: str) -> list[dict]:
-    """Matches from a cricket page or a /ex/competition/{id} page.
-
-    Team names live in the anchor's team_names_box span; the box's own
-    closing </span> is found by looking for what follows it (the
-    main_event_module div, still inside the anchor) so the inner "vs" span
-    can't cut the name short.
-    """
-    out, seen = [], set()
-    for m in re.finditer(
-            r'<a[^>]*href="[^"]*/ex/event-details/(\d+)"[^>]*>(.*?)</a>',
-            html, re.S):
-        eid, inner = m.group(1), m.group(2)
-        if eid in seen:
-            continue
-        box = re.search(
-            r'team_names_box[^>]*>(.*?)</span>\s*'
-            r'(?:<div class="main_event_module|</a>)',
-            inner, re.S)
-        txt = html_unescape(re.sub(r"<[^>]+>", " ", box.group(1) if box else inner))
-        name = re.sub(r"\s+", " ", txt).strip() or f"Match {eid}"
-        seen.add(eid)
-        out.append({"event_id": eid, "name": name})
-    return out
-
-
-def parse_match_page(html: str) -> dict:
-    """Market structure from /ex/event-details/{eventId}.
-
-    Odds cells are <a class="...betslip_details..." data-runnerId=...>;
-    their data-odd values are placeholders ("1") -- real odds come from the
-    provider. Also pulls the page-level encrypted "limit" blob the site
-    serializes into every placeBet.
-    """
-    lim = re.search(r'name="limit"\s+type="hidden"\s+value="([^"]+)"', html)
-    markets: dict[str, dict] = {}
-    for m in re.finditer(r"<a\b[^>]*data-runnerId=\"[^\"]*\"[^>]*>", html):
-        d = dict(re.findall(r'(data-[a-zA-Z_]+)="([^"]*)"', m.group(0)))
-        rid, mid = d.get("data-runnerId"), d.get("data-market_type")
-        if not rid or not mid:
-            continue
-        mk = markets.setdefault(mid, {
-            "market_id": mid,
-            "market_name": html_unescape(d.get("data-market_name") or ""),
-            "event_id": d.get("data-eventId") or "",
-            "event_type": d.get("data-eventtype") or "4",
-            "teams": html_unescape(d.get("data-teams") or ""),
-            "runners": {},
-        })
-        mk["runners"].setdefault(rid, html_unescape(d.get("data-runner_name") or f"Runner {rid}"))
-    match_odds = next(
-        (mk for mk in markets.values() if mk["market_name"] == "Match Odds"),
-        None)
-    return {
-        "limit": lim.group(1) if lim else "",
-        "match_odds": match_odds,
-        "markets": list(markets.values()),
-    }
+# The page parsers moved into exchange_sites.py alongside the site they
+# belong to (a khelstake series page and a playinmatch highlights page have
+# nothing in common but the job). Re-exported under their old names so
+# probe_exchange.py and the saved-HTML tests keep working unchanged.
+parse_competitions = exchange_sites.parse_competitions
+parse_match_list = exchange_sites.parse_match_list
+parse_match_page = exchange_sites.parse_match_page
+parse_highlight_list = exchange_sites.parse_highlight_list
+parse_event_page = exchange_sites.parse_event_page
 
 
 def parse_odds_response(data: dict) -> dict:
-    """Normalize a getMarketBook body.
-
-    Index 0 of availableToBack/availableToLay is the site's level-0 cell
-    (read from its updateData() JS), so that is what we surface as the
-    best back/lay. runner.ltp and market hash are encrypted blobs the site
-    echoes back into placeBet unchanged.
-    """
-    out: dict[str, dict] = {}
-    for m in (data or {}).get("odds", []):
-        runners = {}
-        for r in m.get("runners", []):
-            ex = r.get("ex") or {}
-            back = (ex.get("availableToBack") or [None])[0] or {}
-            lay = (ex.get("availableToLay") or [None])[0] or {}
-            runners[str(r.get("selectionId"))] = {
-                "back": back.get("price"),
-                "back_size": back.get("size"),
-                "lay": lay.get("price"),
-                "lay_size": lay.get("size"),
-                "ltp": r.get("ltp"),
-                "last": r.get("lastPriceTraded"),
-            }
-        out[str(m.get("marketId"))] = {
-            "status": m.get("status"),
-            "hash": m.get("hash") or "",
-            "liquidity": m.get("liquidity"),
-            "runners": runners,
-        }
-    return out
+    """Normalize a getMarketBook body (shared: both providers are Betfair-shaped)."""
+    return SITE.parse_odds(data)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -657,74 +536,42 @@ def place_bet_on_account(
     event_id: str, event_type: str, market_id: str, market_name: str,
     runner_id: str, runner_name: str, teams: str,
     odds: float, stake: float, side: str,
-    matched: str = "", ltp: str = "", limit: str = "",
+    matched: str = "", ltp: str = "", limit: str = "", liquidity=None,
 ) -> dict:
     """Place a Back or Lay bet on one account.
 
-    Payload mirrors the site's own betslip form serialize() exactly (field
-    list and value sources confirmed from the page's inline JS 2026-10-09):
-    bet_type is availableToBack/availableToLay (the ladder side),
-    betting_type is Back/Lay (the slip label), profit = stake*(odds-1)
-    for both sides (liability on Lay), matched = the market's hash blob,
-    ltp = the runner's ltp blob (page default "na" when absent),
-    expo = 0 (fresh exposure; the site's own default for a new bet).
+    The payload mirrors the site's own betslip form serialize() exactly,
+    and the two platforms' forms differ field for field -- so the body of
+    this lives on the site adapter. `matched` is the market's hash blob and
+    `liquidity` the market's liquidity, both copied straight out of the
+    odds response the way each site's own update handler copies them.
     """
-    bet_type = "availableToBack" if side == "back" else "availableToLay"
-    betting_type = "Back" if side == "back" else "Lay"
-    profit = stake * (odds - 1)
-    data = {
-        "teams": teams,
-        "market_name": market_name or "Match Odds",
-        "runnerName": runner_name,
-        "eventId": event_id,
-        "odds": f"{odds:.2f}",
-        "runnerId": runner_id,
-        "eventType": event_type or "4",
-        "market_type": market_id,
-        "ltp": ltp or "na",
-        "stake": f"{stake:g}",
-        "matched": matched or "",
-        "expo": "0",
-        "limit": limit,
-        "betting_type": betting_type,
-        "profit": f"{profit:.2f}",
-        "bet_type": bet_type,
-    }
-    resp = account.api_post("/api2/v2/placeBet", data)
+    res = SITE.place_bet(
+        account,
+        event_id=event_id, event_type=event_type, market_id=market_id,
+        market_name=market_name, runner_id=runner_id,
+        runner_name=runner_name, teams=teams, odds=odds, stake=stake,
+        side=side, matched=matched, ltp=ltp, limit=limit,
+        liquidity=liquidity)
     # Logged in full: the chat only shows a trimmed message, and the site's
     # generic "Something went wrong" says nothing on its own.
-    logger.info("placeBet %s %s %s @%s x%s -> %s", account.username,
-                betting_type, runner_name, data["odds"], data["stake"],
-                str(resp)[:300])
-    status = resp.get("status")
-    if status == 205:
-        # The site itself redirects to /logout?q=routinecheck for this.
-        account.flagged = True
-        return {"ok": False, "flagged": True,
-                "message": "account placed under routine check (needs review)"}
-    if status == 200:
-        return {"ok": True, "message": resp.get("message") or "Bet placed successfully"}
-    if resp.get("_error"):
-        return {"ok": False, "message": resp.get("message") or "request failed"}
-    return {"ok": False,
-            "message": (resp.get("message") or str(resp)[:100])}
+    logger.info("placeBet %s %s %s @%.2f x%g -> %s", account.username,
+                side.upper(), runner_name, odds, stake, str(res)[:300])
+    return res
 
 
 def cancel_all_on_account(account: AccountSession) -> dict:
-    """Cancel every unmatched bet on one account (site has no cancel-all
-    endpoint -- its own UI cancels one id at a time, we loop)."""
+    """Cancel every unmatched bet on one account.
+
+    Whether that is one request or one per bet is the site's business --
+    khelstake has no cancel-all endpoint and loops, playinmatch takes an
+    id[] array.
+    """
     ids = account.get_unmatched_ids()
     if not ids:
         return {"cancelled": 0, "errors": []}
-    errors = []
-    for bid in ids:
-        try:
-            ok, msg = account.cancel_bet(bid)
-        except Exception as exc:
-            ok, msg = False, str(exc)[:80]
-        if not ok:
-            errors.append(f"{bid}: {msg[:40]}")
-    return {"cancelled": len(ids) - len(errors), "errors": errors}
+    cancelled, errors = SITE.cancel_bets(account, ids)
+    return {"cancelled": cancelled, "errors": errors}
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -733,17 +580,10 @@ def cancel_all_on_account(account: AccountSession) -> dict:
 
 ST_SELECT_SPORT, ST_SELECT_SERIES, ST_SELECT_MATCH, ST_SELECT_SIDE, ST_ENTER_BET = range(5)
 
-# Sports whose exchange pages share cricket's layout (series -> matches ->
-# a "Match Odds" market). Checked live 2026-10-15: football (eventType 1,
-# 3 runners incl. The Draw) and tennis (eventType 2) parse with the same
-# functions, and the site applies the same 1.01-5.0 odds rule and 2000
-# minimum stake to both. Horse racing is laid out differently (no series
-# links at all) and is deliberately left out.
-SPORTS = {
-    "cricket": ("Cricket", "🏏", "/exchange/cricket-exchange"),
-    "football": ("Football", "⚽", "/exchange/football-exchange"),
-    "tennis": ("Tennis", "🎾", "/exchange/tennis-exchange"),
-}
+# Which sports this instance offers, and where each one's listing lives:
+# site business, since the two platforms lay their listings out
+# differently (see exchange_sites.py).
+SPORTS = SITE.sports
 SERIES_PAGE_SIZE = 30
 _user_state: dict[int, dict] = {}
 
@@ -783,7 +623,10 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
            else "Min stake: set by the site\n\n")
         +
         "*Commands:*\n"
-        "/event — Series → match → Back/Lay → odds+amount → place on all IDs\n"
+        + ("/event — Series → match → Back/Lay → odds+amount → place on all IDs\n"
+           if SITE.has_series else
+           "/event — Sport → match → Back/Lay → odds+amount → place on all IDs\n")
+        +
         "🧪 on the confirm screen places one unmatched test bet and cancels it\n"
         "/cancelall — Cancel all unmatched bets (all IDs)\n"
         "/refresh — Refresh balances + exposure\n"
@@ -909,6 +752,46 @@ def _series_keyboard(series: list[dict], page: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(buttons)
 
 
+def _matches_keyboard(matches: list[dict], page: int) -> InlineKeyboardMarkup:
+    """One page of match buttons.
+
+    playinmatch lists every match of a sport on one page with no series to
+    narrow it (650+ football fixtures), so the list is paged the same way
+    the series list is rather than silently truncated.
+    """
+    chunk = matches[page * SERIES_PAGE_SIZE:(page + 1) * SERIES_PAGE_SIZE]
+    buttons = [[InlineKeyboardButton(m["name"][:48],
+                                     callback_data=f"mt:{m['event_id']}")]
+               for m in chunk]
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("◀ Prev", callback_data=f"mt:_page:{page - 1}"))
+    if (page + 1) * SERIES_PAGE_SIZE < len(matches):
+        nav.append(InlineKeyboardButton("Next ▶", callback_data=f"mt:_page:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="mt:_cancel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def _matches_title(chat_id: int, matches: list[dict], page: int) -> str:
+    pages = max(1, -(-len(matches) // SERIES_PAGE_SIZE))
+    more = f" — page {page + 1}/{pages}" if pages > 1 else ""
+    return (f"{_sport_emoji(chat_id)} *Matches* ({len(matches)} found{more})\n"
+            f"Select a match:")
+
+
+async def _show_matches(query, chat_id: int, matches: list[dict], page: int = 0):
+    state = _user_state.setdefault(chat_id, {})
+    state["match_list"] = matches
+    state["matches"] = {m["event_id"]: m["name"] for m in matches}
+    await query.edit_message_text(
+        _matches_title(chat_id, matches, page),
+        reply_markup=_matches_keyboard(matches, page),
+        parse_mode="Markdown")
+    return ST_SELECT_MATCH
+
+
 def _series_title(state: dict, page: int) -> str:
     series = state.get("series") or []
     pages = max(1, -(-len(series) // SERIES_PAGE_SIZE))
@@ -931,11 +814,31 @@ async def _on_sport_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not active:
         await query.edit_message_text("❌ No accounts logged in. /relogin")
         return ConversationHandler.END
+    chat_id = update.effective_chat.id
+    state = _user_state.setdefault(chat_id, {})
+    state["sport"] = key
+
+    # Some platforms have no series level at all -- playinmatch lists its
+    # matches flat, so the series step is skipped rather than faked.
+    if not SITE.has_series:
+        await query.edit_message_text(f"🔍 Loading {label.lower()} matches…")
+        try:
+            matches = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: SITE.list_matches(active[0], key, None))
+        except Exception as exc:
+            await query.edit_message_text(
+                f"❌ Could not load matches: {str(exc)[:120]}")
+            return ConversationHandler.END
+        if not matches:
+            await query.edit_message_text(
+                f"❌ No {label.lower()} matches listed right now.")
+            return ConversationHandler.END
+        return await _show_matches(query, chat_id, matches, 0)
+
     await query.edit_message_text(f"🔍 Loading {label.lower()} series…")
     try:
-        html = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: active[0].get_page(path))
-        series = parse_competitions(html)
+        series = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: SITE.list_series(active[0], key))
     except Exception as exc:
         await query.edit_message_text(f"❌ Could not load series: {str(exc)[:120]}")
         return ConversationHandler.END
@@ -944,8 +847,7 @@ async def _on_sport_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text(f"❌ No series found on the {label.lower()} exchange page.")
         return ConversationHandler.END
 
-    state = _user_state.setdefault(update.effective_chat.id, {})
-    state.update({"sport": key, "series": series})
+    state["series"] = series
     await query.edit_message_text(
         _series_title(state, 0), reply_markup=_series_keyboard(series, 0),
         parse_mode="Markdown")
@@ -970,14 +872,15 @@ async def _on_series_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=_series_keyboard(state.get("series") or [], page),
             parse_mode="Markdown")
         return ST_SELECT_SERIES
-    _user_state.setdefault(chat_id, {})["comp_id"] = data
+    state = _user_state.setdefault(chat_id, {})
+    state["comp_id"] = data
     await query.edit_message_text("🔍 Loading matches…")
 
     active = _logged_in()
+    sport = state.get("sport", "cricket")
     try:
-        html = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: active[0].get_page(f"/ex/competition/{data}"))
-        matches = parse_match_list(html)
+        matches = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: SITE.list_matches(active[0], sport, data))
     except Exception as exc:
         await query.edit_message_text(f"❌ Could not load matches: {str(exc)[:120]}")
         return ConversationHandler.END
@@ -986,17 +889,7 @@ async def _on_series_selected(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text("❌ No matches in this series right now.")
         return ConversationHandler.END
 
-    _user_state[chat_id]["matches"] = {m["event_id"]: m["name"] for m in matches}
-    buttons = [[InlineKeyboardButton(
-        m["name"][:48], callback_data=f"mt:{m['event_id']}")]
-        for m in matches[:40]]
-    buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="mt:_cancel")])
-
-    await query.edit_message_text(
-        f"{_sport_emoji(chat_id)} *Matches* ({len(matches)} found)\nSelect a match:",
-        reply_markup=InlineKeyboardMarkup(buttons),
-        parse_mode="Markdown")
-    return ST_SELECT_MATCH
+    return await _show_matches(query, chat_id, matches, 0)
 
 
 # ── match → Back/Lay sides (live odds) ──
@@ -1010,21 +903,32 @@ async def _on_match_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     chat_id = update.effective_chat.id
     state = _user_state.setdefault(chat_id, {})
+    if data.startswith("_page:"):
+        return await _show_matches(
+            query, chat_id, state.get("match_list") or [],
+            int(data.split(":", 1)[1]))
+
     state["event_id"] = data
     await query.edit_message_text("🔍 Loading match odds…")
 
     active = _logged_in()
     acc = active[0]
+    sport = state.get("sport", "cricket")
+    # The event page's own path, and the eventType its URL needs, are per
+    # platform -- playinmatch's /mobile/eventDetails/<id>?type=<n> serves
+    # no markets at all when the type is wrong.
+    ev_type = getattr(SITE, "SPORT_EVENT_TYPE", {}).get(sport, "4")
+    ev_path = SITE.event_path(data, ev_type)
 
     def _fetch():
-        page = acc.get_page(f"/ex/event-details/{data}")
-        parsed = parse_match_page(page)
+        parsed = SITE.load_event(acc, data, ev_type)
         market = parsed["match_odds"]
         if not market:
             return parsed, None
         book_raw = acc.get_market_book(
             market["event_type"], [market["market_id"]],
-            referer=f"{SITE_URL}/ex/event-details/{data}")
+            referer=f"{SITE_URL}{ev_path}",
+            event_id=market["event_id"] or data)
         return parsed, parse_odds_response(book_raw).get(market["market_id"])
 
     try:
@@ -1035,9 +939,11 @@ async def _on_match_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     market = parsed["match_odds"]
     if not market:
+        seen = ", ".join(m["market_name"] for m in parsed["markets"] if m["market_name"])
         await query.edit_message_text(
             "❌ No Match Odds market on this page.\n"
-            "The match may not have started, or may have ended.")
+            "The match may not have started, or may have ended."
+            + (f"\nMarkets it does have: {seen[:200]}" if seen else ""))
         return ConversationHandler.END
     if book and book.get("status") != "OPEN":
         await query.edit_message_text(
@@ -1051,6 +957,7 @@ async def _on_match_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "market_name": market["market_name"],
         "teams": market["teams"],
         "limit": parsed["limit"],
+        "event_path": ev_path,
         "runners": market["runners"],          # {runner_id: name}
         "book": book or {"runners": {}, "hash": "", "status": None},
     })
@@ -1257,7 +1164,8 @@ async def _on_bet_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = await asyncio.get_running_loop().run_in_executor(
             None, lambda: active[0].get_market_book(
                 state.get("event_type", "4"), [state["market_id"]],
-                referer=f"{SITE_URL}/ex/event-details/{state.get('event_id', '')}"))
+                referer=f"{SITE_URL}{state.get('event_path', '')}",
+                event_id=state.get("event_id", "")))
         fresh = parse_odds_response(raw).get(state["market_id"])
     except Exception as exc:
         fresh = None
@@ -1303,6 +1211,7 @@ async def _on_bet_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 matched=book.get("hash", ""),
                 ltp=rr.get("ltp") or "na",
                 limit=state.get("limit", ""),
+                liquidity=book.get("liquidity"),
             )
         except Exception as exc:
             return {"ok": False, "message": str(exc)[:100]}
@@ -1395,6 +1304,7 @@ async def _run_test_bet(query, acc: AccountSession, state: dict, book: dict):
         matched=book.get("hash", ""),
         ltp=((book.get("runners") or {}).get(str(state.get("runner_id")), {}) or {}).get("ltp") or "na",
         limit=state.get("limit", ""),
+        liquidity=book.get("liquidity"),
     )
 
     lines = [f"🧪 *Test bet on* {acc.username}\n"]

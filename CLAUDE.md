@@ -2729,3 +2729,104 @@ khelstake: the available probe account holds ₹765, below the site's own
 ₹2000 minimum. Fund one ID ≥ ₹2000 and run the confirm screen's
 **🧪 Test 1 ID** (unmatched BACK @1.01, cancelled immediately — no
 exposure) before any multi-ID bet.
+
+### playinmatch99 is a DIFFERENT platform — hence `exchange_sites.py`
+
+Added 2026-10-28. Up to here, "another exchange site" meant another env
+file, because khelstake24 and starexch555 run the same Laravel white-label.
+**playinmatch99.com does not.** It runs the "jeetwin" exchange template
+(its own event pages still load `jeetwin_exchange` assets off the CDN), and
+it differs in every layer the bot touches. So the site-specific half moved
+into `exchange_sites.py` — one class per platform, picked from
+`EXCHANGE_SITE_URL`'s hostname by `site_for()`, the same convention
+`sites/__init__.py` uses for the signup engine. `KhelstakeSite` is the old
+inline code **moved, not rewritten**, and both existing instances were
+regression-checked live against real pages after the move (20 series, 4
+matches, Match Odds with 2 runners, 400-char limit blob — unchanged).
+
+What `exchange.py` keeps: the Telegram UI, the accounts sheet, the admin
+list, the proxy pool, the stake/odds rules. What the adapter owns: login,
+page routes, parsers, the odds URL, the placeBet payload, listing and
+cancelling unmatched bets.
+
+The differences, each read live out of playinmatch's own pages and inline
+JS (read-only — no account was used, none was available):
+
+- **There is no series level.** `/exchange/cricket-exchange`,
+  `/ex/competition/*` and `/ex/event-details/*` all **404**. Matches are
+  listed flat on `/mobile/sports` as
+  `<li id="highlightEvent_<eventId>" class="… event_<eventType>…">` with
+  the name in `<dd id="eventName">` — one page for every sport, the sport
+  being a CSS class. `SiteProfile`-style flag: `has_series = False`, and
+  the `/event` conversation goes sport → match directly. 4 = cricket,
+  1 = soccer, 2 = tennis. Parsed live: 39 cricket, 652 football, 177
+  tennis — which is why the match keyboard is now **paged** like the
+  series one instead of truncating at 40.
+- **Event pages are `/mobile/eventDetails/<id>?type=<eventType>`**, and
+  **the type must be right** — asking for a tennis event with `type=4`
+  returns a page with *no markets at all*, not an error.
+- **The odds provider is a different host AND a different URL shape**:
+  `odds.funoddsin.com/api/v1/get/getMarketBook/<eventId>?q=<marketIds>…`
+  — the **event id** is in the path where khelstake puts the event
+  **type**. Body is the same Betfair shape, so `parse_odds` is shared.
+  Verified live anonymously: 200, `OPEN` book, real prices, the `hash`
+  blob and `liquidity`.
+- **The betslip has its own field list** (read out of the page's own
+  `var html = '<form id="placeBet_">'` template): it carries `exposure`
+  and `vol` and has **no `ltp` and no `profit`**. `vol` is the market's
+  `liquidity`, `matched` is the market `hash` — both copied from the odds
+  response by the site's own submit handler.
+- ⚠️ **The `limit` blob is the one in the SUBMIT handler, not the one in
+  the form template, and they are different blobs.** The template seeds
+  `limit` with one; on submit the page runs
+  `$('#placeBet_').find('input[name=limit]').val("<another blob>")`, and
+  because `find()` matches **both** of the template's two `limit` inputs,
+  it sets both. So the server receives the submit-handler's blob **twice**.
+  Taking the template's blob is the obvious reading and would send a value
+  the site never sends. The duplicate field is reproduced rather than
+  cleaned up — we do not get to decide which copy the server reads — which
+  is why `api_post` now accepts a **list of (name, value) pairs**.
+- **`bet_type`/`betting_type` follow khelstake's convention after all**
+  (`availableToBack`/`availableToLay` vs `Back`/`Lay`). The static markup's
+  `data-bet_type="1"` and `data-odd="1"` are placeholders the odds-refresh
+  handler rewrites, so neither is read.
+- **Login is `POST /api2/v2/login` with `email`/`password`/`digits`**, not
+  the Laravel `/login` form. `digits` is a four-digit number the page
+  generates **client-side** in `authenticate()` and compares to itself, so
+  it cannot be a server-side secret; we send a random one, as the page does.
+- **Unmatched bets are JSON**, not scraped HTML:
+  `POST /api2/v2/getBetsHistory` → `data[]` with `id`, `teams`,
+  `market_name`, `sizeMatched`, `sizeRemaining`; unmatched means
+  `sizeRemaining > 0` (the same test the site's own `getOpenBets()` uses).
+- **Cancelling is bulk**: `POST /api2/v2/cancelAllBet` takes an `id[]`
+  array, so `/cancelall` is one request per account, not one per bet.
+- **"Routine check" is `status 404` here, not 205** — same meaning, same
+  self-redirect to `/users/logout?q=routinecheck`, so the account is
+  flagged the same way.
+- Its own JS enforces `odds > 5` ("Sorry the bet cannot be accepted by our
+  risk management team") and a 2000 minimum-stake panel — the same numbers
+  khelstake uses, so the existing `EXCHANGE_MIN_ODDS`/`MAX_ODDS` defaults
+  carry over. `EXCHANGE_MIN_STAKE=0` for the same reason as starexch: the
+  server is the authority and names its own figure when it refuses.
+- Not Cloudflare-blocked and **no WAF**: a bare `requests.Session` is
+  served the real pages and the csrf meta tag.
+
+⚠️ **Nothing account-side has been run.** Verified live, anonymously:
+the match list, the event-page markets (`Match Odds` with its runners, ids
+matching the provider's `selectionId`s), the limit blob, and the odds
+provider. **Login, getBalance, placeBet, getBetsHistory and cancelAllBet
+have never been called** — they are coded from the site's own JavaScript,
+which is the same basis khelstake's were written on, but that one was then
+confirmed against a real account and this one has not been.
+
+`probe_playinmatch.py --user <id> --pass <pw>` is the pre-flight: it builds
+a real `exchange.AccountSession` and drives the real adapter (login →
+balance → match list → markets → live odds → unmatched list), **places no
+bet**, and prints what each step answered. Run it, then the confirm
+screen's **🧪 Test 1 ID** (unmatched BACK @1.01, cancelled immediately — no
+exposure), before any multi-ID bet. Same gate as the other two sites.
+
+Config: `.env.playinmatch.exchange.example` → its own `EXCHANGE_BOT_TOKEN`,
+its own `ADMINS_FILE` (`admins.exchange.playinmatch.json`) and **its own
+accounts tab** — the bot writes balances into column C, so a tab another
+script already writes would have the two overwrite each other.
