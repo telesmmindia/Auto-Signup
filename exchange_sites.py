@@ -363,6 +363,7 @@ class PlayinmatchSite(ExchangeSite):
     def login(self, account) -> tuple[bool, str]:
         import random
         account.session = engine.http_session_for(account.proxy)
+        account.base_url = self.site_url
         # The csrf meta tag lives on every page; /mobile is the cheapest.
         account.csrf = self._csrf(account, "/mobile")
         if not account.csrf:
@@ -377,11 +378,51 @@ class PlayinmatchSite(ExchangeSite):
             return False, f"edge blocked: {(resp.get('message') or '')[:80]}"
         if resp.get("status") != 200:
             return False, resp.get("message") or f"Login failed: {resp}"
+        self._follow_account_home(account)
         return True, ""
 
-    def _csrf(self, account, path: str) -> str:
+    def _follow_account_home(self, account) -> None:
+        """Move the session to whichever domain this ID actually lives on.
+
+        Found live 2026-10-29 on a real account: playinmatch99 authenticates
+        the ID, then answers every page GET on the logged-in session with
+        `302 -> https://<sister domain>/loginRedirectAuth?lid=<blob>`, which
+        hands the session on and lands on that domain. Follow it and the
+        pages are the ordinary ones this adapter already parses; DON'T, and
+        the bot reads an 18 KB marketing landing page and reports "0 matches"
+        on a site that has hundreds -- which is exactly how this was found.
+
+        The probe is one no-follow GET of `/`, so an ID that does not move
+        costs a single cheap request and nothing changes for it. A failure
+        here is deliberately not fatal: the login itself succeeded, so the
+        caller keeps the original host rather than losing a good session.
+        """
+        try:
+            r = account.session.get(
+                f"{self.origin}/", headers={"User-Agent": ODDS_UA},
+                timeout=30, allow_redirects=False)
+            target = r.headers.get("location", "") if r.is_redirect else ""
+            if not target:
+                return
+            parts = urlsplit(target)
+            home = f"{parts.scheme}://{parts.netloc}"
+            if not parts.netloc or home.rstrip("/") == self.origin.rstrip("/"):
+                return
+            # Walk the hand-off so the session is authenticated over there,
+            # then take its csrf -- tokens are per host, and the one read
+            # before the move is no longer the one that host will accept.
+            account.session.get(target, headers={"User-Agent": ODDS_UA},
+                                timeout=45)
+            account.base_url = home
+            csrf = self._csrf(account, "/mobile", origin=home)
+            if csrf:
+                account.csrf = csrf
+        except Exception:
+            return
+
+    def _csrf(self, account, path: str, origin: str = "") -> str:
         r = account.session.get(
-            f"{self.origin}{path}",
+            f"{origin or self.origin}{path}",
             headers={"User-Agent": ODDS_UA}, timeout=45)
         m = re.search(r'<meta name="csrf-token" content="([^"]+)"', r.text)
         return m.group(1) if m else ""

@@ -2811,13 +2811,46 @@ JS (read-only — no account was used, none was available):
 - Not Cloudflare-blocked and **no WAF**: a bare `requests.Session` is
   served the real pages and the csrf meta tag.
 
-⚠️ **Nothing account-side has been run.** Verified live, anonymously:
-the match list, the event-page markets (`Match Odds` with its runners, ids
-matching the provider's `selectionId`s), the limit blob, and the odds
-provider. **Login, getBalance, placeBet, getBetsHistory and cancelAllBet
-have never been called** — they are coded from the site's own JavaScript,
-which is the same basis khelstake's were written on, but that one was then
-confirmed against a real account and this one has not been.
+⚠️ **What a real account HAS now proven (2026-10-29,
+`AadhyaChawla306`, through the VPS's proxy): login, `getBalance` (₹2004.03 +
+exposure), the match list (28 cricket), the event page (limit blob 412 chars,
+`Match Odds` with both runners), the live odds book, and `getBetsHistory`
+(the unmatched list, empty).** All of it through `probe_playinmatch.py`, which
+drives the real adapter.
+
+⚠️ **`placeBet` and `cancelAllBet` are still unexercised** — they are coded
+from the site's own JavaScript, the same basis khelstake's were written on,
+but that one was then confirmed against a real account and these two have not
+been. The confirm screen's **🧪 Test 1 ID** is what closes them: an unmatched
+BACK @1.01 (nothing can match it — that would need a lay priced ≤ 1.01),
+cancelled immediately.
+
+**An ID may live on a SISTER DOMAIN, and the bot now follows it
+(2026-10-29, found on the first real account).** playinmatch99 authenticates
+`AadhyaChawla306` fine and `getBalance` answers on playinmatch99 — but every
+page GET on the logged-in session comes back
+`302 -> https://playincric.com/loginRedirectAuth?lid=<blob>`, which hands the
+session to that domain and lands there. Follow it and the pages are the
+ordinary ones this adapter already parses (30 cricket matches, the Match Odds
+market, the limit blob). **Don't, and the bot reads an 18 KB marketing landing
+page and reports "0 matches" on a site that has hundreds** — which is exactly
+how this surfaced, and it looks like a broken parser rather than a redirect.
+
+So `AccountSession.base_url` is per ACCOUNT, not per instance: it starts at
+`EXCHANGE_SITE_URL` and `_follow_account_home()` moves it after login, taking a
+fresh csrf from the new host (tokens are per host). The probe is one no-follow
+`GET /`, so an ID that doesn't move costs one cheap request, and a failure
+there is deliberately non-fatal — the login succeeded, so keep the session.
+Nothing changes for khelstake/starexch, whose adapter never sets it.
+
+⚠️ **The WAF is on page loads from a datacenter IP.** From the VPS's own
+address `GET /mobile/sports` answers `202` + `x-amzn-waf-action: challenge`
+with an **empty body** (the navigation-shaped GET gets the 2403-byte
+`gokuProps` interstitial) — the same AWS-WAF-behind-Cloudflare signature as
+winclash. Through the DataImpulse residential gateway in `proxies.txt` the
+same GET is a clean 200 with the real page, every time. So this site needs the
+proxy, not a CapSolver key, and the earlier "no WAF" note was read from a clean
+residential IP.
 
 `probe_playinmatch.py --user <id> --pass <pw>` is the pre-flight: it builds
 a real `exchange.AccountSession` and drives the real adapter (login →

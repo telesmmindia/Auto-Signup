@@ -266,6 +266,13 @@ class AccountSession:
         self.flagged = False   # placeBet answered 205: "routine check"
         self.error: str | None = None
         self.proxy: str | None = None
+        # The host this ACCOUNT lives on. Normally EXCHANGE_SITE_URL, but
+        # some sites authenticate on one domain and then 302 the logged-in
+        # session to a sister domain that carries the real pages (observed
+        # live 2026-10-29: playinmatch99 -> playincric.com, via
+        # /loginRedirectAuth?lid=…). Every request after login uses this,
+        # so one bot serves whichever brand an ID belongs to.
+        self.base_url: str = SITE_URL
 
     def login(self) -> bool:
         self.proxy = next_proxy()
@@ -303,18 +310,18 @@ class AccountSession:
             logger.warning("Balance refresh failed for %s: %s", self.username, exc)
 
     def _headers(self, referer: str | None = None) -> dict:
-        parts = urlsplit(SITE_URL)
+        parts = urlsplit(self.base_url)
         origin = f"{parts.scheme}://{parts.netloc}"
         return {
             "X-Requested-With": "XMLHttpRequest",
             "X-CSRF-TOKEN": self.csrf or "",
-            "Referer": referer or SITE_URL,
+            "Referer": referer or self.base_url,
             "Origin": origin,
         }
 
     def get_page(self, path: str) -> str:
         """GET an HTML page (series / competition / event-details pages)."""
-        parts = urlsplit(SITE_URL)
+        parts = urlsplit(self.base_url)
         url = f"{parts.scheme}://{parts.netloc}{path}"
         r = self.session.get(url, headers=self._headers(), timeout=45)
         return r.text
@@ -335,7 +342,7 @@ class AccountSession:
         return resp
 
     def _api_post_once(self, path: str, data, params: dict | None) -> dict:
-        parts = urlsplit(SITE_URL)
+        parts = urlsplit(self.base_url)
         url = f"{parts.scheme}://{parts.netloc}{path}"
         # A list of (name, value) pairs, not a dict, when a site's own form
         # sends the same field name twice -- playinmatch's betslip emits
@@ -367,8 +374,8 @@ class AccountSession:
         """
         url = SITE.market_book_url(event_type, market_ids, event_id)
         headers = {
-            "Origin": SITE_URL,
-            "Referer": referer or SITE_URL,
+            "Origin": self.base_url,
+            "Referer": referer or self.base_url,
             "User-Agent": _ODDS_UA,
             "X-CSRF-TOKEN": self.csrf or "",
             "X-Requested-With": "XMLHttpRequest",
@@ -927,7 +934,7 @@ async def _on_match_selected(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return parsed, None
         book_raw = acc.get_market_book(
             market["event_type"], [market["market_id"]],
-            referer=f"{SITE_URL}{ev_path}",
+            referer=f"{acc.base_url}{ev_path}",
             event_id=market["event_id"] or data)
         return parsed, parse_odds_response(book_raw).get(market["market_id"])
 
@@ -1164,7 +1171,7 @@ async def _on_bet_confirmed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         raw = await asyncio.get_running_loop().run_in_executor(
             None, lambda: active[0].get_market_book(
                 state.get("event_type", "4"), [state["market_id"]],
-                referer=f"{SITE_URL}{state.get('event_path', '')}",
+                referer=f"{active[0].base_url}{state.get('event_path', '')}",
                 event_id=state.get("event_id", "")))
         fresh = parse_odds_response(raw).get(state["market_id"])
     except Exception as exc:
