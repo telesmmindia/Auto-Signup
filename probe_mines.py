@@ -50,8 +50,17 @@ from urllib.parse import urlsplit
 import main as m
 
 parser = argparse.ArgumentParser()
-parser.add_argument("username")
-parser.add_argument("password")
+parser.add_argument("username", nargs="?", default=None)
+parser.add_argument("password", nargs="?", default=None)
+parser.add_argument("--from-pairs", default=None, metavar="FILE",
+                    help="read credentials out of a bot PAIRS_FILE instead of "
+                         "the command line, so they never reach a shell "
+                         "history or a process list "
+                         "(e.g. --from-pairs pairs.funcrash.gameplay.json)")
+parser.add_argument("--pair", default=None,
+                    help="which pair id in --from-pairs (default: the first)")
+parser.add_argument("--side", default="banker", choices=["banker", "player"],
+                    help="which side of that pair to log in as")
 parser.add_argument("--url", default=None)
 parser.add_argument("--proxy", default=None)
 parser.add_argument("--name", default="Mines",
@@ -66,84 +75,101 @@ parser.add_argument("--secs", type=int, default=60,
 parser.add_argument("--headed", action="store_true")
 args = parser.parse_args()
 
+if args.from_pairs:
+    # Deliberately loaded here rather than passed in: pairs.*.json already
+    # holds these in plaintext for the bot, so reading them is no new
+    # exposure, whereas putting a live password on a command line is.
+    with open(args.from_pairs) as fh:
+        pairs = json.load(fh).get("pairs", {})
+    if not pairs:
+        raise SystemExit(f"{args.from_pairs} holds no pairs")
+    pid = args.pair or sorted(pairs, key=lambda k: int(k) if k.isdigit() else k)[0]
+    if pid not in pairs:
+        raise SystemExit(f"no pair {pid!r} in {args.from_pairs} "
+                         f"(have: {', '.join(sorted(pairs))})")
+    side = pairs[pid][args.side]
+    args.username, args.password = side["username"], side["password"]
+    print(f"--- credentials: pair {pid} {args.side} "
+          f"({args.username}) from {args.from_pairs} ---")
+elif not (args.username and args.password):
+    raise SystemExit("give a username and password, or --from-pairs FILE")
+
 SITE_URL = args.url or m.SITE_URL
 prof = m.profile_for(SITE_URL)
 SHOTS = "shots"
-
-# The providers worth asking about if none was named. funcrash's catalogue is
-# served per provider, so finding a game means asking each in turn; these are
-# the names this template is known to use plus the ones a Mines/crash client
-# normally ships under.
-PROVIDER_GUESSES = ["spribe", "ibe", "ibegaming", "jili", "evolution",
-                    "turbogames", "smartsoft", "kingmaker"]
-
 
 def jdump(obj):
     return json.dumps(obj, indent=2, ensure_ascii=False, default=str)
 
 
 # --- the catalogue -------------------------------------------------------
-# Read out of the site's own /casinoGamesList, the same endpoint
-# probe_winclash_games.py uses, rather than guessing an id. Run in-page so it
-# carries the logged-in session and gets past the WAF, which a bare
-# requests.Session cannot on this template.
-_CATALOGUE_JS = """async (provider) => {
-    const out = [];
-    for (let page = 1; page <= 6; page++) {
-        const body = new URLSearchParams({
-            provider: provider, name: 'all', screen_width: '1280', page: String(page),
+# Read out of the slots page's own loadGames(), confirmed live 2026-10-30:
+# the games list is POST /homepageGames, NOT /casinoGamesList (that is the
+# live-casino endpoint winclash uses, and it answers 419 here). It replies
+# with JSON -- {groupedgames_list, gamelist:[{id, name, provider, link, ...}]}
+# -- and it answers ANONYMOUSLY, so no login is needed just to resolve an id.
+#
+# The field that matters is `id`. The launch URL's `q` is that CATALOGUE ID,
+# not the `link` slug: q=3139 opens the real client, while q=mines lands on
+# launch.spribegaming.com and renders a permanently BLANK page. That one cost
+# a session to find, so it is written down rather than left to be re-derived.
+_CATALOGUE_JS = """async (term) => {
+    const tok = (document.querySelector('meta[name=csrf-token]') || {}).content
+             || (document.documentElement.innerHTML.match(/_token:'([^']+)'/) || [])[1]
+             || '';
+    const body = new URLSearchParams({
+        page: '1', category: 'all', provider: '',
+        perpage_count: '60', groupedgames_count: '0',
+        gameSearch: term, _token: tok,
+    });
+    let res;
+    try {
+        res = await fetch('/homepageGames', {
+            method: 'POST',
+            headers: {'X-Requested-With': 'XMLHttpRequest',
+                      'Content-Type': 'application/x-www-form-urlencoded'},
+            body: body.toString(),
         });
-        let res;
-        try {
-            res = await fetch('/casinoGamesList', {
-                method: 'POST',
-                headers: {
-                    'X-Requested-With': 'XMLHttpRequest',
-                    'Content-Type': 'application/x-www-form-urlencoded',
-                    'X-CSRF-Token': (document.querySelector('meta[name=csrf-token]') || {}).content || '',
-                },
-                body: body.toString(),
-            });
-        } catch (e) { return {error: String(e)}; }
-        if (!res.ok) return {error: 'HTTP ' + res.status, status: res.status};
-        let data;
-        try { data = await res.json(); } catch (e) { return {error: 'not JSON'}; }
-        const rows = data.data || data.games || data.gameList || [];
-        if (!rows.length) break;
-        for (const g of rows) {
-            out.push({id: g.id || g.game_id || g.gameId,
-                      name: g.name || g.game_name || g.title,
-                      provider: g.provider || provider});
-        }
-    }
-    return {rows: out};
+    } catch (e) { return {error: String(e)}; }
+    if (!res.ok) return {error: 'HTTP ' + res.status};
+    let data;
+    try { data = await res.json(); } catch (e) { return {error: 'not JSON'}; }
+    return {rows: (data.gamelist || []).map(g => ({
+        id: g.id, name: g.name, provider: g.provider, link: g.link}))};
 }"""
 
 
 def find_game(page, wanted):
-    """Ask every candidate provider for its catalogue and return the matching
-    (id, provider, name), or None. Prints what each provider answered so a
-    miss is diagnosable rather than silent."""
+    """Search the site's own catalogue once and return (id, provider, name).
+
+    `wanted` matches the game NAME; --provider narrows it, which matters
+    because a search for "mines" returns ~30 games from a dozen providers and
+    only one of them is the client in the recording. Prints them all, because
+    picking the wrong look-alike is the likely mistake here.
+    """
     want = wanted.strip().lower()
-    providers = [args.provider] if args.provider else PROVIDER_GUESSES
-    for prov in providers:
-        try:
-            res = page.evaluate(_CATALOGUE_JS, prov)
-        except Exception as e:
-            print(f"    {prov:<12} could not be asked: {str(e)[:90]}")
-            continue
-        if res.get("error"):
-            print(f"    {prov:<12} {res['error']}")
-            continue
-        rows = res.get("rows") or []
-        hits = [r for r in rows if want in (r.get("name") or "").lower()]
-        shown = ", ".join(f"{h.get('name')}={h.get('id')}" for h in hits[:5])
-        print(f"    {prov:<12} {len(rows):>4} games"
-              + (f"  -> {shown}" if hits else ""))
-        if hits:
-            h = hits[0]
-            return str(h.get("id")), h.get("provider") or prov, h.get("name")
-    return None
+    try:
+        res = page.evaluate(_CATALOGUE_JS, want)
+    except Exception as e:
+        print(f"    catalogue could not be asked: {str(e)[:120]}")
+        return None
+    if res.get("error"):
+        print(f"    catalogue: {res['error']}")
+        return None
+    rows = res.get("rows") or []
+    print(f"    {len(rows)} games match {wanted!r}:")
+    for r in rows:
+        mark = "  <--" if (r.get("name") or "").strip().lower() == want else ""
+        print(f"      {str(r.get('name'))[:26]:<28} id={str(r.get('id')):<7}"
+              f" provider={str(r.get('provider')):<14} link={r.get('link')!r}{mark}")
+    hits = [r for r in rows if want in (r.get("name") or "").lower()]
+    if args.provider:
+        hits = [r for r in hits if r.get("provider") == args.provider]
+    exact = [r for r in hits if (r.get("name") or "").strip().lower() == want]
+    pick = (exact or hits or [None])[0]
+    if not pick:
+        return None
+    return str(pick["id"]), pick.get("provider"), pick.get("name")
 
 
 # --- the dump ------------------------------------------------------------
@@ -307,6 +333,9 @@ try:
     provider = provider or prof.casino_provider
 
     # --- launch it -------------------------------------------------------
+    # NOTE the site's own slots pages build this with type=slots; type=casino
+    # (the profile's default, used by the Evolution tables) reaches the same
+    # client, so the profile template is left alone here.
     parts = urlsplit(SITE_URL)
     path = prof.casino_launch_path.format(id=game_id, provider=provider)
     launch = f"{parts.scheme}://{parts.netloc}{path}"
