@@ -284,9 +284,106 @@ def dump_target(target, label):
 
 
 # --- run -----------------------------------------------------------------
-pw, browser = (None, None)
-context = None
-bridge = None
+# Two attempts, for one specific reason confirmed live 2026-10-30: the AWS WAF
+# can let the HOMEPAGE through untouched and then wall the GAME-TAB navigation
+# with the hard "captcha" action (an amzn-captcha-verify-button, which never
+# clears itself). At that point the logged-in context holds no token, and a
+# token only works in a context that has carried it from its first navigation
+# -- so the wall cannot be cleared in place without throwing the login away.
+#
+# So: if the game tab walls, solve it, CACHE the token, discard everything and
+# start over with that token seeded into the new context before its first
+# navigation. The second attempt then launches with the wall already satisfied.
+# Costs one extra login, which is why it is capped at two attempts rather than
+# looped -- logins are the scarce resource on this site, not CapSolver credit.
+def attempt(n, pw, browser, proxy_conf):
+    """One full try. Returns (context, page, game_page) or raises."""
+    context = m.new_site_context(browser, SITE_URL, proxy_conf)
+    if prof.waf_on_navigation:
+        seeded = m.seed_waf_token(context, SITE_URL, args.proxy)
+        print(f"    attempt {n}: cached WAF token seeded: {bool(seeded)}")
+    page = context.new_page()
+    page.goto(SITE_URL, wait_until="domcontentloaded", timeout=60000)
+    if prof.waf_on_navigation:
+        page, ok, why = m.ensure_waf_cleared(page, SITE_URL, proxy=args.proxy,
+                                             proxy_conf=proxy_conf)
+        context = page.context
+        print(f"    WAF on entry: {'clear' if ok else 'STILL UP'}"
+              + (f" -- {why}" if why else ""))
+        if not ok:
+            raise RuntimeError("the WAF was not cleared on the way in")
+
+    print("\n--- logging in ---")
+    t0 = time.time()
+    outcome, msgs = m.login(page, args.username, args.password, SITE_URL,
+                            already_loaded=True)
+    print(f"    {outcome} in {time.time() - t0:.0f}s"
+          + (f" -- {'; '.join(msgs)[:200]}" if msgs else ""))
+    if outcome != "ok":
+        raise RuntimeError("login did not complete")
+
+    # --- find the game ---------------------------------------------------
+    global GAME_ID, PROVIDER
+    if not GAME_ID:
+        print(f"\n--- looking for {args.name!r} in the site's own catalogue ---")
+        found = find_game(page, args.name)
+        if not found:
+            raise RuntimeError(f"no game named {args.name!r} in the catalogue")
+        GAME_ID, PROVIDER, real_name = found
+        print(f"\n    -> {real_name!r} is id {GAME_ID} on provider {PROVIDER!r}")
+    PROVIDER = PROVIDER or prof.casino_provider
+
+    # --- launch it -------------------------------------------------------
+    parts = urlsplit(SITE_URL)
+    path = prof.casino_launch_path.format(id=GAME_ID, provider=PROVIDER)
+    launch = f"{parts.scheme}://{parts.netloc}{path}"
+    print(f"\n--- launching {launch} ---")
+    game_page = context.new_page()
+    game_page.goto(launch, wait_until="domcontentloaded", timeout=60000)
+
+    # Deliberately NOT waiting for "evo-games.com" the way
+    # main._open_game_direct does -- which host this lands on is one of the
+    # facts being established.
+    for _ in range(30):
+        game_page.wait_for_timeout(1000)
+        if urlsplit(game_page.url).netloc not in ("", parts.netloc):
+            break
+        if m.waf_wall_showing(game_page):
+            break
+
+    if m.waf_wall_showing(game_page):
+        # Solve it HERE and cache the token, so the next attempt's context can
+        # carry it from the start. Nothing is injected into this context: a
+        # token presented by the very context that was challenged is refused.
+        print("    the game tab is WAF-walled -- solving to cache a token")
+        if not m.capsolver_key():
+            raise RuntimeError("game tab is WAF-walled and CAPSOLVER_API_KEY is not set")
+        challenge = m.parse_aws_waf_challenge(game_page.content())
+        if not challenge:
+            raise RuntimeError("game tab is WAF-walled but its challenge "
+                               "parameters could not be read")
+        token = m.solve_aws_waf_token(SITE_URL, challenge, proxy=args.proxy)
+        m.cache_waf_token(SITE_URL, token, args.proxy)
+        raise _Walled("game tab was walled; token cached for the next attempt")
+
+    host = urlsplit(game_page.url).netloc
+    print(f"    landed on {host!r} (operator host is {parts.netloc!r})")
+    if host == parts.netloc:
+        try:
+            why = (game_page.inner_text("body") or "").strip()[:300]
+        except Exception:
+            why = ""
+        raise RuntimeError(f"the launch never left the operator: {why}")
+    game_page.wait_for_timeout(8000)
+    return context, page, game_page
+
+
+class _Walled(RuntimeError):
+    """The game tab was walled and a token has been cached -- worth retrying."""
+
+
+GAME_ID, PROVIDER = args.game_id, args.provider
+pw = browser = context = game_page = bridge = None
 try:
     import playwright.sync_api as _pw_api
     pw = _pw_api.sync_playwright().start()
@@ -296,79 +393,29 @@ try:
     if proxy_conf:
         proxy_conf, bridge = m.maybe_bridge_proxy(proxy_conf)
 
-    context = m.new_site_context(browser, SITE_URL, proxy_conf)
-    page = context.new_page()
-
     print(f"--- site {prof.key} ({SITE_URL}) ---")
-    page.goto(SITE_URL, wait_until="domcontentloaded", timeout=60000)
-    if prof.waf_on_navigation:
-        page, ok, why = m.ensure_waf_cleared(page, SITE_URL, proxy=args.proxy,
-                                             proxy_conf=proxy_conf)
-        context = page.context
-        print(f"    WAF: {'cleared' if ok else 'STILL UP'} -- {why}")
-        if not ok:
-            raise SystemExit("the WAF was not cleared; set CAPSOLVER_API_KEY "
-                             "or try another exit IP")
-
-    print("\n--- logging in ---")
-    t0 = time.time()
-    outcome, msgs = m.login(page, args.username, args.password, SITE_URL,
-                            already_loaded=True)
-    print(f"    {outcome} in {time.time() - t0:.0f}s"
-          + (f" -- {'; '.join(msgs)[:200]}" if msgs else ""))
-    if outcome != "ok":
-        raise SystemExit("login did not complete, so nothing below could be read")
-
-    # --- find the game ---------------------------------------------------
-    game_id, provider = args.game_id, args.provider
-    if not game_id:
-        print(f"\n--- looking for {args.name!r} in the site's own catalogue ---")
-        found = find_game(page, args.name)
-        if not found:
-            raise SystemExit(
-                f"no game named {args.name!r} in any provider tried. Re-run "
-                f"with --provider <name> once you know it, or with --game-id.")
-        game_id, provider, real_name = found
-        print(f"\n    -> {real_name!r} is id {game_id} on provider {provider!r}")
-    provider = provider or prof.casino_provider
-
-    # --- launch it -------------------------------------------------------
-    # NOTE the site's own slots pages build this with type=slots; type=casino
-    # (the profile's default, used by the Evolution tables) reaches the same
-    # client, so the profile template is left alone here.
-    parts = urlsplit(SITE_URL)
-    path = prof.casino_launch_path.format(id=game_id, provider=provider)
-    launch = f"{parts.scheme}://{parts.netloc}{path}"
-    print(f"\n--- launching {launch} ---")
-    game_page = context.new_page()
-    game_page.goto(launch, wait_until="domcontentloaded", timeout=60000)
-
-    # Deliberately NOT waiting for "evo-games.com" the way
-    # main._open_game_direct does -- which host this lands on is one of the
-    # facts being established. Wait for it to leave the operator's domain.
-    host0 = urlsplit(game_page.url).netloc
-    for _ in range(30):
-        game_page.wait_for_timeout(1000)
-        host = urlsplit(game_page.url).netloc
-        if host and host != parts.netloc:
-            break
-    host = urlsplit(game_page.url).netloc
-    print(f"    landed on {host!r} (operator host is {parts.netloc!r})")
-    if host == parts.netloc:
-        body = ""
+    for n in (1, 2):
         try:
-            body = (game_page.inner_text("body") or "").strip()[:300]
-        except Exception:
-            pass
-        print(f"    the launch never left the operator -- page says: {body}")
-
-    game_page.wait_for_timeout(8000)
+            context, page, game_page = attempt(n, pw, browser, proxy_conf)
+            break
+        except _Walled as e:
+            print(f"    {e}")
+            try:
+                context.close()
+            except Exception:
+                pass
+            context = None
+            if n == 2:
+                raise SystemExit("still WAF-walled on the game tab after a "
+                                 "solved token -- this exit IP is flagged; "
+                                 "try another proxy rather than retrying")
+        except RuntimeError as e:
+            raise SystemExit(str(e))
 
     # --- dump it ---------------------------------------------------------
     # The recording shows Mines filling the whole tab, so the client may BE
-    # the tab's document (like starexch's Ezugi client) rather than an iframe
-    # (like Evolution's). Dump the tab and every frame in it; which one holds
-    # the controls is the answer.
+    # the tab's document rather than an iframe. Dump the tab and every frame;
+    # which one holds the controls is the answer.
     print(f"\n=== TAB DOCUMENT ===")
     dump_target(game_page, "tab")
     for i, fr in enumerate(game_page.frames):
@@ -385,24 +432,24 @@ try:
         print(f"    screenshot failed: {str(e)[:100]}")
 
     # --- watch it --------------------------------------------------------
-    # Nothing is clicked. This just records whether anything changes on its
-    # own, which is how the "Auto cashout in: N" countdown and the round
-    # state will be recognised later.
+    # Nothing is clicked. This records whether anything changes on its own,
+    # which is how the "Auto cashout in: N" countdown will be recognised.
     print(f"\n--- watching for {args.secs}s (no clicks) ---")
     seen = {}
     deadline = time.time() + args.secs
     while time.time() < deadline:
-        try:
-            txt = (game_page.inner_text("body") or "")
-        except Exception:
-            txt = ""
-        for line in {l.strip() for l in txt.splitlines() if l.strip()}:
-            seen[line[:48]] = seen.get(line[:48], 0) + 1
+        for tgt in [game_page] + [f for f in game_page.frames
+                                  if f != game_page.main_frame]:
+            try:
+                txt = (tgt.inner_text("body") or "")
+            except Exception:
+                continue
+            for line in {l.strip() for l in txt.splitlines() if l.strip()}:
+                seen[line[:48]] = seen.get(line[:48], 0) + 1
         game_page.wait_for_timeout(2000)
-    print("    text seen while idle (count out of ~"
-          f"{args.secs // 2} samples):")
-    for line, n in sorted(seen.items(), key=lambda kv: -kv[1])[:30]:
-        print(f"      {n:>3}x  {line}")
+    print(f"    text seen while idle (out of ~{args.secs // 2} samples):")
+    for line, cnt in sorted(seen.items(), key=lambda kv: -kv[1])[:30]:
+        print(f"      {cnt:>3}x  {line}")
 
     print("\n--- done. No bet was placed, nothing in the game was clicked. ---")
 finally:
