@@ -363,9 +363,9 @@ class PlayinmatchSite(ExchangeSite):
     def login(self, account) -> tuple[bool, str]:
         import random
         account.session = engine.http_session_for(account.proxy)
-        account.base_url = self.site_url
+        account.base_url = self._live_origin(account)
         # The csrf meta tag lives on every page; /mobile is the cheapest.
-        account.csrf = self._csrf(account, "/mobile")
+        account.csrf = self._csrf(account, "/mobile", origin=account.base_url)
         if not account.csrf:
             return False, "could not read the csrf token (site blocked the page?)"
         resp = account.api_post("/api2/v2/login", {
@@ -375,11 +375,37 @@ class PlayinmatchSite(ExchangeSite):
             "digits": f"{random.randint(0, 9999):04d}",
         })
         if resp.get("_error"):
-            return False, f"edge blocked: {(resp.get('message') or '')[:80]}"
+            return False, (resp.get("message") or "")[:120]
         if resp.get("status") != 200:
             return False, resp.get("message") or f"Login failed: {resp}"
         self._follow_account_home(account)
         return True, ""
+
+    def _live_origin(self, account) -> str:
+        """The host this brand is actually served from today.
+
+        The brand rotates its domain -- playinmatch99 -> playinmatch88,
+        found 2026-10-31 -- and the old host then answers EVERY request,
+        the login POST included, with a Cloudflare `301` to the same path
+        on the new host. `requests` follows a 301 by re-issuing it as a
+        GET, so the login POST landed on the new host as a GET and Laravel
+        answered "The GET method is not supported for this route", which
+        reads like a wrong endpoint rather than a moved site. One cheap
+        GET of `/` resolves the real host before anything is posted, so
+        every later POST goes straight to a host that will accept it.
+
+        This is a SITE-level move (every ID follows it), unlike
+        `_follow_account_home()` below, which is per account.
+        """
+        try:
+            r = account.session.get(f"{self.origin}/",
+                                    headers={"User-Agent": ODDS_UA}, timeout=45)
+            parts = urlsplit(r.url)
+            if parts.scheme and parts.netloc:
+                return f"{parts.scheme}://{parts.netloc}"
+        except Exception:
+            pass
+        return self.origin
 
     def _follow_account_home(self, account) -> None:
         """Move the session to whichever domain this ID actually lives on.
@@ -398,15 +424,16 @@ class PlayinmatchSite(ExchangeSite):
         caller keeps the original host rather than losing a good session.
         """
         try:
+            here = (account.base_url or self.origin).rstrip("/")
             r = account.session.get(
-                f"{self.origin}/", headers={"User-Agent": ODDS_UA},
+                f"{here}/", headers={"User-Agent": ODDS_UA},
                 timeout=30, allow_redirects=False)
             target = r.headers.get("location", "") if r.is_redirect else ""
             if not target:
                 return
             parts = urlsplit(target)
             home = f"{parts.scheme}://{parts.netloc}"
-            if not parts.netloc or home.rstrip("/") == self.origin.rstrip("/"):
+            if not parts.netloc or home.rstrip("/") == here:
                 return
             # Walk the hand-off so the session is authenticated over there,
             # then take its csrf -- tokens are per host, and the one read

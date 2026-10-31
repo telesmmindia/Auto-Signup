@@ -354,8 +354,18 @@ class AccountSession:
             payload["_token"] = self.csrf or ""
         headers = self._headers()
         headers["Accept"] = "application/json"
+        # NOT followed: `requests` re-issues a redirected POST as a GET, so a
+        # site that has moved domain answers the login with Laravel's "The GET
+        # method is not supported for this route" (seen live on playinmatch,
+        # 2026-10-31) -- a wrong-endpoint message for a moved-site problem.
         r = self.session.post(url, data=payload, params=params,
-                              headers=headers, timeout=20)
+                              headers=headers, timeout=20,
+                              allow_redirects=False)
+        if r.is_redirect or r.is_permanent_redirect:
+            loc = r.headers.get("location", "")
+            return {"_error": True,
+                    "message": (f"HTTP {r.status_code} redirect to {loc[:100]} "
+                                f"-- the site has moved; update EXCHANGE_SITE_URL")}
         try:
             return r.json()
         except ValueError:

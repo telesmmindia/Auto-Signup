@@ -2968,6 +2968,23 @@ same GET is a clean 200 with the real page, every time. So this site needs the
 proxy, not a CapSolver key, and the earlier "no WAF" note was read from a clean
 residential IP.
 
+⚠️ **The brand rotates its DOMAIN, and the old one 301s everything
+(2026-10-31).** `playinmatch99.com` now answers every request — the login
+POST included — with a Cloudflare `301` to the same path on
+`playinmatch88.com`. `requests` follows a 301 by re-issuing it as a **GET**,
+so the login POST arrived as a GET and Laravel answered **"The GET method is
+not supported for this route"**, which reads like a wrong endpoint rather
+than a moved site; `/relogin` reported 0 logged in. Two fixes, both verified
+live through the proxy: `PlayinmatchSite._live_origin()` resolves the real
+host with one cheap `GET /` **before** anything is posted (after it, the
+login POST to the resolved host answers `{"status":201,"message":"Invalid
+Username/ Password"}` for a junk id — i.e. the app, not an edge), and
+`_api_post_once()` no longer follows redirects at all, naming a moved site
+instead of silently downgrading the method. Point `EXCHANGE_SITE_URL` at the
+live domain anyway; the resolver is the safety net, not the configuration.
+This is a site-wide move, distinct from `_follow_account_home()`'s per-ID
+`playincric` hand-off.
+
 `probe_playinmatch.py --user <id> --pass <pw>` is the pre-flight: it builds
 a real `exchange.AccountSession` and drives the real adapter (login →
 balance → match list → markets → live odds → unmatched list), **places no
