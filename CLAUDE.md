@@ -2992,6 +2992,18 @@ live domain anyway; the resolver is the safety net, not the configuration.
 This is a site-wide move, distinct from `_follow_account_home()`'s per-ID
 `playincric` hand-off.
 
+**Pointing the env at the new domain then broke it a second way, and the
+error named the wrong thing.** `site_for()` matched the host **exactly**, so
+`playinmatch88.com` was not in the table and fell through to the default
+`KhelstakeSite` — every id then failed with *"csrf-token meta tag not
+found"*, a parser error from the wrong platform, which reads like the site's
+markup changed. `_BY_HOST` now carries `playinmatch88`/`playincric`, and an
+unknown host falls back to `_BY_BRAND` with trailing digits stripped
+(`playinmatch88` → `playinmatch`) before the generic adapter. **A brand that
+rotates its domain by changing the digits keeps its adapter automatically.**
+Deployed and verified on the VPS 2026-10-31: 10 of 11 ids logged in with
+real balances.
+
 `probe_playinmatch.py --user <id> --pass <pw>` is the pre-flight: it builds
 a real `exchange.AccountSession` and drives the real adapter (login →
 balance → match list → markets → live odds → unmatched list), **places no
