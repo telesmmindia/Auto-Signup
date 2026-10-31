@@ -466,6 +466,13 @@ same rule `fill_register_form()`'s phone read-back follows: verify what
 LANDED, not what was asked for. A stake that silently stayed at the default
 would bet the wrong amount every round with nothing in the logs.
 
+**Confirmed live 2026-10-31 through `mines.py` itself**, not just the probe:
+the WAF solve-and-retry fired exactly as designed (attempt 1 walled on the
+game tab with no token in hand → solve → attempt 2 seeded → table ready), the
+wallet read ₹1,000 from the outer document, and `set_stake()` drove the
+numpad to 25 → 1,000 → 10 with every value confirmed by read-back. No bet was
+placed.
+
 ⚠️ **What is NOT confirmed live.** The login, the WAF path, the launch URL,
 the host, the frame and every selector above are all confirmed against a real
 funded account. What has **never been watched** is a round in flight: the BET
