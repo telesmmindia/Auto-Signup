@@ -777,9 +777,24 @@ def _judge_place(resp: dict, account, *, routine_check_status: int) -> dict:
 
 _BY_HOST = {
     "playinmatch99.com": PlayinmatchSite,
+    "playinmatch88.com": PlayinmatchSite,
     "playinmatch.com": PlayinmatchSite,
+    "playincric.com": PlayinmatchSite,
     "khelstake24.com": KhelstakeSite,
     "starexch555.com": KhelstakeSite,
+}
+
+# These brands rotate their domain by changing the DIGITS on the end
+# (playinmatch99 -> playinmatch88, live 2026-10-31), so an exact host table
+# silently hands the new domain to the fallback adapter -- which answers with
+# a parser error from the wrong platform ("csrf-token meta tag not found"),
+# not with "unknown site". Matching the name with its trailing digits
+# stripped keeps a rotation on its own adapter.
+_BY_BRAND = {
+    "playinmatch": PlayinmatchSite,
+    "playincric": PlayinmatchSite,
+    "khelstake": KhelstakeSite,
+    "starexch": KhelstakeSite,
 }
 
 
@@ -792,5 +807,8 @@ def site_for(site_url: str, odds_host: str = "") -> ExchangeSite:
     `/mobile/sports` answering 200 while `/exchange/cricket-exchange` 404s.
     """
     host = urlsplit(site_url).netloc.lower().replace("www.", "")
-    cls = _BY_HOST.get(host, KhelstakeSite)
+    cls = _BY_HOST.get(host)
+    if cls is None:
+        brand = re.sub(r"\d+$", "", host.split(".")[0])
+        cls = _BY_BRAND.get(brand, KhelstakeSite)
     return cls(site_url, odds_host)
