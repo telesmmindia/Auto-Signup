@@ -1529,6 +1529,37 @@ plus `read_game_balance(frame)` (Evolution's own
   doesn't change the chip menu), `chip_select_failed`, `different_tables`,
   `setup_failed` (setup has its own 4-attempt retry), `stopped_by_user`.
 
+**`no_open_window` now says WHICH side went blind (2026-10-31).** It is the
+commonest real-world stop after the balance ones and it used to keep **no
+evidence at all**: measured over playcric365's 79 recorded runs, 40 completed
+and **8 ended on `no_open_window`** — at rounds 0, 4, 5, 6, 7, 9 and 40, spread
+over six different pairs that each also completed 50/50 runs elsewhere, so it
+is neither account-specific nor seat age alone. Every one of those 8 recorded
+`shots=0` and a single line of chat ("missed the betting window"), because the
+`not placed` branch was the **only** failure path that took no screenshot and
+distinguished nothing.
+
+The place loop now counts, per side, how many polls saw an open window, how
+many saw both open, and how many saw both open on a clean 0/0 board — and the
+message names one of four causes, which need different responses:
+- one side 0 while the other is >0 → **that seat is blind** (its table stopped
+  rendering `circle-timer` while still answering the DOM — the tournament's
+  `blind` verdict). Only a fresh seat repairs it; see seat decay in §4.
+- both 0 → both seats blind.
+- both >0 but never simultaneously → the two tabs' **video has drifted** more
+  than one window apart, so they are each dealing but never open together.
+- both open together but never 0/0 → a board **stuck staged or settling**.
+Counters land in `summary["window_misses"]`, and the attempt that trips the
+limit screenshots both tabs (`*-nowindow.png`).
+
+⚠️ **This diagnoses, it does not repair.** The run still stops at 5 misses, so
+a 50-round `/run` can still end at 5/50. The repair — re-seating both sides
+mid-run instead of retrying dead tabs — is **not built**: `run_paired_hedge`
+seats once before the round loop and has no re-seat path, and the tournament's
+hard-won rule is that nothing short of a fresh seat mends a blind one. Read a
+real `window_misses` record before building it, rather than guessing which of
+the four causes dominates.
+
 **Concurrent runs.** Each `/run` is self-contained (own browsers, own threads) and
 dispatched onto `_run_executor` (`ThreadPoolExecutor(MAX_CONCURRENT_RUNS)`, env,
 default 3). `_active_runs` maps `pair_id → {stop_event, banker, player}`, so

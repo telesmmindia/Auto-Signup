@@ -5053,6 +5053,25 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                 if should_stop() or not (b_open and p_fut.result()):
                     break
                 time.sleep(0.5)
+            # Count what each side actually saw while hunting, so a missed
+            # window can say WHY it was missed. Without this every cause
+            # produces the same "missed the betting window" line and the next
+            # occurrence is just as undiagnosable as the last: measured over
+            # 79 playcric365 runs, 8 ended on `no_open_window` -- at rounds 0,
+            # 4, 5, 6, 7, 9 and 40, spread across six different pairs that all
+            # also completed 50/50 runs -- and not one of them recorded a
+            # single fact about the table. The three causes need opposite
+            # responses and these counters separate them:
+            #   * one side 0, the other >0  -> that seat is blind (the
+            #     tournament's `blind` verdict: its table stopped rendering
+            #     [data-role="circle-timer"] while still answering the DOM).
+            #     Only a fresh seat repairs it -- see CLAUDE.md on seat decay.
+            #   * both >0 but both_open 0   -> the two tabs are dealing but
+            #     their video has drifted more than a window apart, so they
+            #     are never open at the same instant.
+            #   * both_open >0, clean 0     -> windows were shared, but TOTAL
+            #     BET never read 0/0 -- a board stuck staged/settling.
+            saw_b = saw_p = saw_both = saw_clean = polls = 0
             place_deadline = time.time() + game.place_secs  # (b) catch a fresh both-open window
             while time.time() < place_deadline:
                 if should_stop():
@@ -5060,15 +5079,21 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
                     break
                 p_fut = player_exec.submit(_betting_open, fr_p, game)
                 b_open = _betting_open(fr_b, game)
-                if not (b_open and p_fut.result()):
+                p_open = p_fut.result()
+                polls += 1
+                saw_b += bool(b_open)
+                saw_p += bool(p_open)
+                if not (b_open and p_open):
                     time.sleep(0.5)
                     continue
+                saw_both += 1
                 p_fut = player_exec.submit(_read_total_bet, fr_p)
                 b_tb0 = _read_total_bet(fr_b)
                 if (b_tb0 or 0) != 0 or (p_fut.result() or 0) != 0:
                     # something already staged/settling -- wait for a clean 0/0.
                     time.sleep(0.5)
                     continue
+                saw_clean += 1
 
                 # Fire the Player side on its own thread first (non-blocking),
                 # then the Banker side inline -- both stakes land within the same
@@ -5208,14 +5233,43 @@ def run_paired_hedge(banker_creds, player_creds, amount, rounds,
 
             if not placed:
                 consecutive_failures += 1
+                # Name the cause from the counters above rather than reporting
+                # a bare "missed the window" -- see the comment there.
+                a, b = game.side_a_label, game.side_b_label
+                if saw_b == 0 and saw_p == 0:
+                    why = (f"neither table showed a betting window in "
+                           f"{game.place_secs}s (~{game.place_secs // 40} full hands) -- "
+                           "both seats look blind, not unlucky")
+                elif saw_b == 0 or saw_p == 0:
+                    blind, ok = ((a, b) if saw_b == 0 else (b, a))
+                    why = (f"the {blind} table never showed a betting window in "
+                           f"{game.place_secs}s while the {ok} one showed "
+                           f"{max(saw_b, saw_p)} -- the {blind} seat has gone blind "
+                           "and only a fresh seat repairs that")
+                elif saw_both == 0:
+                    why = (f"both tables opened ({a} {saw_b}, {b} {saw_p} of {polls} "
+                           "checks) but never at the same moment -- their video has "
+                           "drifted more than one window apart")
+                else:
+                    why = (f"the two tables shared {saw_both} open window(s) but TOTAL "
+                           "BET never read 0/0 -- a board stuck staged or settling")
+                summary["messages"].append(f"Attempt {attempt}: {why}.")
+                summary.setdefault("window_misses", []).append(
+                    {"attempt": attempt, "polls": polls, "saw_banker": saw_b,
+                     "saw_player": saw_p, "both_open": saw_both,
+                     "clean": saw_clean})
                 if consecutive_failures >= MAX_CONSECUTIVE_ROUND_FAILURES:
                     summary["stop_reason"] = "no_open_window"
                     summary["messages"].append(
                         f"{consecutive_failures} missed betting windows in a row -- "
                         "stopping rather than retrying indefinitely.")
+                    # The only failure path that never kept any evidence. One
+                    # shot of each tab says whether the seat was kicked to a
+                    # lobby, sitting on a dialog, or on a table still dealing.
+                    _screenshot_pair(gp_b, gp_p, summary, "nowindow", player_exec)
                     break
-                progress(f"⏳ Attempt {attempt}: missed the betting window, retrying "
-                         f"({summary['rounds_done']}/{rounds} hedged so far)…")
+                progress(f"⏳ Attempt {attempt}: missed the betting window ({why}), "
+                         f"retrying ({summary['rounds_done']}/{rounds} hedged so far)…")
                 for _ in range(ROUND_RETRY_COOLDOWN_SECS):
                     if should_stop():
                         break
