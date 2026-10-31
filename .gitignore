@@ -39,3 +39,7 @@ roster*.csv
 *.session
 *.session-journal
 
+
+# Mines bot state (BOT_MODE=mines)
+mines_accounts*.json
+mines_runs*.json

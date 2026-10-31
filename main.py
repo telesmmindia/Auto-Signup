@@ -4339,6 +4339,25 @@ def _open_via_provider_lobby(game_page, frame, game):
     raise RuntimeError(f"{game.lobby_tile} opened but its frame never appeared")
 
 
+class GameTabWalled(RuntimeError):
+    """The game-launch tab was answered by the WAF rather than by the site.
+
+    Carries the still-open `page` so the caller can read window.gokuProps off
+    it and mint a token. It is a SEPARATE exception from the generic "launch
+    did not reach the provider" because the two need opposite responses: a
+    refused launch is about the account or the game, and retrying it is
+    pointless, while a wall is about the exit IP and is cleared by solving it
+    once and replaying the token from a FRESH context.
+
+    Seen live on funcrash 2026-10-30: the homepage entry was clean (so no
+    token had ever been minted) and the /casinoRedirect tab alone got the
+    hard captcha."""
+
+    def __init__(self, message, page=None):
+        super().__init__(message)
+        self.page = page
+
+
 def _open_game_direct(page, prof, tile_text, site_url=None):
     """Open a live table by navigating straight to the site's own game-launch
     redirect, skipping the lobby and its tile entirely. Returns the new page
@@ -4365,7 +4384,13 @@ def _open_game_direct(page, prof, tile_text, site_url=None):
             f"(known tables: {known}) -- read its id from the site's own "
             f"/casinoGamesList and add it to the profile")
     parts = urlsplit(site_url or SITE_URL)
-    path = prof.casino_launch_path.format(id=game_id, provider=prof.casino_provider)
+    # A site can carry several game providers behind one launch redirect
+    # (funcrash: Evolution baccarat AND Spribe mines), so both the provider
+    # slug and the host the redirect must reach are per-table, falling back to
+    # the profile's single-provider defaults.
+    provider = prof.casino_game_providers.get(tile_text, prof.casino_provider)
+    want_host = prof.casino_game_hosts.get(tile_text, prof.casino_game_host)
+    path = prof.casino_launch_path.format(id=game_id, provider=provider)
     url = f"{parts.scheme}://{parts.netloc}{path}"
     game_page = page.context.new_page()
     try:
@@ -4378,10 +4403,21 @@ def _open_game_direct(page, prof, tile_text, site_url=None):
         raise RuntimeError(f"could not open the {tile_text!r} table: {str(e)[:150]}")
     # The redirect lands on the provider's own host; give it a moment to
     # actually get there before the caller starts hunting for the game frame.
+    walled = False
     for _ in range(20):
         game_page.wait_for_timeout(1000)
-        if "evo-games.com" in (game_page.url or ""):
+        if want_host in (game_page.url or ""):
             return game_page
+        # A wall answers instead of the redirect, so the host never changes.
+        # Stop waiting the moment that is visible rather than sitting out the
+        # full 20s on a page that can never become the game.
+        if prof.waf_on_navigation and waf_wall_showing(game_page):
+            walled = True
+            break
+    if walled:
+        raise GameTabWalled(
+            f"the {tile_text!r} launch tab was answered by the WAF, not the site",
+            page=game_page)
     # Still on the operator's own domain -> the launch was refused. Say what
     # the page shows, since that is where the real reason lives (a zero
     # balance, a blocked account, a game that is off).
@@ -4391,7 +4427,8 @@ def _open_game_direct(page, prof, tile_text, site_url=None):
         why = ""
     raise RuntimeError(
         f"the {tile_text!r} launch did not reach the game provider "
-        f"(still at {game_page.url[:120]}){': ' + why if why else ''}")
+        f"(wanted {want_host}, still at {game_page.url[:120]})"
+        f"{': ' + why if why else ''}")
 
 
 def _open_table_for(browser, username, password, site_url, category, tile_text,

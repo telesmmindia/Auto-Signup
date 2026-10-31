@@ -268,6 +268,22 @@ class SiteProfile:
     casino_provider: str = "evolution"
     casino_game_ids: dict = field(default_factory=dict)
 
+    # Per-table overrides of the two things above, for a site that carries
+    # more than one GAME PROVIDER behind the same launch redirect. funcrash is
+    # the first: its Baccarat tables are Evolution, but Mines is Spribe, which
+    # launches with provider=spribe and lands on a completely different host.
+    # Empty by default, so a single-provider site is unaffected.
+    casino_game_providers: dict = field(default_factory=dict)
+
+    # The host the launch redirect is expected to REACH. _open_game_direct
+    # waits for it, and treats still being on the operator's own domain as a
+    # refused launch. This used to be the literal string "evo-games.com" in
+    # main.py, which made every non-Evolution client structurally unreachable
+    # no matter how the profile was configured. Per-table overrides go in
+    # casino_game_hosts (Spribe's Mines lands on spribegaming.com).
+    casino_game_host: str = "evo-games.com"
+    casino_game_hosts: dict = field(default_factory=dict)
+
     # Whether this site's register endpoint has been confirmed (live, via a
     # captured network trace + a raw curl replay -- see CLAUDE.md) to be a
     # plain JSON POST with no browser-only requirement (no JS challenge, no

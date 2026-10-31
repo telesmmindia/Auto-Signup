@@ -381,6 +381,122 @@ with the ids re-read rather than a new mapping:
   `BOT_SITE_URL=https://funcrash.com/`, its own admins/settings/pairs/pair_runs
   files.
 
+### funcrash's Mines: wagering with no risk and no reveal (`BOT_MODE=mines`)
+
+Added 2026-10-30 for a client who wants **turnover, not winnings**. A phone
+recording showed the whole trick, and it is one move: open Mines, stake the
+amount, **reveal nothing**, and let the game's own idle "Auto cashout in: N"
+countdown settle the round at **1.00x**. The stake comes straight back — the
+balance in the recording returns to exactly ₹1,000 every round — so the
+account produces wagering volume at a cost of zero.
+
+⚠️ **The premise is the client's to confirm, not this repo's**: whether
+funcrash actually COUNTS a no-reveal round toward wagering/turnover. If it
+doesn't, none of this does anything. Ask before scaling.
+
+**This is NOT the Evolution client, and that is the whole reason it needed new
+code.** Mines is **Spribe** (Angular 13, `app-version 2.1.50-hotfix`), served
+as an iframe at `turbo.spribegaming.com/mines` inside an outer page at
+`aviaport.spribegaming.com/mines`. It shares no vocabulary with
+`ezugi.evo-games.com` — no `data-role`, no `circle-timer`, no
+`balance-label-value`. So `sites/games.py`'s `GameProfile` does not describe
+it and `mines.py` is a second game driver, the one starexch's Ezugi client
+was deliberately not given.
+
+**The grid is a `<canvas>`.** There are no tile elements at all, which makes
+"reveal nothing" a structural property rather than a rule the code has to
+remember: nothing in `mines.py` can touch a tile because there is nothing in
+the DOM to touch.
+
+**Two traps on the way to the table, both of which cost a probe run:**
+- **`q` takes the catalogue ID, not the `link` slug.** `?q=mines` loads a
+  **permanently blank** `launch.spribegaming.com` page that is indistinguishable
+  from a broken launch. `?q=3139` reaches the real client.
+- **The catalogue is `POST /homepageGames`**, not winclash's live-casino
+  `/casinoGamesList` (which returns 0 rows here, or 419). It answers
+  **anonymously**, so resolving an id needs no login. Read out of the site's
+  own `/slots` inline `loadGames()`.
+
+**The game tab can be WAF-walled on its own, after a clean entry.** Confirmed
+live: the homepage passed with no wall (so no token had ever been minted) and
+`/casinoRedirect` alone got the hard captcha. `main._open_game_direct()` now
+raises **`GameTabWalled`** — a distinct exception carrying the still-open page
+— rather than the generic "launch did not reach the provider", because the two
+need opposite responses: a refused launch is about the account and retrying is
+pointless, while a wall is about the exit IP and is cleared by solving once
+and replaying the token **from a fresh context**. `open_mines_table()` retries
+exactly **twice**; on this site the scarce resource is LOGINS (throttled per
+exit IP and per account), not CapSolver credit. **`CAPSOLVER_API_KEY` is
+required.**
+
+**`_open_game_direct()` no longer hardcodes `evo-games.com`.** It waited for
+that literal string and called anything else a refused launch, which made
+every non-Evolution client structurally unreachable no matter how a profile
+was configured. The host and the provider slug are now profile data
+(`casino_game_host`/`casino_game_hosts`, `casino_provider`/
+`casino_game_providers`), defaulting to exactly the old behaviour — funcrash
+is the first site carrying two providers behind one launch redirect
+(Evolution baccarat **and** Spribe mines). Regression-checked: funcrash,
+winclash and cricmatch all still resolve `evo-games.com` for baccarat.
+
+**The selectors, read off the saved DOM (`probe_mines.py --save-html`), not a
+screenshot:**
+
+| | |
+|---|---|
+| mines count | `div.number-of-mines button.dropdown-toggle` ("Mines: 3") |
+| its options | `div.dropdown-list-number button.dropdown-item` — **1..20** |
+| stake | `app-bet-spinner .input` |
+| its numpad | `app-bet-spinner app-numpad button` + `button.btn-done` |
+| quick stakes | `button.dropdown-toggle.all` → 100/200/500/1,000 |
+| BET | `button.btn-control.btn-bet` |
+| idle countdown | `.auto-cashout-countdown` (`display:none` until a bet is live) |
+| lock overlay | `.lock-ui` (`d-none` while interactive) |
+
+**The wallet is NOT in the game frame** — the frame carries only the stake.
+The balance lives in the outer aviaport document, which is why
+`read_wallet()` takes the game PAGE and everything else takes the FRAME.
+
+**The client refuses to render below 950×530** (`app-screen-too-small`), so
+anything that shrinks the viewport silently replaces the entire UI with an
+apology rather than erroring.
+
+`set_stake()` **reads the value back and refuses to bet if it differs** — the
+same rule `fill_register_form()`'s phone read-back follows: verify what
+LANDED, not what was asked for. A stake that silently stayed at the default
+would bet the wrong amount every round with nothing in the logs.
+
+⚠️ **What is NOT confirmed live.** The login, the WAF path, the launch URL,
+the host, the frame and every selector above are all confirmed against a real
+funded account. What has **never been watched** is a round in flight: the BET
+button's text once staked, whether `.lock-ui` goes up, and above all whether
+the idle countdown really returns the stake. That needs one real bet. Run it
+once, at the client's **default ₹10 stake** — the most the check can cost if
+the auto-cashout misbehaves:
+
+```
+.venv/bin/python probe_mines.py <user> <pass> --url https://funcrash.com/ \
+    --game-id 3139 --provider spribe --mines 1 --watch-round
+```
+
+`round_is_over()` is therefore written to accept several independent signals
+rather than pattern-matching one guessed CASH OUT label, so a wrong guess
+about any single one degrades into "wait" instead of into a stuck round. And
+`run_mines_wager()` **stops the moment a balance moves** (>1 paisa): that
+would mean a round did not auto-cash at 1.00x, and repeating it would compound
+a real loss.
+
+**The bot** is `BOT_MODE=mines`, an exclusive mode like `stockmarket` and
+`password` — and for a sharper reason than either: this is ONE account
+wagering against itself, not a hedge, so it shares no command, no store and
+no engine with `/pair`. Commands (master-only): `/addacc` `/accs` `/delacc`,
+`/run <acc> <amount> <rounds> [mines]`, `/stoprun` `/runs` `/runlog`. State
+lives in `MINES_ACCOUNTS_FILE`/`MINES_RUNS_FILE`, distinct per instance like
+every other file here. Config: `.env.funcrash.mines.example`.
+
+`/stoprun` is cooperative: the round already staked is **not** abandoned (its
+auto-cashout still settles it), the loop just doesn't start another.
+
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a
   game section overlays it — the click **must be forced**. There's a fast-path

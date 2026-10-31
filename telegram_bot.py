@@ -152,6 +152,7 @@ from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandl
 
 import db
 from sites import profile_for
+import mines
 from main import (
     SHOTS_DIR, SITE_URL, _ANTI_THROTTLE_ARGS,
     capsolver_key, change_account_password_via_login, check_phone_taken,
@@ -212,9 +213,11 @@ BOT_SITE_URL = os.environ.get("BOT_SITE_URL") or SITE_URL
 # don't exist on that instance -- Telegram replies nothing for them -- and
 # the "/" menus only show what the instance actually has.
 BOT_MODE = (os.environ.get("BOT_MODE") or "all").strip().lower()
-if BOT_MODE not in ("all", "signup", "gameplay", "stockmarket", "password"):
+if BOT_MODE not in ("all", "signup", "gameplay", "stockmarket", "password",
+                    "mines"):
     raise SystemExit(
-        f"BOT_MODE must be 'signup', 'gameplay', 'stockmarket', 'password', or 'all' (got {BOT_MODE!r})")
+        f"BOT_MODE must be 'signup', 'gameplay', 'stockmarket', 'password', "
+        f"'mines', or 'all' (got {BOT_MODE!r})")
 SIGNUP_ENABLED = BOT_MODE in ("all", "signup")
 # "gameplay" = the original Evolution Baccarat hedge; "stockmarket" = the same
 # pair/run commands driving Evolution Stock Market Live (UP vs DOWN) instead.
@@ -229,6 +232,13 @@ RUN_GAME = STOCKMARKET if STOCKMARKET_ENABLED else BACCARAT
 # plain single-bot `.env` setup never accidentally exposes a command that
 # mutates a real account's login credential.
 PASSWORD_ENABLED = BOT_MODE == "password"
+# Exclusive mode, like "stockmarket" and "password", and for a sharper reason
+# than either: Mines is not a hedge. It is ONE account wagering against
+# itself, so it shares no command, no store and no engine with /pair -- the
+# pair commands would be meaningless here, and /run means something different
+# enough that having both on one instance would be a footgun. The engine is
+# mines.py (Spribe's client), not main.py's Evolution one.
+MINES_ENABLED = BOT_MODE == "mines"
 # How many signups this bot instance can run at once. Each slot is its own
 # Chromium process + dedicated worker thread (see the worker-pool comment
 # below) -- raising this increases real request concurrency against the
@@ -313,6 +323,13 @@ PAIRS_FILE = Path(os.environ.get("PAIRS_FILE", "pairs.json"))
 # Holds account usernames + balances (no passwords), so it's gitignored like
 # pairs.json all the same; give each bot instance its own via PAIR_RUNS_FILE.
 PAIR_RUNS_FILE = Path(os.environ.get("PAIR_RUNS_FILE", "pair_runs.json"))
+# Mines keeps its own two files for the same reason every other instance does:
+# two processes sharing one of these would clobber it, since they are read at
+# import and rewritten wholesale. Accounts here are SINGLE (plaintext
+# passwords, like pairs.json), not pairs.
+MINES_ACCOUNTS_FILE = Path(os.environ.get("MINES_ACCOUNTS_FILE",
+                                          "mines_accounts.json"))
+MINES_RUNS_FILE = Path(os.environ.get("MINES_RUNS_FILE", "mines_runs.json"))
 # Per-admin EXCLUSIVE phone pools (see /setphone) -- {"<user_id>": {"phones":
 # [...], "phone_idx": N}}, one entry per non-master admin who has set their
 # own pool. Deliberately separate from global_settings["phones"] (the
@@ -351,6 +368,8 @@ if "phone" in global_settings and "phones" not in global_settings:
 pairs = _load_json(PAIRS_FILE, {"next_id": 1, "pairs": {}})
 # {"next_id": int, "runs": [ {run record, one per /run, see run_cmd} ]}.
 pair_runs = _load_json(PAIR_RUNS_FILE, {"next_id": 1, "runs": []})
+mines_accounts = _load_json(MINES_ACCOUNTS_FILE, {"next_id": 1, "accounts": {}})
+mines_runs = _load_json(MINES_RUNS_FILE, {"next_id": 1, "runs": []})
 admin_phones = _load_json(ADMIN_PHONES_FILE, {})
 
 
@@ -406,6 +425,14 @@ def save_settings():
 
 def save_admin_phones():
     _save_json(ADMIN_PHONES_FILE, admin_phones)
+
+
+def save_mines_accounts():
+    _save_json(MINES_ACCOUNTS_FILE, mines_accounts)
+
+
+def save_mines_runs():
+    _save_json(MINES_RUNS_FILE, mines_runs)
 
 
 def save_pairs():
@@ -490,6 +517,16 @@ if HEDGE_ENABLED:
                           f"vs acc2 {RUN_GAME.side_b_label}"),
         BotCommand("stoprun", "Stop the active hedge run"),
         BotCommand("runs", "List past hedge runs (optionally by pair id)"),
+        BotCommand("runlog", "Per-round detail of one past run"),
+    ]
+if MINES_ENABLED:
+    MASTER_COMMANDS += [
+        BotCommand("addacc", "Store an account to wager with"),
+        BotCommand("accs", "List stored accounts"),
+        BotCommand("delacc", "Remove a stored account"),
+        BotCommand("run", "Wager N rounds without revealing a tile"),
+        BotCommand("stoprun", "Stop a run after the current round"),
+        BotCommand("runs", "Recent runs"),
         BotCommand("runlog", "Per-round detail of one past run"),
     ]
 if PASSWORD_ENABLED:
@@ -1939,6 +1976,276 @@ async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_result_photo(update, result.get("shot"), caption[:1024])
 
 
+# --- Mines: single-account zero-reveal wagering (BOT_MODE=mines) -----------
+#
+# One account, one table, no opponent. Each round stakes the amount, reveals
+# NOTHING, and lets Spribe's own idle "Auto cashout in: N" countdown settle it
+# at 1.00x -- so the stake comes back and the only product is turnover. There
+# is no hedge here and no second side, which is why none of the /pair machinery
+# above is reused.
+#
+# THE TILES ARE A <canvas>, so "reveal nothing" is structural, not a rule the
+# code has to remember: mines.py has no code path that can touch the grid.
+
+_mines_runs_active = {}  # account id (str) -> {"stop_event": Event, "username": str}
+_mines_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS)
+
+
+def _blocking_run_mines(loop, bot, chat_id, aid, creds, amount, rounds, mines_n,
+                        stop_event):
+    """Runs on _mines_executor -- its own worker thread and its own browser,
+    like _blocking_run_pair, so concurrent runs share no Playwright object."""
+
+    def progress(text):
+        logger.info(f"[Mines #{aid}] {text}")
+        try:
+            asyncio.run_coroutine_threadsafe(
+                bot.send_message(chat_id, f"[#{aid}] {text}"), loop)
+        except Exception:
+            pass
+
+    try:
+        return mines.run_mines_wager(
+            creds["username"], creds["password"], BOT_SITE_URL,
+            amount, rounds, mines=mines_n,
+            proxy=global_settings.get("proxy"),
+            progress=progress, stop_event=stop_event)
+    except PWError as e:
+        return {"ok": False, "rounds_done": 0, "rounds_asked": rounds,
+                "stake": amount, "mines": mines_n,
+                "stop_reason": "playwright_error",
+                "start_balance": None, "final_balance": None, "rounds": [],
+                "messages": [f"Playwright error: {str(e)[:300]}"]}
+
+
+@require_role(is_master)
+async def mines_addacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/addacc <username> <password> -- store an account to wager with.
+    Master-only; the reply never echoes the password back."""
+    args = context.args
+    if len(args) != 2:
+        await update.message.reply_text(
+            "Usage: /addacc <username> <password>\n"
+            "Stores one account for Mines wagering.")
+        return
+    user, pw = args
+    aid = str(mines_accounts["next_id"])
+    mines_accounts["next_id"] += 1
+    mines_accounts["accounts"][aid] = {
+        "username": user, "password": pw,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    save_mines_accounts()
+    await update.message.reply_text(
+        f"✅ Account <b>#{aid}</b> saved — <b>{html.escape(user)}</b>\n"
+        f"Run it with <code>/run {aid} &lt;amount&gt; &lt;rounds&gt;</code>",
+        parse_mode="HTML")
+
+
+@require_role(is_master)
+async def mines_accs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/accs -- list the stored accounts. Passwords are never shown."""
+    accs = mines_accounts["accounts"]
+    if not accs:
+        await update.message.reply_text("No accounts yet. Add one with /addacc.")
+        return
+    lines = ["💣 <b>Mines accounts</b>\n"]
+    for aid, rec in sorted(accs.items(), key=lambda kv: int(kv[0])):
+        running = "  🏃 running" if aid in _mines_runs_active else ""
+        lines.append(f"<b>#{aid}</b>   {html.escape(rec['username'])}{running}\n")
+    await update.message.reply_text("".join(lines)[:4000], parse_mode="HTML")
+
+
+@require_role(is_master)
+async def mines_delacc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delacc <id> -- forget an account. Refused mid-run."""
+    if not context.args:
+        await update.message.reply_text("Usage: /delacc <id>")
+        return
+    aid = context.args[0].lstrip("#")
+    if aid in _mines_runs_active:
+        await update.message.reply_text(
+            f"Account #{aid} is running — /stoprun {aid} first.")
+        return
+    if mines_accounts["accounts"].pop(aid, None) is None:
+        await update.message.reply_text(f"No account #{aid}.")
+        return
+    save_mines_accounts()
+    await update.message.reply_text(f"🗑 Account #{aid} removed.")
+
+
+@require_role(is_master)
+async def mines_run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/run <account id> <amount> <rounds> [mines] -- wager without revealing."""
+    args = context.args
+    if len(args) not in (3, 4):
+        await update.message.reply_text(
+            "Usage: <code>/run &lt;account id&gt; &lt;amount&gt; &lt;rounds&gt; "
+            "[mines]</code>\n\n"
+            "Stakes &lt;amount&gt; for &lt;rounds&gt; rounds, revealing nothing. "
+            "Each round ends on the game's own idle auto-cashout at 1.00x, so "
+            "the stake comes back and only turnover is produced.\n"
+            "[mines] is how many mines the board is set to (1–20, default 1); "
+            "it changes nothing about the money when no tile is revealed.",
+            parse_mode="HTML")
+        return
+
+    aid = args[0].lstrip("#")
+    rec = mines_accounts["accounts"].get(aid)
+    if not rec:
+        await update.message.reply_text(f"No account #{aid}. See /accs.")
+        return
+    try:
+        amount = float(args[1].replace("\u20b9", "").replace(",", ""))
+        rounds = int(args[2])
+        mines_n = int(args[3]) if len(args) == 4 else 1
+    except ValueError:
+        await update.message.reply_text("Amount, rounds and mines must be numbers.")
+        return
+    if amount <= 0 or rounds <= 0:
+        await update.message.reply_text("Amount and rounds must be positive.")
+        return
+    if not 1 <= mines_n <= 20:
+        await update.message.reply_text("Mines must be between 1 and 20.")
+        return
+    if aid in _mines_runs_active:
+        await update.message.reply_text(f"Account #{aid} is already running.")
+        return
+    # One login per account at a time: two contexts betting the same login
+    # would fight over the same round.
+    busy = {r["username"] for r in _mines_runs_active.values()}
+    if rec["username"] in busy:
+        await update.message.reply_text(
+            f"{rec['username']} is already in a run under another id.")
+        return
+    if len(_mines_runs_active) >= MAX_CONCURRENT_RUNS:
+        await update.message.reply_text(
+            f"Already running {MAX_CONCURRENT_RUNS} accounts (the limit).")
+        return
+
+    stop_event = threading.Event()
+    _mines_runs_active[aid] = {"stop_event": stop_event,
+                               "username": rec["username"]}
+    await update.message.reply_text(
+        f"💣 <b>Mines run started</b>  (#{aid})\n"
+        f"👤 <b>{html.escape(rec['username'])}</b>\n"
+        f"💵 ₹{amount:,.2f} × {rounds} round(s),  {mines_n} mine(s)\n"
+        f"🙈 no tile is ever revealed — every round auto-cashes at 1.00x",
+        parse_mode="HTML")
+
+    loop = asyncio.get_running_loop()
+    try:
+        summary = await loop.run_in_executor(
+            _mines_executor, _blocking_run_mines, loop, context.bot,
+            update.effective_chat.id, aid, rec, amount, rounds, mines_n,
+            stop_event)
+    finally:
+        _mines_runs_active.pop(aid, None)
+
+    mines_runs["runs"].append({
+        "id": mines_runs["next_id"], "account_id": aid,
+        "username": rec["username"], "stake": amount,
+        "rounds_asked": rounds, "mines": mines_n,
+        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        **{k: summary.get(k) for k in
+           ("ok", "rounds_done", "stop_reason", "start_balance",
+            "final_balance", "rounds", "messages")}})
+    mines_runs["next_id"] += 1
+    save_mines_runs()
+
+    await update.message.reply_text(
+        _mines_summary_text(mines_runs["runs"][-1]), parse_mode="HTML")
+
+
+def _mines_summary_text(r):
+    def bal(v):
+        return "—" if v is None else f"₹{v:,.2f}"
+
+    sb, fb = r.get("start_balance"), r.get("final_balance")
+    drift = ("—" if sb is None or fb is None else
+             f"{'+' if fb >= sb else ''}{fb - sb:,.2f}")
+    icon = "✅" if r.get("ok") else "❌"
+    wagered = (r.get("rounds_done") or 0) * (r.get("stake") or 0)
+    lines = [
+        f"{icon} <b>Mines run #{r['id']}</b>  (account #{r['account_id']})",
+        f"👤 {html.escape(r['username'])}",
+        f"🎯 {r.get('rounds_done', 0)}/{r.get('rounds_asked', 0)} round(s) "
+        f"at ₹{r.get('stake', 0):,.2f}",
+        f"📊 turnover produced: <b>₹{wagered:,.2f}</b>",
+        f"💰 {bal(sb)} → {bal(fb)}   (net {drift})",
+        f"🛑 {html.escape(str(r.get('stop_reason')))}",
+    ]
+    msgs = r.get("messages") or []
+    if msgs:
+        lines.append("")
+        lines += [f"• {html.escape(str(mm))[:300]}" for mm in msgs[:4]]
+    return "\n".join(lines)[:4000]
+
+
+@require_role(is_master)
+async def mines_stoprun(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/stoprun [id] -- stop one run, or all of them.
+
+    Cooperative: the round already staked is NOT abandoned (its auto-cashout
+    still settles it), the loop just doesn't start another."""
+    if not _mines_runs_active:
+        await update.message.reply_text("Nothing is running.")
+        return
+    if context.args:
+        aid = context.args[0].lstrip("#")
+        rec = _mines_runs_active.get(aid)
+        if not rec:
+            await update.message.reply_text(
+                f"#{aid} isn't running. Active: "
+                f"{', '.join(sorted(_mines_runs_active, key=int))}")
+            return
+        rec["stop_event"].set()
+        await update.message.reply_text(
+            f"🛑 Stopping #{aid} — the live round still settles itself.")
+        return
+    for rec in _mines_runs_active.values():
+        rec["stop_event"].set()
+    await update.message.reply_text(
+        f"🛑 Stopping all {len(_mines_runs_active)} run(s) — each live round "
+        f"still settles itself.")
+
+
+@require_role(is_master)
+async def mines_runs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/runs -- recent runs, newest first."""
+    runs = mines_runs["runs"]
+    if not runs:
+        await update.message.reply_text("No runs yet.")
+        return
+    lines = ["💣 <b>Recent Mines runs</b>\n"]
+    for r in reversed(runs[-12:]):
+        icon = "✅" if r.get("ok") else "❌"
+        lines.append(
+            f"{icon} <b>#{r['id']}</b>  {html.escape(r['username'])}  "
+            f"{r.get('rounds_done', 0)}/{r.get('rounds_asked', 0)} × "
+            f"\u20b9{r.get('stake', 0):,.0f}  "
+            f"({html.escape(str(r.get('stop_reason')))})\n")
+    await update.message.reply_text("".join(lines)[:4000], parse_mode="HTML")
+
+
+@require_role(is_master)
+async def mines_runlog_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/runlog <run id> -- the per-round balances of one run."""
+    if not context.args:
+        await update.message.reply_text("Usage: /runlog <run id>")
+        return
+    rid = context.args[0].lstrip("#")
+    r = next((x for x in mines_runs["runs"] if str(x["id"]) == rid), None)
+    if not r:
+        await update.message.reply_text(f"No run #{rid}.")
+        return
+    lines = [_mines_summary_text(r), ""]
+    for rr in r.get("rounds") or []:
+        b = rr.get("balance")
+        lines.append(f"R{rr['round']}   "
+                     f"{'—' if b is None else f'₹{b:,.2f}'}")
+    await update.message.reply_text("\n".join(lines)[:4000], parse_mode="HTML")
+
+
 # --- Paired-account hedge betting (create pairs, run opposite-side bets) ---
 
 def _blocking_run_pair(loop, bot, chat_id, pid, banker_creds, player_creds, amount, rounds, stop_event):
@@ -2690,6 +2997,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if STOCKMARKET_ENABLED:
                 hedge.append("Table minimum is ₹10 — start with /run <pair> 10 1.")
             sections.append("\n".join(hedge))
+        if MINES_ENABLED:
+            sections.append(
+                "💣 Mines — wagering without risk\n"
+                "/addacc <user> <pass> — store an account   ·   /accs   ·   "
+                "/delacc <id>\n"
+                "/run <acc> <amount> <rounds> [mines] — stake and reveal "
+                "NOTHING; each round ends on the game's own idle auto-cashout "
+                "at 1.00x, so the stake comes back and only turnover is made\n"
+                "/stoprun [acc] — stop after the current round   ·   "
+                "/runs   ·   /runlog <run_id>\n"
+                "The run halts by itself if a balance ever moves — that would "
+                "mean a round did not auto-cash, and repeating it would be a "
+                "real loss."
+            )
         if PASSWORD_ENABLED:
             sections.append(
                 "🔑 Password change\n"
@@ -2854,6 +3175,14 @@ def main():
         app.add_handler(CommandHandler("stoprun", stoprun))
         app.add_handler(CommandHandler("runs", runs_cmd))
         app.add_handler(CommandHandler("runlog", runlog_cmd))
+    if MINES_ENABLED:
+        app.add_handler(CommandHandler("addacc", mines_addacc))
+        app.add_handler(CommandHandler("accs", mines_accs))
+        app.add_handler(CommandHandler("delacc", mines_delacc))
+        app.add_handler(CommandHandler("run", mines_run_cmd))
+        app.add_handler(CommandHandler("stoprun", mines_stoprun))
+        app.add_handler(CommandHandler("runs", mines_runs_cmd))
+        app.add_handler(CommandHandler("runlog", mines_runlog_cmd))
     if PASSWORD_ENABLED:
         app.add_handler(CommandHandler("cp", cp_cmd))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_cp_message))

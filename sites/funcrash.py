@@ -88,7 +88,21 @@ PROFILE = SiteProfile(
     casino_game_ids={
         "Baccarat A": "86",
         "Baccarat B": "87",
+        # Spribe, not Evolution -- a different provider, a different host and
+        # a different client altogether. Read live 2026-10-30 out of the
+        # site's OWN catalogue (POST /homepageGames, which answers
+        # anonymously), and driven live: q=3139 reaches the real client.
+        # NOTE the id is what "q" takes, NOT the catalogue row's "link" slug
+        # -- launching with q=mines loads a permanently blank page that looks
+        # exactly like a broken launch. That cost a probe run to find.
+        "Mines": "3139",
     },
+    casino_game_providers={"Mines": "spribe"},
+    # The launch redirect lands on aviaport.spribegaming.com, whose document
+    # is just a header; the game itself is an iframe at
+    # turbo.spribegaming.com/mines. Matching the bare registrable host covers
+    # both, and both were seen live.
+    casino_game_hosts={"Mines": "spribegaming.com"},
 
     # ---- signup: NOT inspected on this host, inherited from winclash ----
     register_trigger="page_url",

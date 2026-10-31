@@ -73,6 +73,23 @@ parser.add_argument("--provider", default=None,
 parser.add_argument("--secs", type=int, default=60,
                     help="how long to watch the table after it loads")
 parser.add_argument("--headed", action="store_true")
+parser.add_argument("--watch-round", action="store_true",
+                    help="OPT-IN, AND THE ONLY THING HERE THAT SPENDS MONEY: "
+                         "click BET once and watch the round end by itself. "
+                         "No tile is ever revealed (the grid is a <canvas>, so "
+                         "there is nothing clickable there anyway), so the "
+                         "round auto-cashes at 1.00x and the stake comes back. "
+                         "Run it at the client's default stake first -- that is "
+                         "the most the observation can cost if the auto-cashout "
+                         "does NOT behave as the recording showed.")
+parser.add_argument("--mines", type=int, default=None,
+                    help="set the 'Mines: N' dropdown before betting")
+parser.add_argument("--save-html", default=None, metavar="DIR",
+                    help="write each document's full HTML into DIR. The dump "
+                         "above is a summary; an Angular client like Spribe's "
+                         "keeps its dropdown items and its grid in the DOM all "
+                         "along, so the raw markup is what selectors get "
+                         "written from.")
 args = parser.parse_args()
 
 if args.from_pairs:
@@ -176,6 +193,46 @@ def find_game(page, wanted):
 # Everything a Mines driver could need a selector for, read off whatever
 # document the game actually lives in. Deliberately broad: the point is to
 # SEE the client's vocabulary, not to confirm a guess about it.
+# What one round looks like from the outside. Sampled twice a second while a
+# bet is live, printed only when something changes -- so the output is the
+# round's state machine, not a log. Every one of these came out of the saved
+# client markup (Spribe Mines, Angular 13, app-version 2.1.50-hotfix); the
+# grid is a <canvas>, so there are no tile elements here by design.
+_ROUND_JS = """() => {
+  const t = (sel) => {
+    const e = document.querySelector(sel);
+    return e ? (e.innerText || "").trim().replace(/\\s+/g, " ") : null;
+  };
+  const bet = document.querySelector("button.btn-control.btn-bet");
+  const cd  = document.querySelector(".auto-cashout-countdown");
+  const lock = document.querySelector(".lock-ui");
+  const bar = document.querySelector(".progress-bar");
+  return {
+    bet_text: bet ? (bet.innerText || "").trim().replace(/\\s+/g, " ") : null,
+    bet_class: bet ? bet.className.replace(/ng-[a-z-]+/g, "").trim() : null,
+    bet_disabled: bet ? !!bet.disabled : null,
+    countdown: cd && getComputedStyle(cd).display !== "none"
+               ? (cd.innerText || "").trim().replace(/\\s+/g, " ") : null,
+    next: t(".next-tile"),
+    mines: t("div.number-of-mines button.dropdown-toggle"),
+    stake: t("app-bet-spinner .input"),
+    progress: bar ? bar.style.width : null,
+    locked: lock ? !lock.classList.contains("d-none") : null,
+    toast: t("kit-toast-container") || null,
+  };
+}"""
+
+
+def read_balance(game_page):
+    """The wallet is in the OPERATOR's outer document (aviaport), not in the
+    game frame -- the frame shows only the stake. Read it as text; comparing
+    the rendered string is enough to answer 'did the stake come back'."""
+    try:
+        return (game_page.inner_text("body") or "").strip().replace("\n", " ")[:40]
+    except Exception:
+        return None
+
+
 _DUMP_JS = """() => {
     const vis = (el) => {
         const r = el.getBoundingClientRect();
@@ -424,12 +481,75 @@ try:
         print(f"\n=== FRAME {i}: {fr.url[:120]} ===")
         dump_target(fr, f"frame{i}")
 
+    if args.save_html:
+        import os
+        os.makedirs(args.save_html, exist_ok=True)
+        targets = [("tab", game_page)] + [
+            (f"frame{i}", fr) for i, fr in enumerate(game_page.frames)
+            if fr != game_page.main_frame]
+        for label, t in targets:
+            try:
+                html = t.evaluate("() => document.documentElement.outerHTML")
+            except Exception as e:
+                print(f"    {label}: could not read HTML -- {str(e)[:80]}")
+                continue
+            path = os.path.join(args.save_html, f"{label}.html")
+            with open(path, "w") as fh:
+                fh.write(html)
+            print(f"    saved {len(html)} bytes of {label} HTML to {path}")
+
     shot = f"{SHOTS}/mines-probe-{int(time.time())}.png"
     try:
         game_page.screenshot(path=shot, full_page=True)
         print(f"\n    screenshot: {shot}")
     except Exception as e:
         print(f"    screenshot failed: {str(e)[:100]}")
+
+    # --- optionally watch ONE real round ---------------------------------
+    if args.watch_round:
+        fr = None
+        for f in game_page.frames:
+            if f != game_page.main_frame and "mines" in (f.url or ""):
+                fr = f
+        if fr is None:
+            raise RuntimeError("no Mines frame to bet in")
+
+        if args.mines:
+            fr.click("div.number-of-mines button.dropdown-toggle")
+            game_page.wait_for_timeout(600)
+            fr.click(f"div.dropdown-list-number button.dropdown-item"
+                     f" >> text=/^\\s*{args.mines}\\s*$/")
+            game_page.wait_for_timeout(600)
+            print("    mines set to:", fr.inner_text(
+                "div.number-of-mines button.dropdown-toggle").strip())
+
+        stake = fr.inner_text("app-bet-spinner .input").strip()
+        bal0 = read_balance(game_page)
+        print(f"\n--- placing ONE bet of {stake} (balance {bal0}) ---")
+        print("    nothing in the grid is clicked; the grid is a <canvas>")
+        fr.click("button.btn-control.btn-bet")
+
+        deadline = time.time() + 90
+        prev = None
+        while time.time() < deadline:
+            try:
+                snap = fr.evaluate(_ROUND_JS)
+                snap["balance"] = read_balance(game_page)
+            except Exception as e:
+                print(f"    [sample failed: {str(e)[:70]}]")
+                game_page.wait_for_timeout(500)
+                continue
+            key = json.dumps(snap, sort_keys=True)
+            if key != prev:
+                print(f"  [{time.strftime('%H:%M:%S')}] " + "  ".join(
+                    f"{k}={v!r}" for k, v in snap.items() if v not in (None, "")))
+                prev = key
+            game_page.wait_for_timeout(500)
+
+        bal1 = read_balance(game_page)
+        print(f"\n=== balance {bal0} -> {bal1} ===")
+        print("    the stake came back" if bal0 == bal1 else
+              "    *** the balance did NOT return to its starting value ***")
 
     # --- watch it --------------------------------------------------------
     # Nothing is clicked. This records whether anything changes on its own,
