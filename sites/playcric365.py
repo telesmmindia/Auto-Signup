@@ -88,7 +88,53 @@ PROFILE = SiteProfile(
     # consulted when casino_launch_mode == "direct_game_url" (it is not
     # here -- this site uses the lobby), so these are recorded as verified
     # fact for whoever needs them, not as the active route.
-    casino_game_ids={"Baccarat A": 85, "Baccarat B": 86},
+    casino_game_ids={
+        "Baccarat A": 85,
+        "Baccarat B": 86,
+        # Spribe, not Evolution. Read live 2026-11-02 out of the site's OWN
+        # catalogue (POST /casinoGetFiltersdata with selectedProviders=spribe,
+        # which answers anonymously) and then DRIVEN to a live client: id 984
+        # opens the real Mines. The eleven spribe titles are 979-987 plus
+        # 1148/1405, so a neighbouring id is a different game, not a variant.
+        "Mines": 984,
+    },
+    casino_game_providers={"Mines": "spribe"},
+    # Lands on aviaport.spribegaming.com, whose document carries the wallet
+    # and .lock-ui, with the game itself in an iframe at
+    # turbo.spribegaming.com/mines -- byte for byte funcrash's structure, so
+    # mines.py needed no change. Matching the bare registrable host covers
+    # both, and both were seen live.
+    casino_game_hosts={"Mines": "spribegaming.com"},
+    # ⚠️ NOT /casinoRedirect. Read out of this site's own goToCasinoLive(),
+    # which is only readable from a LOGGED-IN session (logged out it is
+    # stubbed to `$(".cls_loginbtn").click()`, so the real route cannot be
+    # found anonymously -- see probe_slots_launch.py). It builds
+    #   /playNow?q=<data-id>&provider=<data-provider>&type=<data-gametype>
+    # and type is "slots" here, not "casino".
+    casino_game_launch_paths={
+        "Mines": "/playNow?q={id}&provider={provider}&type=slots",
+    },
+
+    # ⚠️ LOAD-BEARING for Mines, and for nothing else on this site -- but it
+    # applies to every context, so it is written down rather than left to be
+    # re-derived. Spribe's CONFIG CDN flat-403s headless Chromium's default
+    # user agent, and a CloudFront 403 carries no Access-Control-Allow-Origin
+    # header, so the game client reports a CORS failure and dies with
+    # "Retry limit of client config exceeded!" -- which reads as a broken
+    # launch or a bad game id, not as a user-agent problem. Measured live
+    # 2026-11-02 from the production server, same URL, UA the only variable:
+    #   HeadlessChrome/140 UA -> 403, x-cache: Error from cloudfront
+    #   Chrome/126 UA         -> 200, access-control-allow-origin: *
+    # With the headless UA the launch also lands straight on
+    # turbo.spribegaming.com with no outer document; with a real one it takes
+    # the ordinary aviaport route. Same class of fault as winclash's WAF
+    # (CLAUDE.md), and funcrash carries this UA for the same reason, which is
+    # why Mines worked there and not here. The site itself has no WAF and
+    # never cared about the UA; the login path was re-checked live with this
+    # UA in place and is unchanged.
+    user_agent=("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/126.0.0.0 Safari/537.36"),
 
     # VERIFIED LIVE 2026-10-23 on a real account, and this flag is
     # LOAD-BEARING -- it is not just a speed option.

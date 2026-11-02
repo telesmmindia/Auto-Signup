@@ -4390,7 +4390,12 @@ def _open_game_direct(page, prof, tile_text, site_url=None):
     # the profile's single-provider defaults.
     provider = prof.casino_game_providers.get(tile_text, prof.casino_provider)
     want_host = prof.casino_game_hosts.get(tile_text, prof.casino_game_host)
-    path = prof.casino_launch_path.format(id=game_id, provider=provider)
+    # The launch PATH can differ per table too: playcric365's slots launch is
+    # /playNow?...&type=slots while its live-casino one is not /casinoRedirect
+    # at all. Read out of the site's own handler, never guessed.
+    template = prof.casino_game_launch_paths.get(tile_text,
+                                                prof.casino_launch_path)
+    path = template.format(id=game_id, provider=provider)
     url = f"{parts.scheme}://{parts.netloc}{path}"
     game_page = page.context.new_page()
     try:

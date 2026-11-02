@@ -284,6 +284,16 @@ class SiteProfile:
     casino_game_host: str = "evo-games.com"
     casino_game_hosts: dict = field(default_factory=dict)
 
+    # Per-table override of casino_launch_path, for a site whose SLOTS launch
+    # differs from its live-casino one. playcric365 is the first: its own
+    # goToCasinoLive() (readable only from a logged-in session -- logged out
+    # every site in this family stubs it to open the login modal) builds
+    #   /playNow?q=<id>&provider=<prov>&type=<data-gametype>
+    # i.e. a different PATH from winclash/funcrash's /casinoRedirect and
+    # type=slots rather than type=casino. Empty by default, so every existing
+    # site keeps casino_launch_path byte for byte.
+    casino_game_launch_paths: dict = field(default_factory=dict)
+
     # Whether this site's register endpoint has been confirmed (live, via a
     # captured network trace + a raw curl replay -- see CLAUDE.md) to be a
     # plain JSON POST with no browser-only requirement (no JS challenge, no
