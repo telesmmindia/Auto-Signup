@@ -2740,7 +2740,7 @@ A stopped job **returns** rather than raising, so it renders as a normal ✅
 
 ---
 
-# 7. Exchange bet bot (`exchange.py`) — khelstake24, starexch555
+# 7. Exchange bet bot (`exchange.py`) — khelstake24, starexch555, cricmatch247
 
 Standalone Telegram bot for khelstake24.com: places the same Back/Lay
 Match Odds bet on every operator ID at once, cancels unmatched bets,
@@ -3123,3 +3123,89 @@ Config: `.env.playinmatch.exchange.example` → its own `EXCHANGE_BOT_TOKEN`,
 its own `ADMINS_FILE` (`admins.exchange.playinmatch.json`) and **its own
 accounts tab** — the bot writes balances into column C, so a tab another
 script already writes would have the two overwrite each other.
+
+### cricmatch247 is the same white-label again — but it was CHECKED
+
+Added 2026-11-02. cricmatch247 runs the same Laravel exchange platform as
+khelstake24 and starexch555, so like starexch it is an env file and not a
+fork. The reason this section exists anyway is that the family resemblance
+was **not** taken as proof — playinmatch looked like a sibling too and
+turned out to differ in every layer — so every assumption the adapter makes
+was read back off cricmatch's own pages and inline JavaScript:
+
+- **Routes match, including the negative one.** `/exchange/cricket-exchange`
+  (and the football/tennis pages), `/ex/competition/<id>` and
+  `/ex/event-details/<id>` all answer 200, while `/mobile/sports` **404s** —
+  which is the documented tell for this platform rather than the jeetwin
+  one, taken in the direction that can actually rule something out.
+- **`parse_competitions()` / `parse_match_list()` / `parse_match_page()` all
+  ran on real cricmatch HTML unchanged**: 13 cricket series / 17 matches,
+  116 football series / 150 matches, 22 tennis series / 150 matches, and an
+  event page giving the 400-char encrypted `limit` blob plus a `Match Odds`
+  market with both runners.
+- **The betslip template is field-for-field the same sixteen**, in the same
+  order, with `ltp` defaulting to `"na"` and `expo` to `"0"` — read out of
+  its own `$(form).serialize()` handler. `POST /api2/v2/placeBet` carries
+  `X-CSRF-Token`, is judged by **`status`**, and **205 still means "routine
+  check"** followed by the site's own redirect to `/logout?q=routinecheck`.
+- **There is exactly ONE `limit` blob and it is the template's.** No
+  submit-handler `find('input[name=limit]').val(...)` override exists here,
+  so `parse_match_page()` reads the right one — the opposite of playinmatch,
+  where taking the template's blob would send a value that site never sends.
+  Worth checking per site rather than inheriting; it is one grep.
+- **Same odds provider, same URL shape.** Its own call is
+  `odds4.starlingpay.co.uk/api/v1/get/getMarketBook/<eid>?q=…&eventType=<eid>`
+  where `eid` is `data-eventtype` — the event **TYPE** in the path, which is
+  where khelstake puts it and where playinmatch puts the event **id**. It
+  batches market ids 5 at a time, as `market_book_url()` already does.
+- **Same rules in its own JS**: `stake < 2000` and `odds < 1.01 || odds > 5`
+  refused client-side, Over/Under fancy lines exempt. So the existing
+  `EXCHANGE_MIN_STAKE=0` reasoning and the odds defaults carry over.
+
+**Driven end to end read-only through the bot's own code** (a real
+`AccountSession` and the real adapter, not a side-channel script): login →
+balance **₹1484.68 / exposure 0.0** → 13 series → matches → event page →
+live odds (`OPEN`, real back/lay, the `hash` blob present) → the unmatched
+panel (empty, which is an answer and not an error). Note the balance came
+from `balance.wallet`, the key starexch lacks.
+
+`cricmatch247.com` is named in `exchange_sites._BY_HOST` and `cricmatch` in
+`_BY_BRAND` even though the fallback would reach `KhelstakeSite` anyway —
+so a verified site cannot be moved off its adapter by a later change to the
+default, and so the digit-rotation rule covers it.
+
+⚠️ **The exit IP matters here in a way it does not on the other two, and in
+two separate ways** — both are the casino side's documented behaviour on the
+same domain (section 1), so they are not new risks, just ones this instance
+inherits:
+1. cricmatch's **AWS ALB/WAF bare-403s IPs it has flagged as proxies**, and
+   a WAF-blocked proxy is indistinguishable from a broken one until you
+   check `ip-api.com/json/<ip>?fields=proxy,hosting`. Prefer residential.
+   (The DataImpulse gateway in `proxies.txt` was served normally on a
+   read-only check 2026-11-02 — `hosting:true` but `proxy:false` — so it
+   works today; it rotates its exit per connection, so that is luck holding
+   rather than a guarantee.)
+2. Its edge **rate-blocks `POST /login` on volume** — ~20 logins in a few
+   minutes from one IP, then blocked ~20 minutes regardless of pacing, while
+   the plain GET keeps working so the site looks healthy. `EXCHANGE_BET_
+   CONCURRENCY` sizes the **login sweep** at startup and on `/relogin` as
+   well as bet placement, so it is set to **2** in the example rather than
+   starexch's 5. More proxy IPs is the fix for a bigger roster, not a bigger
+   number. A login refused at the edge is reported as **"edge blocked: …"**,
+   not as a wrong password — read the message before changing credentials.
+
+⚠️ **No bet has been placed here yet.** `placeBet` and `cancelbet` are the
+only two steps unexercised, exactly as khelstake, starexch and playinmatch
+each were. Fund one ID and run the confirm screen's **🧪 Test 1 ID**
+(unmatched BACK @1.01, cancelled immediately — nothing can match at 1.01,
+so there is no exposure) before any multi-ID bet.
+
+`probe_exchange.py --url https://cricmatch247.com --user <id> --pass <pw>
+--event /ex/event-details/<current id>` is the read-only pre-flight for this
+template. Stale event ids 404 once a match ends, so pass a current one.
+
+Config: `.env.cricmatch.exchange.example` → its own `EXCHANGE_BOT_TOKEN`,
+its own `ADMINS_FILE` (`admins.exchange.cricmatch.json`) and **its own
+accounts tab** — the bot writes balances into column C, and
+`balance_checker.py` writes column C too, so a shared tab would have the two
+processes overwrite each other.

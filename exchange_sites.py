@@ -138,9 +138,26 @@ class ExchangeSite:
 
 class KhelstakeSite(ExchangeSite):
     """The platform exchange.py was written for. Verified live 2026-10-09/10
-    (khelstake24) and 2026-10-21 (starexch555); see CLAUDE.md section 7.
+    (khelstake24), 2026-10-21 (starexch555) and 2026-11-02 (cricmatch247);
+    see CLAUDE.md section 7.
 
     This class is the old inline code moved, not rewritten.
+
+    cricmatch247 was checked against its own pages and inline JS rather than
+    assumed from the family resemblance, and every one of them matched: the
+    sport pages, /ex/competition/<id> and /ex/event-details/<id> all answer
+    200 (while /mobile/sports 404s, which is the tell for this platform and
+    not the jeetwin one); the betslip template emits the same sixteen fields
+    in the same order with ltp="na" and expo="0"; placeBet is judged by
+    `status`, 205 still meaning "routine check"; the page builds the same
+    getMarketBook URL on the same host with the event TYPE in the path and
+    <=5 market ids per call; and there is exactly ONE `limit` blob, in the
+    template, with no submit-handler override -- so parse_match_page reads
+    the right one here, unlike on playinmatch. Driven end to end read-only
+    with a real account: login, balance (balance.wallet, which starexch
+    lacks), series, matches, event page, live odds and the unmatched panel.
+    placeBet and cancelbet are unexercised there, the same gate every site
+    on this adapter has passed through.
     """
 
     key = "khelstake"
@@ -782,6 +799,11 @@ _BY_HOST = {
     "playincric.com": PlayinmatchSite,
     "khelstake24.com": KhelstakeSite,
     "starexch555.com": KhelstakeSite,
+    # cricmatch247 would reach KhelstakeSite through the fallback anyway;
+    # it is named here because it was CHECKED rather than assumed (live,
+    # read-only, 2026-11-02 -- see the class docstring), so a later change
+    # to the fallback cannot silently move a verified site off its adapter.
+    "cricmatch247.com": KhelstakeSite,
 }
 
 # These brands rotate their domain by changing the DIGITS on the end
@@ -795,6 +817,7 @@ _BY_BRAND = {
     "playincric": PlayinmatchSite,
     "khelstake": KhelstakeSite,
     "starexch": KhelstakeSite,
+    "cricmatch": KhelstakeSite,
 }
 
 
