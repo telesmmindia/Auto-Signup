@@ -504,6 +504,83 @@ every other file here. Config: `.env.funcrash.mines.example`.
 `/stoprun` is cooperative: the round already staked is **not** abandoned (its
 auto-cashout still settles it), the loop just doesn't start another.
 
+**100 clean rounds have now run on funcrash (2026-10-31).** One account,
+₹1,000 a round, mines 1: every round read the balance back at exactly
+**1000.0**, ~38s each, ~95 rounds an hour. So the premise is proven at the
+MECHANICAL level — the idle auto-cashout really does return the stake, and
+`run_mines_wager`'s "stop if any balance moves" guard never fired. Whether
+the site COUNTS those rounds as wagering is still the client's question, not
+this repo's. `MAX_CONCURRENT_RUNS` was raised 2→5 after that run.
+
+### The same bot on playcric365 (`.env.playcric365.mines`)
+
+Added 2026-11-02. playcric365 carries Spribe Mines too, and **the client at
+the end of the route is byte for byte funcrash's** — wallet and `.lock-ui` in
+the outer `aviaport.spribegaming.com` document, the controls in a
+`turbo.spribegaming.com/mines` iframe — so **`mines.py` needed no change at
+all**. Everything that differs is profile data. Both differences were read
+live with `probe_slots_launch.py` (read-only, no bet):
+
+- **The launch URL is `/playNow?q=<id>&provider=<prov>&type=slots`**, not
+  `/casinoRedirect`. It comes out of the site's own `goToCasinoLive()`, and
+  that function is readable **only from a logged-in session** — logged out,
+  every site in this white-label family stubs it to
+  `$(".cls_loginbtn").click()`, so the real route cannot be found
+  anonymously. Hence `SiteProfile.casino_game_launch_paths`, a per-table
+  override of `casino_launch_path`; empty on every other site, so nothing
+  else changed. Note `type` is `slots` here, not `casino`.
+- **Mines is id 984 on provider `spribe`**, read out of the site's own
+  **`POST /casinoGetFiltersdata`** (`selectedProviders=spribe`, which answers
+  anonymously) and then driven to a live client. The eleven spribe titles are
+  979-987 plus 1148/1405, so a neighbouring id is a different game, not a
+  variant. The live-casino endpoints are not the ones here:
+  `/displaygames` answers **empty** for `slots`/`allgames`/`spribe`, and
+  funcrash's `/homepageGames` does not exist.
+- **`casino_launch_mode` is deliberately NOT changed.** playcric's baccarat
+  and Stock Market bots reach their tables through the lobby + tile route,
+  and `mines.py` calls `_open_game_direct()` itself rather than going through
+  `_open_table_for()`, so both routes coexist on one profile.
+
+⚠️ **The user agent is the part that would have cost a day.** Spribe's CONFIG
+CDN (`app-config.spribegaming.com`) **flat-403s headless Chromium's default
+UA**, and a CloudFront 403 carries no `Access-Control-Allow-Origin` header —
+so the browser reports a **CORS** failure and the client dies with **"Retry
+limit of client config exceeded!"**. From the outside that reads as a broken
+launch or a wrong game id; nothing points at the UA. Measured live from the
+production server, same URL, UA the only variable:
+
+| user agent | result |
+|---|---|
+| `HeadlessChrome/140` | **403**, `x-cache: Error from cloudfront`, no CORS header |
+| `Chrome/126` | **200**, `access-control-allow-origin: *` |
+
+`curl` with its own UA gets 200, which is why the endpoint looks healthy from
+the shell while the browser cannot read it. With the headless UA the launch
+also lands straight on `turbo.spribegaming.com` with **no outer document** (so
+`read_wallet()` has nothing to read); with a real one it takes the ordinary
+aviaport route. Same class of fault as winclash's WAF, and **funcrash already
+carried a real UA, which is exactly why Mines worked there and not here**.
+`sites/playcric365.py` now sets `user_agent`; the site itself has no WAF and
+never cared, and the login path was re-checked live with it in place.
+
+**No CapSolver key is needed here** — playcric has no WAF, so a seat takes
+**~13s** against funcrash's ~30s.
+
+Verified live 2026-11-02 through `mines.py` itself: login → launch → client,
+wallet read ₹513 off the outer document, mines count set to 1, and stakes
+25 → 100 → 10 each confirmed by read-back. **No bet placed.** A round in
+flight has not been watched *on this site* — funcrash's 100 rounds were a
+different operator — so do one `/run <acc> 10 1` and read `/runlog` first.
+
+`probe_slots_launch.py --from-pairs F --url U --name Mines --lobby "/slots/?p=spribe"`
+is the tool for the next site on this template: it logs in, prints the site's
+own launch handler **verbatim**, lists every `goToCasinoLive` tile with its
+`data-id`/`data-provider`, and with `--open` clicks the wanted one and reports
+where it landed, which frame holds which selector, the console errors and the
+failed requests. `--ua` forces a user agent, which is how the 403 above was
+isolated. Places no bet and types no credential (`--from-pairs` reads the
+bot's own pairs file).
+
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a
   game section overlays it — the click **must be forced**. There's a fast-path
