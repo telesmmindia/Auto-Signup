@@ -156,6 +156,7 @@ import mines
 from main import (
     SHOTS_DIR, SITE_URL, _ANTI_THROTTLE_ARGS,
     capsolver_key, change_account_password_via_login, check_phone_taken,
+    http_change_account_password,
     extract_referral_code, submit_otp, otp_outcome_message, register_block_message,
     fill_register_form, free_account_number, free_phone_number,
     gen_account, gen_password, otp_digit_count,
@@ -1919,11 +1920,24 @@ async def handle_cp_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(f"Changing password for {username}...")
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(_pw_executors[0], _blocking_change_password,
-                                        username, current_password, new_password)
+    # Same split as password_changer.process_row(): the ~2s HTTP route where
+    # the site is confirmed to accept an out-of-band change-password POST
+    # (starexch, khelstake), else the browser login. It touches no Playwright
+    # object, so it runs on the default pool, not a _pw_executors slot.
+    if profile_for(BOT_SITE_URL).supports_http_change_password:
+        result = await loop.run_in_executor(
+            None, lambda: http_change_account_password(
+                username, current_password, new_password,
+                site_url=BOT_SITE_URL, proxy=global_settings.get("proxy")))
+    else:
+        result = await loop.run_in_executor(_pw_executors[0], _blocking_change_password,
+                                            username, current_password, new_password)
 
     status = "OK" if result["ok"] else "FAILED"
     caption = f"Password change [{status}] for {username}\n" + "\n".join(result["messages"])
+    if result.get("infra_block"):
+        caption += ("\nThe site's firewall answered, not the site itself -- "
+                    "nothing was changed. Wait a few minutes and send /cp again.")
     if result.get("new_password"):
         caption += f"\nNew password: {result['new_password']}"
     await update.message.reply_text(caption[:4096])

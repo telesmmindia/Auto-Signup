@@ -1472,7 +1472,15 @@ re-checks `is_master()` itself (a `MessageHandler` isn't covered by the
 decorator) and silently ignores stray text otherwise.
 
 The old password is never echoed; the new one **is** included on success (matching
-`build_caption()`'s norm for master-only chats). **Text-only reply, no screenshot**
+`build_caption()`'s norm for master-only chats).
+
+`/cp` takes the ~2s no-browser route (`http_change_account_password()`) on any
+site with `supports_http_change_password` — starexch and **khelstake24**
+(`.env.khelstake.password`, added 2026-11-03) — and the browser login
+everywhere else (cricmatch). khelstake's endpoint was confirmed live on the
+refusal path only (wrong current password → `status 201`); the first real
+`/cp` there is the first watched success. An `infra_block` reply says the
+firewall answered and nothing changed. **Text-only reply, no screenshot**
 — deliberate; the shot is still taken and stored on disk.
 
 ### `/freenum <username> <password>`

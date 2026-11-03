@@ -11,8 +11,18 @@ Confirmed live 2026-10-09 against a real account:
                   cricmatch-style) plus balance.exposure. So
                   http_check_account_balance() works unchanged.
 
-Only the exchange (Back/Lay on Match Odds) is in use here. Signup, casino,
-free-number and change-password were never probed on this site, so they stay
+  * changePassword -- added 2026-11-03 for the password-change bot
+                  (.env.khelstake.password). POST /changePassword
+                  (oldPassword/newPassword/_token) answers a bare
+                  requests.Session after POST /login, exactly as on starexch:
+                  a deliberately wrong current password came back
+                  {"status":201,"msg":"Please enter the valid current
+                  password"}. Not in the logged-out page source, so don't
+                  conclude it's missing by grepping the homepage. The success
+                  path (status 200) follows the same convention but has not
+                  been watched on this site yet.
+
+Signup, casino and free-number were never probed on this site, so they stay
 off; the signup selectors below are the shared template's, inherited as a
 starting point for inspect_form.py and nothing more.
 """
@@ -36,6 +46,10 @@ PROFILE = SiteProfile(
     supports_http_login=True,
     http_login_path="/login",
     http_balance_path="/api2/v2/getBalance",
+    # Confirmed live 2026-11-03 on the refusal path (see the docstring).
+    supports_change_password=True,
+    change_password_path="/changePassword",
+    supports_http_change_password=True,
 
     sel={
         "open_modal": [".registerUserData", "button.headerjoinBtn",

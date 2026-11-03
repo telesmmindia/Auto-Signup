@@ -575,6 +575,262 @@ class PlayinmatchSite(ExchangeSite):
 
 
 # ═══════════════════════════════════════════════════════════════════════
+#  khelo24bet7 / khelosports77 / kheloexch99 / khelostar247
+#  -- the jeetwin exchange template's DESKTOP variant
+# ═══════════════════════════════════════════════════════════════════════
+
+class Khelo24Site(ExchangeSite):
+    """The "khelo" family: the same jeetwin exchange template playinmatch
+    runs, served through its DESKTOP routes instead of its mobile ones.
+
+    Mapped read-only 2026-11-03 off the sites' own pages and inline JS. It
+    was not assumed from the family resemblance -- the probe that found it
+    started by testing BOTH known platforms' tells, and the site answered
+    neither: `/exchange/cricket-exchange` (the Laravel tell) and
+    `/mobile/sports` (the jeetwin-mobile tell) both 404. What identifies it
+    is its own asset path, `.../jeetwin_exchange/assets/desktop/...`, so
+    this is a third route family on the second platform rather than a third
+    platform.
+
+    Everything exchange.py needs lives under `/ex/d/`:
+
+        match list   GET  /ex/d/inplay          (all sports on one page)
+        event page   GET  /ex/d/details/<eventId>?marketId=<marketId>
+        odds         POST <odds host>/api/v1/get/getMarketBook/<eventId>
+        place        POST /ex/d/api/placeBet
+        open bets    GET  /ex/d/api/getOpenBets/<marketId>   -- HTML
+        cancel       POST /ex/d/api/cancelAllBet?desktop=    -- id[] array
+        login        POST /api2/login     {_token, email, password}
+        balance      POST /api/getBalance
+
+    Differences worth not re-deriving, each read off the page rather than
+    inferred from the sibling platforms:
+
+    * **The betslip is a hybrid of the two adapters already here.** It
+      carries playinmatch's `vol` and `exposure` AND khelstake's `ltp` and
+      `expo` -- seventeen fields in all. Sending either sibling's list
+      would drop fields this one's own serialize() sends.
+    * **There is exactly ONE `limit` blob and it is the template's.** The
+      submit handler rewrites `matched`, `vol`, `ltp` and `eventType` from
+      the clicked cell, but it does NOT touch `limit` -- so unlike
+      playinmatch, where taking the template's blob would send a value the
+      site never sends, here the template's blob is the right one and it is
+      sent once, not twice. Checked by grepping the handler for a
+      `find('input[name=limit]').val(...)` override: there is none.
+    * **Login is `/api2/login`, not `/api2/v2/login`, and it takes no
+      `digits`.** playinmatch's client-side captcha field does not exist
+      here; sending it is harmless but it is not what the page sends.
+    * **Balance is `/api/getBalance`** -- the winclash-family endpoint, not
+      the Laravel `/api2/v2/getBalance`.
+    * **Open bets are HTML and PER MARKET.** The site loads
+      `/ex/d/api/getOpenBets/<marketId>` straight into a panel with
+      jQuery's .load(), and the cancellable rows inside carry their bet id
+      on `.cancelOptn[data-id]`. There is no account-wide "all my bets"
+      endpoint on these routes, so `unmatched_ids()` asks about the markets
+      this session has actually touched -- see its own docstring.
+    * **The odds host is shared across the brand**: every one of these
+      sites' pages builds the URL against `odds4.khelo24bet7.com`. The
+      `ajax.gamerstechnologies.com` alternative in the same function sits
+      behind `if ("" == 1)`, which is never true, so it is dead code and
+      not a fallback worth reproducing.
+    * Its own JS refuses odds >= 5 with "Sorry the bet cannot be accepted
+      by our risk management team", and the stake box carries min 2000 --
+      the same numbers as both siblings, so the existing
+      EXCHANGE_MIN_ODDS / EXCHANGE_MAX_ODDS defaults carry over and
+      EXCHANGE_MIN_STAKE stays 0 for the same reason (the server names its
+      own figure when it refuses one).
+
+    ⚠️ **Verified anonymously only.** The match list, the event page, its
+    markets and runners, the limit blob, the odds book and every endpoint
+    and payload above were read from the live sites with no account. Login,
+    balance, open bets, placeBet and cancel are coded from the site's own
+    JavaScript and have NEVER been run -- the same basis playinmatch's
+    adapter shipped on. Run probe_khelo.py with a real id, then the confirm
+    screen's 🧪 Test 1 ID, before any multi-ID bet.
+    """
+
+    key = "khelo24"
+    has_series = False
+    default_odds_host = "https://odds4.khelo24bet7.com"
+
+    # One page carries every sport; the sport is a per-row attribute, so it
+    # selects here rather than in the URL. Ids read off the live inplay
+    # page's own data-eventtype / data-type values.
+    sports = {
+        "cricket": ("Cricket", "🏏", "/ex/d/inplay"),
+        "football": ("Football", "⚽", "/ex/d/inplay"),
+        "tennis": ("Tennis", "🎾", "/ex/d/inplay"),
+    }
+    SPORT_EVENT_TYPE = {"cricket": "4", "football": "1", "tennis": "2"}
+
+    # ── auth ──
+    def login(self, account) -> tuple[bool, str]:
+        account.session = engine.http_session_for(account.proxy)
+        account.csrf = self._csrf(account, "/ex/d/home")
+        if not account.csrf:
+            return False, ("could not read the csrf token "
+                           "(site blocked the page, or it moved domain?)")
+        resp = account.api_post("/api2/login", {
+            "email": account.username,
+            "password": account.password,
+        })
+        if resp.get("status") == 200:
+            return True, resp.get("message") or "Login Successfully"
+        if resp.get("_error"):
+            return False, resp.get("message") or "login request failed"
+        return False, resp.get("message") or "Invalid Username/ Password"
+
+    def _csrf(self, account, path: str) -> str:
+        html = account.get_page(path)
+        m = re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
+        return m.group(1) if m else ""
+
+    def read_balance(self, account) -> dict | None:
+        resp = account.api_post("/api/getBalance")
+        if resp.get("_error"):
+            return None
+        bal = resp.get("balance")
+        if isinstance(bal, dict):
+            amount = (bal.get("wallet") if bal.get("wallet") is not None
+                      else bal.get("balance") if bal.get("balance") is not None
+                      else bal.get("totalBalance") if bal.get("totalBalance") is not None
+                      else bal.get("main_balance"))
+            exposure = bal.get("exposure") or bal.get("liability")
+        else:
+            amount = bal if bal is not None else resp.get("totalBalance")
+            exposure = resp.get("exposure") or resp.get("liability")
+        if amount is None:
+            return None
+        return {"balance": _as_float(amount), "exposure": _as_float(exposure)}
+
+    # ── navigation ──
+    def list_series(self, account, sport: str) -> list[dict]:
+        raise RuntimeError("this site lists matches directly, with no series")
+
+    def list_matches(self, account, sport: str, comp_id: str | None) -> list[dict]:
+        html = account.get_page(self.sports[sport][2])
+        return parse_desktop_match_list(
+            html, self.SPORT_EVENT_TYPE.get(sport, "4"))
+
+    def event_path(self, event_id: str, event_type: str = "4") -> str:
+        # marketId is optional -- the page opens on its own main market and
+        # the parser reads every market it renders.
+        return f"/ex/d/details/{event_id}"
+
+    def load_event(self, account, event_id: str, event_type: str = "4") -> dict:
+        html = account.get_page(self.event_path(event_id, event_type))
+        m = re.search(r'<meta name="csrf-token" content="([^"]+)"', html)
+        if m:
+            account.csrf = m.group(1)
+        parsed = parse_desktop_event_page(html)
+        # Remember the markets this session has seen: open bets are asked
+        # for per market here, and nothing else records which ones matter.
+        seen = getattr(account, "khelo_markets", None)
+        if seen is None:
+            seen = account.khelo_markets = []
+        for mk in parsed["markets"]:
+            if mk["market_id"] not in seen:
+                seen.append(mk["market_id"])
+        return parsed
+
+    # ── odds ──
+    def market_book_url(self, event_type: str, market_ids: list[str],
+                        event_id: str = "") -> str:
+        """The site's own getMarketBook(): the EVENT ID goes in the path
+        and it batches five market ids per call."""
+        q = ",".join(market_ids[:5])
+        return (f"{self.odds_host}/api/v1/get/getMarketBook/{event_id or 'na'}"
+                f"?q={q}&api_mode=1&eventType={event_type}")
+
+    # ── betting ──
+    def place_bet(self, account, *, event_id, event_type, market_id,
+                  market_name, runner_id, runner_name, teams, odds, stake,
+                  side, matched="", ltp="", limit="", liquidity=None) -> dict:
+        bet_type = "availableToBack" if side == "back" else "availableToLay"
+        # Field order follows the site's own betslip template. `limit`
+        # appears ONCE here (no submit-handler override -- see the class
+        # docstring), and matched/vol/ltp/eventType are the values the
+        # handler copies off the clicked cell, which for us come from the
+        # odds book.
+        data = [
+            ("eventType", event_type or "4"),
+            ("eventId", event_id),
+            ("runnerId", runner_id),
+            ("market_type", market_id),
+            ("exposure", "0"),
+            ("matched", matched or ""),
+            ("limit", limit),
+            ("vol", str(liquidity) if liquidity is not None else "1"),
+            ("ltp", str(ltp) if ltp not in (None, "") else ""),
+            ("expo", "0"),
+            ("bet_type", bet_type),
+            ("market_name", market_name or "Match Odds"),
+            ("runnerName", runner_name),
+            ("teams", teams),
+            ("betting_type", "Back" if side == "back" else "Lay"),
+            ("odds", f"{odds:.2f}"),
+            ("stake", f"{stake:g}"),
+        ]
+        seen = getattr(account, "khelo_markets", None)
+        if seen is None:
+            seen = account.khelo_markets = []
+        if market_id not in seen:
+            seen.append(market_id)
+        resp = account.api_post("/ex/d/api/placeBet", data,
+                                params={"desktop": ""})
+        return _judge_place(resp, account, routine_check_status=205)
+
+    def unmatched_ids(self, account) -> list[str]:
+        """Open bets are HTML, and per market.
+
+        `/ex/d/api/getOpenBets/<marketId>` is what the site loads into its
+        own panel, so there is no account-wide list to ask for on these
+        routes. We therefore ask about the markets this session has
+        touched -- every event page it opened and every market it bet on,
+        recorded in `account.khelo_markets`.
+
+        ⚠️ The consequence is that /cancelall only sees bets on markets
+        THIS process has visited. A bet placed by an earlier run of the bot,
+        or by hand in a browser, is invisible to it. That is a property of
+        the site's routes, not a bug to tune out; the site's own "cancel
+        all unmatched" button has the same scope, because it too acts on
+        the rows currently rendered in that one panel.
+        """
+        markets = list(getattr(account, "khelo_markets", []) or [])
+        if not markets:
+            return []
+        ids: list[str] = []
+        for mid in markets:
+            try:
+                html = account.get_page(f"/ex/d/api/getOpenBets/{mid}")
+            except Exception:
+                continue
+            ids.extend(parse_open_bet_ids(html))
+        return _dedupe(ids)
+
+    def cancel_bets(self, account, bet_ids: list[str]) -> tuple[int, list[str]]:
+        """One request cancels the lot: the site's own cancel control posts
+        an `id` map (`id[0]`, `id[1]`, …) to cancelAllBet."""
+        if not bet_ids:
+            return 0, []
+        data = [(f"id[{i}]", bid) for i, bid in enumerate(bet_ids)]
+        try:
+            resp = account.api_post("/ex/d/api/cancelAllBet", data,
+                                    params={"desktop": "desktop"})
+        except Exception as exc:
+            return 0, [f"cancelAllBet: {str(exc)[:60]}"]
+        if resp.get("status") in (200, "200") or resp.get("statusCode") == 200:
+            return len(bet_ids), []
+        if resp.get("notification") and not resp.get("_error"):
+            # The site answers this control with a rendered notification
+            # rather than a status on some builds; treat a clean reply as
+            # done but keep the text so the caller can show it.
+            return len(bet_ids), []
+        return 0, [resp.get("message") or str(resp)[:80]]
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
 #  Parsers -- pure functions, so they can be tested against saved HTML
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -732,6 +988,109 @@ def parse_event_page(html: str) -> dict:
     }
 
 
+def parse_desktop_match_list(html: str, event_type: str = "4") -> list[dict]:
+    """Matches from the khelo family's /ex/d/inplay.
+
+    Every sport is on the one page, as on playinmatch's mobile list, but
+    the desktop markup is different: a match is a
+    `<div class="team_names … score_<eventId>" data-event="<eventId>"
+    data-type="<sportId>">` holding one `<span title="…">` per side. The
+    sport is `data-type`, so the caller's sport selects here rather than in
+    the URL.
+
+    The two span titles are joined with " v " to make the name, which is
+    also how the site's own data-teams attribute reads it.
+    """
+    out, seen = [], set()
+    for m in re.finditer(
+            r'<div[^>]*\bteam_names\b[^>]*data-event="(\d+)"[^>]*'
+            r'data-type="(\d+)"[^>]*>(.*?)</div>', html, re.S):
+        eid, sport_id, inner = m.group(1), m.group(2), m.group(3)
+        if eid in seen or sport_id != str(event_type):
+            continue
+        names = [html_unescape(t).strip()
+                 for t in re.findall(r'<span[^>]*title="([^"]*)"', inner)]
+        names = [n for n in names if n]
+        if not names:
+            flat = re.sub(r"<[^>]+>", " ", inner)
+            name = re.sub(r"\s+", " ", html_unescape(flat)).strip()
+        else:
+            name = " v ".join(names)
+        seen.add(eid)
+        out.append({"event_id": eid, "name": name or f"Match {eid}"})
+    return out
+
+
+def parse_desktop_event_page(html: str) -> dict:
+    """Market structure from the khelo family's /ex/d/details/<id>.
+
+    The bet cells are `<div class="bets_head … back-button|lay-button" …>`
+    rather than playinmatch's `<a class="odds_select">`, but they carry the
+    SAME data attributes, so the market/runner read is the same shape. As
+    on playinmatch, data-odd is a placeholder ("1") and data-bet_type is
+    "1" in the static markup -- the page's own odds-refresh handler
+    rewrites both -- so neither is read here. Real prices come from the
+    provider and the side comes from the user.
+
+    ⚠️ The `limit` blob: this page renders the betslip template four times
+    (back and lay, for each of two UI blocks) and each copy carries a
+    DIFFERENT blob. They differ in their Laravel IV, which changes on every
+    encrypt() of even identical data, so they are near-certainly four
+    encryptions of the same limits -- and unlike playinmatch, no submit
+    handler overrides them, so whichever copy the clicked cell belongs to
+    is what that site sends. We send the first. If a live bet is ever
+    refused for its limit, `limits` carries the rest in page order
+    (back, lay, back, lay) to try against.
+    """
+    blobs = _dedupe([m.group(1) for m in re.finditer(
+        r"name=\\?[\"']limit\\?[\"']\s+type=\\?[\"']hidden\\?[\"']"
+        r"\s+value=\\?[\"']([A-Za-z0-9+/=]{20,})", html)])
+    markets: dict[str, dict] = {}
+    for m in re.finditer(
+            r"<div\b[^>]*\b(?:back-button|lay-button)\b[^>]*>", html):
+        d = {k.lower(): v for k, v in
+             re.findall(r'(data-[a-zA-Z_]+)="([^"]*)"', m.group(0))}
+        rid = d.get("data-runnerid")
+        mid = d.get("data-market_type") or d.get("data-marketid")
+        if not rid or not mid or not mid.startswith("1."):
+            continue
+        mk = markets.setdefault(mid, {
+            "market_id": mid,
+            "market_name": html_unescape(d.get("data-market_name") or ""),
+            "event_id": d.get("data-eventid") or "",
+            "event_type": d.get("data-eventtype") or "4",
+            "teams": html_unescape(d.get("data-teams") or ""),
+            "runners": {},
+        })
+        mk["runners"].setdefault(
+            rid, html_unescape(d.get("data-runner_name") or f"Runner {rid}"))
+    return {
+        "limit": blobs[0] if blobs else "",
+        "limits": blobs,
+        "match_odds": _pick_match_odds(markets),
+        "markets": list(markets.values()),
+    }
+
+
+def parse_open_bet_ids(html: str) -> list[str]:
+    """Bet ids out of /ex/d/api/getOpenBets/<marketId>'s HTML fragment.
+
+    The site's own cancel handler reads the id off the control it was
+    clicked on (`$(this).attr('data-id')`) and its "cancel all unmatched"
+    button collects them from every `.cancelOptn`, so a row is cancellable
+    exactly when it renders one. Matching that class is therefore the same
+    test the site applies, and it naturally excludes already-matched rows,
+    which render no cancel control.
+    """
+    ids = re.findall(
+        r'<[^>]*\bcancelOptn\b[^>]*data-id="([^"]+)"[^>]*>', html, re.I)
+    if not ids:
+        ids = re.findall(
+            r'<[^>]*data-id="([^"]+)"[^>]*\bcancelOptn\b[^>]*>', html, re.I)
+    return _dedupe([i for i in ids if i])
+
+
+
 def _pick_match_odds(markets: dict) -> dict | None:
     """The Match Odds market, or None.
 
@@ -804,6 +1163,16 @@ _BY_HOST = {
     # read-only, 2026-11-02 -- see the class docstring), so a later change
     # to the fallback cannot silently move a verified site off its adapter.
     "cricmatch247.com": KhelstakeSite,
+    # The "khelo" family: the jeetwin template's DESKTOP routes. These
+    # answer NEITHER platform's tell (both /exchange/cricket-exchange and
+    # /mobile/sports 404), so without these lines they would fall through
+    # to KhelstakeSite and fail with a parser error from the wrong
+    # platform rather than with "unknown site". Mapped read-only
+    # 2026-11-03 -- see Khelo24Site's docstring.
+    "khelo24bet7.com": Khelo24Site,
+    "khelosports77.com": Khelo24Site,
+    "kheloexch99.com": Khelo24Site,
+    "khelostar247.com": Khelo24Site,
 }
 
 # These brands rotate their domain by changing the DIGITS on the end
@@ -818,6 +1187,13 @@ _BY_BRAND = {
     "khelstake": KhelstakeSite,
     "starexch": KhelstakeSite,
     "cricmatch": KhelstakeSite,
+    # Same digit-rotation rule: khelo24bet7 -> khelo24bet, khelosports77 ->
+    # khelosports, and so on, so a brand that moves domain by changing the
+    # trailing digits keeps its adapter.
+    "khelo24bet": Khelo24Site,
+    "khelosports": Khelo24Site,
+    "kheloexch": Khelo24Site,
+    "khelostar": Khelo24Site,
 }
 
 
