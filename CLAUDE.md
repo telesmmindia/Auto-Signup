@@ -3217,3 +3217,113 @@ its own `ADMINS_FILE` (`admins.exchange.cricmatch.json`) and **its own
 accounts tab** — the bot writes balances into column C, and
 `balance_checker.py` writes column C too, so a shared tab would have the two
 processes overwrite each other.
+
+### The khelo family is a THIRD platform (`exchange_sites.Khelo24Site`)
+
+Added 2026-11-03 for four sites the client asked for at once:
+**khelo24bet7.com, khelosports77.com, kheloexch99.com, khelostar247.com**.
+
+They are one platform, and the point of this section is that it is **not
+either of the two already here**. The probe tested both known tells first
+and the sites answered **neither**: `/exchange/cricket-exchange` (the
+Laravel tell) and `/mobile/sports` (the jeetwin-mobile tell) **both 404**.
+What identifies them is their own asset path,
+`.../jeetwin_exchange/assets/desktop/...` — so this is the jeetwin
+template's **DESKTOP** route family, a third set of routes on the second
+platform, not a third platform's code. Had the family resemblance been
+taken as proof (every one of them is a "khelo" brand, and khelofun on the
+signup side is a Laravel white-label), they would have been pointed at
+`KhelstakeSite` and failed with a parser error from the wrong platform.
+
+Everything lives under `/ex/d/`, read live out of the sites' own pages and
+inline JS:
+
+| | |
+|---|---|
+| match list | `GET /ex/d/inplay` — every sport on one page |
+| event page | `GET /ex/d/details/<eventId>?marketId=<marketId>` |
+| odds | `POST odds4.khelo24bet7.com/api/v1/get/getMarketBook/<eventId>` |
+| place | `POST /ex/d/api/placeBet` |
+| open bets | `GET /ex/d/api/getOpenBets/<marketId>` — **HTML, per market** |
+| cancel | `POST /ex/d/api/cancelAllBet?desktop=` — `id[]` array |
+| login | `POST /api2/login` `{_token, email, password}` |
+| balance | `POST /api/getBalance` |
+
+**`has_series = False`** — matches are listed flat, like playinmatch. The
+sport is a per-row attribute (`data-type` on `div.team_names`, and
+`data-eventtype` on the bet cells), not a URL: 4 cricket, 1 football,
+2 tennis.
+
+**Four things that would have been wrong if inherited from a sibling**,
+each read off the page rather than assumed:
+
+- **The betslip is a HYBRID of the two adapters already here.** It carries
+  playinmatch's `vol` and `exposure` **and** khelstake's `ltp` and `expo` —
+  seventeen fields. Either sibling's field list drops fields this one's own
+  `serialize()` sends.
+- **There is exactly ONE `limit` blob and it is the template's.** The submit
+  handler rewrites `matched`, `vol`, `ltp` and `eventType` from the clicked
+  cell but **never touches `limit`** — the opposite of playinmatch, where
+  the template's blob is the one the site never sends. Established by
+  grepping the handler for a `find('input[name=limit]').val(...)` override:
+  there is none. Note the event page renders the template **four** times
+  (back/lay × two UI blocks) and each copy carries a different blob; they
+  differ in their Laravel IV, which changes on every `encrypt()` of even
+  identical data, so they are near-certainly four encryptions of the same
+  limits. `parse_desktop_event_page()` sends the first and keeps the rest
+  in `limits` to try against if a live bet is ever refused for its limit.
+- **Login is `/api2/login`, not `/api2/v2/login`, and takes no `digits`.**
+  playinmatch's client-side captcha field does not exist here.
+- **The odds host is shared brand-wide** — every one of these sites builds
+  its URL against `odds4.khelo24bet7.com`, including kheloexch99, which
+  names a domain that is not its own. The `ajax.gamerstechnologies.com`
+  alternative beside it in the same function sits behind `if ("" == 1)`,
+  which is never true: dead code, not a fallback worth reproducing.
+
+⚠️ **Open bets are listed PER MARKET**, and that is a real behavioural
+difference, not a detail. There is no account-wide "all my bets" endpoint
+on these routes, so `unmatched_ids()` asks about the markets the running
+session has actually touched (`account.khelo_markets`, filled by
+`load_event()` and `place_bet()`). **`/cancelall` therefore cannot see a
+bet placed by an earlier run of the bot or by hand in a browser.** That is
+a property of the site's routes — the site's own "cancel all unmatched"
+button has the same scope, because it acts on the rows rendered in that one
+panel.
+
+**Verified anonymously through the bot's own adapter** on all three
+reachable sites (2026-11-03): the match list per sport, the event page's
+markets/runners/teams, the 424-char limit blob, and a live odds book with
+real back/lay prices, liquidity and the `hash` blob. Registered in both
+`_BY_HOST` and `_BY_BRAND`, so a digit rotation (`khelo24bet7` →
+`khelo24bet9`) keeps its adapter. The change is **purely additive** — no
+existing line was touched and all six existing site URLs still resolve to
+the adapters they did before.
+
+⚠️ **NOT verified: login, balance, open bets, `placeBet`, `cancel`.** They
+are coded from the sites' own JavaScript — the same basis playinmatch's
+adapter shipped on — and have **never been run**, because no account on any
+of these four sites has been available. Run
+`probe_khelo.py --url <site> --user <id> --pass <pw>` (read-only, drives the
+real adapter), then the confirm screen's **🧪 Test 1 ID**, before any
+multi-ID bet. Without `--user/--pass` the probe runs the anonymous half,
+which is the quickest check that a new site on this template parses.
+
+⚠️ **khelostar247.com is not drivable headlessly yet.** It sits behind a
+**Cloudflare managed challenge** ("Just a moment…", `cf-mitigated:
+challenge`) which a plain `requests.Session` cannot pass — a different
+thing from the AWS WAF handled elsewhere here, so CapSolver's
+`AntiAwsWafTask` does not apply. The other three answered a plain request
+from both a residential IP and the VPS's datacenter IP. All four do load
+AWS WAF's `challenge.js`, so the familiar behavioural wall is present and
+simply was not triggered.
+
+Config: `.env.khelo.exchange.example` is a template for **four** instances —
+each needs its own `EXCHANGE_BOT_TOKEN`, its own `ADMINS_FILE` and **its own
+accounts tab** (the bot writes balances into column C).
+
+⚠️ **The DataImpulse gateway in `proxies.txt` was DEAD on 2026-11-03**, from
+both the laptop and the VPS — `ProxyError` on every request, including a
+bare ipify call. These sites do not need it, but **playinmatch does**: from
+the VPS's own IP `GET /mobile/sports` answers 202 + `x-amzn-waf-action:
+challenge`, so that bot is running without the proxy its WAF note says it
+requires.
