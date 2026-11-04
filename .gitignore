@@ -43,3 +43,7 @@ roster*.csv
 # Mines bot state (BOT_MODE=mines)
 mines_accounts*.json
 mines_runs*.json
+
+# Proxy lists hold credentials -- never commit them (the repo is public).
+proxies.txt
+proxies.*.txt

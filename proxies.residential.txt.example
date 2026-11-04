@@ -1,0 +1,25 @@
+# Copy to proxies.residential.txt (gitignored) and put the real credentials
+# in. One proxy per line; parse_proxy() accepts any of:
+#
+#     host:port
+#     host:port:user:pass
+#     scheme://host:port
+#     scheme://user:pass@host:port        (default scheme http)
+#
+# Order matters: exchange.py hands these out round-robin starting at the top,
+# and every bot process starts its own cycle at line 1 -- so put the
+# least-loaded IPs first. The live file lists .184 and .186 first because
+# those are only spin24star's fallbacks, and .95 LAST because almost every
+# other bot on the box already uses it.
+#
+# The production pool is five residential Indian broadband IPs on
+# 51.194.232.* (ip-api: proxy:false, hosting:false). Do NOT substitute the
+# DataImpulse gateway from proxies.txt: it exits on flagged datacenter IPs
+# (proxy:true, hosting:true), which is what cricmatch's WAF bare-403s, and
+# its credentials were committed to this public repo, so they are burnt.
+#
+# 51.194.232.184:44785:USER:PASS
+# 51.194.232.186:44705:USER:PASS
+# 51.194.232.87:46025:USER:PASS
+# 51.194.232.114:42128:USER:PASS
+# 51.194.232.95:46020:USER:PASS

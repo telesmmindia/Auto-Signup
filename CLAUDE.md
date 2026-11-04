@@ -84,6 +84,46 @@ Per-account `"proxy"` in batch mode overrides `--proxy`.
   proxies. Check with `ip-api.com/json/<ip>?fields=proxy,hosting` — a working
   proxy that's WAF-blocked looks identical to a broken one until you do.
 
+**The live pool: five residential IPs, and one gateway that is not.** Swept
+from the VPS 2026-11-04 (read-only: exit IP + `ip-api.com` quality):
+
+| proxy | exit | ip-api | state |
+|---|---|---|---|
+| `51.194.232.184:44785` | .184 | Indian broadband, `proxy:false hosting:false` | alive, ~1s |
+| `51.194.232.186:44705` | .186 | same | alive, ~1s |
+| `51.194.232.87:46025` | .87 | same | alive, ~1s |
+| `51.194.232.114:42128` | .114 | same | alive, ~1s |
+| `51.194.232.95:46020` | .95 | same | alive, ~1s |
+| `gw.dataimpulse.com:823` | rotates | **`proxy:true hosting:true`** | alive, but flagged |
+
+Each has its **own port and its own credentials** — they are five distinct
+proxies, not one with five exits. They live in `proxies.residential.txt`
+(gitignored; `proxies.residential.txt.example` documents the format) and in
+the `TOURNAMENT_PROXIES` lines of the tournament envs.
+
+- **Order the file least-loaded first.** Every process starts its own
+  round-robin at line 1, so the live file is `.184, .186, .87, .114, .95`:
+  `.184`/`.186` are only spin24star's fallbacks, while **`.95` is shared by
+  almost every bot on the box** and `.114` by winclash gameplay + spin24star.
+  Same reasoning as `/proxypool`'s ordering.
+- **The DataImpulse gateway is alive again** — the 2026-11-03 "DEAD from both
+  machines" reading was a transient outage, not a cancelled account. But it
+  exits on **flagged datacenter IPs**, which is precisely what the bullet
+  above says cricmatch bare-403s, so it is a last resort and not a default.
+- ⚠️ **`proxies.txt` was TRACKED in this public repo** until 2026-11-04 and
+  carries the DataImpulse credentials in plaintext, so that pair is burnt —
+  same class of leak as `prince bot/config.py`. It is now gitignored and
+  untracked (`proxies.txt`, `proxies.*.txt`), which does **not** scrub it
+  from history. The residential credentials have never been committed; keep
+  it that way.
+- **A login sweep concentrates on these five.** The rotating gateway gave the
+  sweep a fresh IP per connection; five fixed IPs do not, so a cold start of
+  several exchange bots at once can draw Laravel's `Too Many Attempts` on the
+  tail of the roster (cricmatch's first 31-account sweep: 25 in, 6 throttled).
+  That is the documented per-IP login block, it clears on its own, and
+  `/relogin` picks up the rest. **More proxy IPs is the fix, not a bigger
+  concurrency number** — as everywhere else here.
+
 ### `--fast`: HTTP-only signup (cricmatch only)
 
 Skips Chromium entirely, ~10-20x faster. Flow: `GET /` for the csrf token +
@@ -3099,10 +3139,12 @@ Nothing changes for khelstake/starexch, whose adapter never sets it.
 address `GET /mobile/sports` answers `202` + `x-amzn-waf-action: challenge`
 with an **empty body** (the navigation-shaped GET gets the 2403-byte
 `gokuProps` interstitial) — the same AWS-WAF-behind-Cloudflare signature as
-winclash. Through the DataImpulse residential gateway in `proxies.txt` the
-same GET is a clean 200 with the real page, every time. So this site needs the
-proxy, not a CapSolver key, and the earlier "no WAF" note was read from a clean
-residential IP.
+winclash. Through any of the residential IPs in `proxies.residential.txt` the
+same GET is a clean 200 with the real 1.7MB page, every time (re-confirmed
+2026-11-04 on `.184` and `.186`). So this site needs a residential proxy, not
+a CapSolver key, and the earlier "no WAF" note was read from a clean
+residential IP. The instance was moved off `proxies.txt` onto the residential
+pool 2026-11-04 — it had been pointing at the flagged DataImpulse gateway.
 
 ⚠️ **The brand rotates its DOMAIN, and the old one 301s everything
 (2026-10-31).** `playinmatch99.com` now answers every request — the login
@@ -3334,9 +3376,24 @@ Config: `.env.khelo.exchange.example` is a template for **four** instances —
 each needs its own `EXCHANGE_BOT_TOKEN`, its own `ADMINS_FILE` and **its own
 accounts tab** (the bot writes balances into column C).
 
-⚠️ **The DataImpulse gateway in `proxies.txt` was DEAD on 2026-11-03**, from
-both the laptop and the VPS — `ProxyError` on every request, including a
-bare ipify call. These sites do not need it, but **playinmatch does**: from
-the VPS's own IP `GET /mobile/sports` answers 202 + `x-amzn-waf-action:
-challenge`, so that bot is running without the proxy its WAF note says it
-requires.
+⚠️ **A residential proxy is required here too — but only for one of the
+four, and it is not the one the 2026-11-03 note guessed.** Re-measured from
+the VPS 2026-11-04 with the IP as the only variable:
+
+| site | from the VPS's datacenter IP | through a residential IP |
+|---|---|---|
+| `khelo24bet7` `/ex/d/inplay` | 200, real page | 200, real page |
+| `kheloexch99` `/ex/d/inplay` | 200, real page | 200, real page |
+| `khelosports77` `/ex/d/inplay` | **202 + `x-amzn-waf-action: challenge`**, empty body | **200, real page** |
+| `khelostar247` `/` | **403 `cf-mitigated: challenge`** | **403 — unchanged** |
+
+So khelosports77 is already walled from a datacenter IP and needs the
+residential pool, while khelostar247's Cloudflare challenge is **not an IP
+problem** and no proxy fixes it. Set `EXCHANGE_PROXY_FILE=proxies.residential
+.txt` for all of them — one list covers the family, and the other two load the
+same `challenge.js` and can start walling at any time.
+
+(The 2026-11-03 reading that the DataImpulse gateway was dead was a transient
+outage; it answers again, but on flagged datacenter exits — see §1's pool
+table. All four exchange instances were moved onto the residential pool
+2026-11-04.)
