@@ -116,13 +116,29 @@ the `TOURNAMENT_PROXIES` lines of the tournament envs.
   untracked (`proxies.txt`, `proxies.*.txt`), which does **not** scrub it
   from history. The residential credentials have never been committed; keep
   it that way.
-- **A login sweep concentrates on these five.** The rotating gateway gave the
-  sweep a fresh IP per connection; five fixed IPs do not, so a cold start of
-  several exchange bots at once can draw Laravel's `Too Many Attempts` on the
-  tail of the roster (cricmatch's first 31-account sweep: 25 in, 6 throttled).
-  That is the documented per-IP login block, it clears on its own, and
-  `/relogin` picks up the rest. **More proxy IPs is the fix, not a bigger
-  concurrency number** — as everywhere else here.
+- ⚠️ **Residential is not automatically the right choice: a BIG ROSTER wants
+  the rotating gateway.** Five *fixed* IPs concentrate a login sweep, and
+  these Laravel sites block `/login` per IP at roughly 20 in a few minutes.
+  The gateway hands out a fresh exit per **connection** (verified: 5
+  connections, 5 distinct IPs), so every login is effectively its own IP.
+  Measured on the real sheets 2026-11-04, same code and accounts, minutes
+  apart, with the proxy file as the only variable:
+
+  | instance (roster) | 5 residential IPs | rotating gateway |
+  |---|---|---|
+  | khelstake24 (321 accounts) | 56 OK / 265 failed | **187 OK / 134 failed** |
+  | starexch555 (80 accounts) | 45 OK / 35 failed | **72 OK / 8 failed** |
+
+  The failures are Laravel's `Too Many Attempts`. 321 logins over 5 fixed IPs
+  is ~64 each — far past the threshold. So **choose per instance**: take
+  residential when the site walls datacenter IPs, take the gateway when the
+  roster is large and the site does not. The live split is playinmatch and
+  cricmatch on `proxies.residential.txt` (both have an IP-quality reason),
+  khelstake and starexch on `proxies.txt` (neither does — both answer 200
+  from the VPS's own IP and through the gateway). Small rosters are
+  unaffected either way: cricmatch's 31 accounts are ~6 per IP.
+  **More proxy IPs is the real fix, not a bigger concurrency number** — as
+  everywhere else here.
 
 ### `--fast`: HTTP-only signup (cricmatch only)
 
