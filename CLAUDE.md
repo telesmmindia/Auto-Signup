@@ -1475,11 +1475,10 @@ The old password is never echoed; the new one **is** included on success (matchi
 `build_caption()`'s norm for master-only chats).
 
 `/cp` takes the ~2s no-browser route (`http_change_account_password()`) on any
-site with `supports_http_change_password` — starexch and **khelstake24**
-(`.env.khelstake.password`, added 2026-11-03) — and the browser login
-everywhere else (cricmatch). khelstake's endpoint was confirmed live on the
-refusal path only (wrong current password → `status 201`); the first real
-`/cp` there is the first watched success. An `infra_block` reply says the
+site with `supports_http_change_password` — starexch and khelstake24 — and the
+browser login everywhere else (cricmatch). khelstake24 ran as a `/cp` bot for
+a day (2026-11-03) and was then moved to a sheet like the others (see
+`password_changer.py` in §5). An `infra_block` reply says the
 firewall answered and nothing changed. **Text-only reply, no screenshot**
 — deliberate; the shot is still taken and stored on disk.
 
@@ -2451,20 +2450,34 @@ Sheet: `USERNAME | PASSWORD | NEW PASSWORD | STATUS`. A blank NEW PASSWORD gets
 one from `gen_password()`, **written back into column C** before the attempt, so
 the sheet always holds the real new password.
 
-Engine: `main.run_change_account_password(...)`, shaped exactly like
-`run_balance_check()`.
+Engine: `main.http_change_account_password(...)` (~2s, no browser) on a site
+with `supports_http_change_password`, else `main.run_change_account_password(...)`
+(a real Playwright login), same split as `/cp`.
 
-Config: `PASSWORD_SHEET_SPREADSHEET_ID` (required),
-`PASSWORD_SHEET_WORKSHEET_GID`, `PASSWORD_SHEET_CREDENTIALS_FILE`,
+Config: `PASSWORD_SHEET_SPREADSHEET_ID` and `PASSWORD_SHEET_WORKSHEET_GID`
+(**both required**), `PASSWORD_SHEET_CREDENTIALS_FILE`,
 `PASSWORD_SHEET_POLL_SECONDS` (20), `PASSWORD_SHEET_MAX_CONCURRENT` (1),
 `PASSWORD_SHEET_CHECK_SPACING_SECONDS` (30).
 
-Conservative defaults because there's **no HTTP-fast path** here — every row is a
-real Playwright login, exposed to the same volume block. Whether
-`change_account_password()` works from a bare `requests.Session` is an open
-question (same as free-number's HTTP path).
+⚠️ **The gid has no default and a wrong one is refused, never guessed.** It
+used to default to `0` and fall back to the first tab when the gid wasn't
+found. The password tab usually shares a workbook with an accounts tab another
+script owns — khelstake's first tab is the exchange bot's `Acc creds`,
+BALANCE in column C — and run against that, every balance would be read as a
+NEW PASSWORD and every account changed to it. Fixed 2026-11-04: a missing or
+unknown gid now exits and lists the workbook's real tabs.
 
-**Not yet run against a live sheet.**
+Instances, each on its own tab: cricmatch (`.env.password`), starexch
+(`.env.starexch.password`), khelofun (`.env.khelofun`) and khelstake24
+(`.env.khelstake.password`, tab `KHELSTAKE PASS CHANGE` gid 1126053474 in
+the exchange bot's workbook, added 2026-11-04 to replace its `/cp` bot).
+khelstake's change has only been watched on the **refusal** path (wrong
+current password → `status 201`), so the first ✅ row there is the first
+watched success. Read it, and log in with the new password, before loading
+the sheet up.
+
+The pacing defaults are conservative for the browser path, where every row is
+a real login exposed to cricmatch's volume block.
 
 ## `channel_info.py` — Telegram channel details (Telethon)
 

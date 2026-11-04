@@ -73,7 +73,13 @@ from sites import profile_for
 load_dotenv(_env_file, override=True)
 
 SPREADSHEET_ID = os.environ.get("PASSWORD_SHEET_SPREADSHEET_ID", "")
-WORKSHEET_GID = os.environ.get("PASSWORD_SHEET_WORKSHEET_GID", "0")
+# No default, deliberately. The password tab usually shares a workbook with
+# other tabs, and the first one (gid 0) is often an accounts list another
+# script owns -- khelstake's is the exchange bot's "Acc creds", BALANCE in
+# column C. Run against that, this script would read every balance as a NEW
+# PASSWORD and change every account to it. A gid of 0 is fine; it just has
+# to be written down.
+WORKSHEET_GID = os.environ.get("PASSWORD_SHEET_WORKSHEET_GID", "").strip()
 CREDENTIALS_FILE = os.environ.get(
     "PASSWORD_SHEET_CREDENTIALS_FILE", os.environ.get("SHEET_CREDENTIALS_FILE", "service_account.json"))
 POLL_SECONDS = int(os.environ.get("PASSWORD_SHEET_POLL_SECONDS", "20"))
@@ -122,10 +128,14 @@ def get_worksheet():
     creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
     client = gspread.authorize(creds)
     sh = client.open_by_key(SPREADSHEET_ID)
-    for ws in sh.worksheets():
+    tabs = sh.worksheets()
+    for ws in tabs:
         if str(ws.id) == str(WORKSHEET_GID):
             return ws
-    return sh.sheet1
+    # Never fall back to the first tab -- see WORKSHEET_GID above.
+    names = ", ".join(f"{ws.title!r} (gid {ws.id})" for ws in tabs)
+    print(f"No tab with gid {WORKSHEET_GID} in this workbook. Tabs: {names}")
+    sys.exit(1)
 
 
 def process_row(ws, row_idx, username, current_password, new_password):
@@ -206,6 +216,10 @@ def main():
     if not SPREADSHEET_ID:
         print("PASSWORD_SHEET_SPREADSHEET_ID is not set -- nothing to poll. "
               "Set it to the sheet's id (from its URL) and try again.")
+        sys.exit(1)
+    if not WORKSHEET_GID:
+        print("PASSWORD_SHEET_WORKSHEET_GID is not set. Set it to the password "
+              "tab's gid (the '#gid=' number in that tab's URL).")
         sys.exit(1)
     print(f"password_changer: spreadsheet={SPREADSHEET_ID} gid={WORKSHEET_GID} "
           f"site={SITE_URL} poll={POLL_SECONDS}s max_concurrent={MAX_CONCURRENT}")
