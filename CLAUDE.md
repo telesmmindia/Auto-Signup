@@ -283,6 +283,15 @@ purely by URL (`--url` / `/seturl` / `BOT_SITE_URL`).
 - `enter_otp()`: 6 boxes `input.otp__digit_signup`, verify `a.get_user_otp`.
   **The page has a second login-OTP widget (`input.otp__digit`, no `_signup`) —
   do not target it.**
+- `fill_otp()` falls back to writing the digits straight into the boxes
+  (`_WRITE_OTP_JS`) when typing fails, and records why (a `WARNING OTP …`
+  line on success, the notes on failure). Added 2026-11-05 after playcric365
+  lost 74 of 286 signups in a day to a bare "Could not type the OTP" — always
+  on OTPs sent a minute or more after the OTP screen, while a fresh-browser
+  repro typed fine after 2 minutes. The cause is still unread; the first
+  `WARNING OTP` line in the playcric pane names it. Verified on the live site
+  that a written code is what the page POSTs to `/register`. Note
+  playcric365 keeps boxes 2-6 `disabled` until the box before fires `input`.
 - `fill_register_form()` is shared by the initial fill and the WAF-retry refill
   so they can't drift.
 - If a rejection leaves no visible message, the bot appends the POST responses

@@ -1486,8 +1486,9 @@ def submit_otp(page, otp, filled_shot=None):
     if endpoint:
         page.on("response", on_resp)
     try:
-        if not fill_otp(page, otp):
-            return "no_input", ""
+        why = []
+        if not fill_otp(page, otp, why):
+            return "no_input", "; ".join(why)
         if filled_shot:
             save_screenshot(page, filled_shot)
 
@@ -1539,7 +1540,8 @@ def otp_outcome_message(outcome, detail):
     if outcome == "blocked":
         return detail
     if outcome == "no_input":
-        return "Could not type the OTP into the form."
+        msg = "Could not type the OTP into the form."
+        return f"{msg} ({detail})" if detail else msg
     if outcome == "no_button":
         return "Could not find a visible Verify button."
     return "OTP screen still showing — likely wrong/expired code."
@@ -1573,26 +1575,84 @@ def otp_digit_count(page):
     return prof.otp_length if prof.otp_mode == "single" else n
 
 
-def fill_otp(page, otp):
+# Writes the code straight into the boxes, for when typing it in failed. The
+# verify handlers read the boxes' VALUES (cricmatch-family: $(".otp__digit")
+# .val() concatenated), so a value set here is submitted like a typed one.
+# Unlocks each box first -- playcric365 keeps boxes 2-6 `disabled` until the
+# one before it fires "input" -- and fires "input" itself so the site's own
+# handlers run as they would for a keystroke.
+_WRITE_OTP_JS = """(boxes, [otp, single]) => {
+  const digits = single ? [otp] : otp.split('');
+  if (boxes.length < digits.length) return false;
+  digits.forEach((d, i) => {
+    boxes[i].removeAttribute('disabled');
+    boxes[i].value = d;
+    boxes[i].dispatchEvent(new Event('input', {bubbles: true}));
+  });
+  return boxes.slice(0, digits.length).map(b => b.value).join('') === otp;
+}"""
+
+
+def _exc_line(e):
+    """A Playwright error on one line: its headline plus the last line of its
+    call log that says WHY ("element is not enabled", "<div ...> intercepts
+    pointer events", ...) -- skipping the retry chatter ("waiting 500ms",
+    "retrying click action") that a timed-out call log always ends with."""
+    lines = [ln.strip(" -") for ln in str(e).splitlines() if ln.strip(" -")]
+    if not lines:
+        return type(e).__name__
+    noise = ("waiting", "retrying", "attempting", "Call log")
+    why = [ln for ln in lines[1:] if not any(w in ln for w in noise)]
+    return (f"{lines[0]} | {why[-1]}" if why else lines[0])[:300]
+
+
+def fill_otp(page, otp, why=None):
     """Type `otp` into whichever OTP widget this site uses. Returns True if
     it went in. Typed rather than filled so the widget's own input handlers
-    fire (winclash's oninput="validateOTP(this)", cricmatch's auto-advance)."""
+    fire (winclash's oninput="validateOTP(this)", cricmatch's auto-advance).
+
+    If typing fails while the boxes are still there, the digits are written
+    into them directly (_WRITE_OTP_JS) and the failure is logged. On
+    2026-11-05 playcric365 lost 74 of 286 signups to "Could not type the OTP"
+    -- every one an OTP sent a minute or more after the OTP screen came up --
+    and the bare False recorded nothing about why. `why`, when given, is a
+    list that receives one line naming what went wrong."""
     prof = profile_for(page.url)
     boxes = page.locator(prof.sel["otp_digits"])
     try:
         if not boxes.count():
+            if why is not None:
+                why.append(f"no OTP boxes on the page any more (url {page.url})")
             return False
+    except Exception as e:
+        if why is not None:
+            why.append(f"page could not be read: {_exc_line(e)}")
+        return False
+    at = 1
+    try:
         if prof.otp_mode == "single":
             box = boxes.first
-            box.click()
+            box.click(timeout=10000)
             box.press_sequentially(str(otp), delay=40)
         else:
             for i, ch in enumerate(str(otp)):
+                at = i + 1
                 box = boxes.nth(i)
-                box.click()
+                box.click(timeout=10000)
                 box.press_sequentially(ch, delay=40)
-    except Exception:
-        return False
+    except Exception as e:
+        err = f"typing stopped at box {at}: {_exc_line(e)}"
+        try:
+            written = boxes.evaluate_all(_WRITE_OTP_JS, [str(otp), prof.otp_mode == "single"])
+        except Exception as e2:
+            written = False
+            err += f"; writing the digits directly failed too: {_exc_line(e2)}"
+        if not written:
+            if why is not None:
+                why.append(err)
+            return False
+        print(f"WARNING OTP {err} -- wrote the digits into the boxes directly instead",
+              flush=True)
     page.wait_for_timeout(500)
     return True
 
