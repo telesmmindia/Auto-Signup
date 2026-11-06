@@ -320,10 +320,37 @@ class AccountSession:
         }
 
     def get_page(self, path: str) -> str:
-        """GET an HTML page (series / competition / event-details pages)."""
+        """GET an HTML page (series / competition / event-details pages).
+
+        Cloudflare's managed challenge answers 403 with its own page instead
+        of erroring, so an unhandled one reads as a BROKEN PARSER on a
+        perfectly healthy site -- "0 matches", or "could not read the csrf
+        token" out of login. Clear it and retry once; on a site with no such
+        wall this costs one header check and never calls CapSolver.
+        """
         parts = urlsplit(self.base_url)
         url = f"{parts.scheme}://{parts.netloc}{path}"
         r = self.session.get(url, headers=self._headers(), timeout=45)
+        if exchange_sites.cloudflare_challenged(r):
+            exchange_sites.ensure_cloudflare_clearance(
+                self.session, url, self.proxy)
+            r = self.session.get(url, headers=self._headers(), timeout=45)
+        # A ONE-SHOT sister-domain hand-off eats whichever page asks first.
+        # Observed live on khelostar247 2026-11-06: the first GET after login
+        # answers 302 -> khelosuper24.com/loginRedirectAuth?lid=<blob> -> that
+        # brand's 960KB marketing landing page, and EVERY request after it is
+        # served the real page on the original host. Unfollowed, the caller
+        # parses the landing page and reports "0 matches" on a site with
+        # dozens -- a broken parser, not a redirect, which is exactly how the
+        # same trap read on playinmatch (see _follow_account_home there).
+        #
+        # Retried rather than followed, because the pages we want stay on the
+        # ORIGINAL host here -- unlike playinmatch, where the session really
+        # does move and its adapter repoints base_url. Landing off-host with
+        # base_url already correct can only be an unabsorbed hand-off, so one
+        # retry both absorbs it and gets the real page.
+        if urlsplit(r.url).netloc.lower() != parts.netloc.lower():
+            r = self.session.get(url, headers=self._headers(), timeout=45)
         return r.text
 
     def api_post(self, path: str, data=None, params: dict | None = None) -> dict:
@@ -361,6 +388,16 @@ class AccountSession:
         r = self.session.post(url, data=payload, params=params,
                               headers=headers, timeout=20,
                               allow_redirects=False)
+        # A pass can expire mid-session, and a challenged POST answers HTML,
+        # which would surface as "the site returned no JSON" -- a backend
+        # change rather than a wall. Nothing reached the app, so retrying
+        # once is safe for every endpoint, a placeBet included.
+        if exchange_sites.cloudflare_challenged(r):
+            exchange_sites.ensure_cloudflare_clearance(
+                self.session, url, self.proxy)
+            r = self.session.post(url, data=payload, params=params,
+                                  headers=headers, timeout=20,
+                                  allow_redirects=False)
         if r.is_redirect or r.is_permanent_redirect:
             loc = r.headers.get("location", "")
             return {"_error": True,

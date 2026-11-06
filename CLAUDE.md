@@ -3414,22 +3414,113 @@ Fund an ID, then the confirm screen's **🧪 Test 1 ID** (unmatched BACK @1.01,
 cancelled at once — nothing can match at 1.01, so there is no exposure) before
 any multi-ID bet.
 
-⚠️ **khelostar247.com is not drivable headlessly yet.** It sits behind a
-**Cloudflare managed challenge** ("Just a moment…", `cf-mitigated:
-challenge`) which a plain `requests.Session` cannot pass — a different
-thing from the AWS WAF handled elsewhere here, so CapSolver's
-`AntiAwsWafTask` does not apply. All four do load AWS WAF's `challenge.js`,
-so the familiar behavioural wall is present on the others and simply was not
-triggered.
+### khelostar247's Cloudflare challenge, and the solver that clears it
 
-**Re-confirmed 2026-11-06 with a real account for that site in hand**, so it
-is the wall and not the credentials: `GET /ex/d/inplay` answers **403** with
-`cf-mitigated: challenge`, `server: cloudflare` and `challenges.cloudflare.com`
-in its own CSP (Turnstile), from the VPS's datacenter IP **and** through the
-residential pool alike. It is **not a domain rotation** like playinmatch's.
-Its env file and sheet row exist and its bot is deliberately **not started** —
-running it would just fail every login. Clearing this needs a real browser or
-a Cloudflare-capable solver; neither is built here.
+khelostar247 answers **403 + `cf-mitigated: challenge`** ("Just a moment…",
+`challenges.cloudflare.com` in its own CSP — Turnstile) to a plain
+`requests.Session`, on every page, from the VPS's datacenter IP **and**
+through the residential pool alike. So it is **not an IP problem and no
+proxy fixes it**, and it is not a domain rotation like playinmatch's. Its
+three siblings answer normally.
+
+**This is a DIFFERENT wall from the AWS WAF the rest of this repo solves**,
+and the two are easy to confuse because both answer a page instead of the
+site:
+
+| | AWS WAF | Cloudflare |
+|---|---|---|
+| signature | 202/405 + `x-amzn-waf-action` | **403 + `cf-mitigated`** |
+| page | "Human Verification", `gokuProps` | **"Just a moment…"** |
+| CapSolver task | `AntiAwsWafTask` | **`AntiCloudflareTask`** |
+
+`AntiAwsWafTask` does **not** apply here, which is what "not drivable
+headlessly" meant until 2026-11-06. It is drivable: measured live that day,
+**one solve in 11s** turned a 403/5.4KB challenge into 200 and the real
+610KB page. A plain `requests` session was enough — Cloudflare did not also
+check the TLS fingerprint, so no browser or `curl_cffi` is needed. (If a
+site ever does check it, the symptom is a solve that succeeds and a replay
+that still 403s.)
+
+`exchange_sites.ensure_cloudflare_clearance()` owns it, and three measured
+properties decide the whole design:
+
+- **The pass (`cf_clearance`) is bound to the EXIT IP** it was minted from,
+  so it is cached per `(host, proxy)` and a proxy change misses the cache
+  rather than replaying another IP's pass — the same key
+  `main.cache_waf_token()` uses, for the same reason. It also means a
+  **ROTATING gateway cannot be used on a walled site**: its exit changes per
+  connection, so the pass is dead before it is used. `proxies.residential
+  .txt` is fixed per line, which is what makes this work.
+- **It is bound to the USER AGENT** it was minted with, so that UA is pinned
+  onto the session alongside the cookie.
+- **It is NOT bound to the account**, so ONE solve covers every ID sharing
+  that proxy. A startup sweep pays one solve, not one per login — which is
+  what keeps this at pennies. One solve per `(host, IP)` at a time, behind a
+  lock, so a sweep cannot buy N passes for one address.
+
+**Nothing is flagged per site, deliberately.** A solve only ever happens
+after a real challenge has answered, so an unwalled site costs one header
+check and never calls CapSolver, and a site that turns Cloudflare on later
+is handled with no code change. Same self-healing shape as the WAF token
+cache: when a challenge answers a request the cached pass was supposed to
+cover, that pass has just been **disproved**, so it is compared against the
+cached one and dropped if they match — otherwise a pass another account
+refreshed in the meantime is tried first, which is what stops a sweep from
+each buying a solve to replace the one before it. `EXCHANGE_CF_TTL_SECS`
+(1500) expires ours inside Cloudflare's ~30min so a request is never made
+with one about to die mid-flight.
+
+**`CAPSOLVER_API_KEY` is therefore required on khelostar** (added to all
+four khelo envs — it costs nothing where no challenge answers).
+
+### The khelo family has playinmatch's sister-domain hand-off too
+
+Found 2026-11-06 while verifying the above, and it is worth its own note
+because it looked exactly like the Cloudflare wall and is **not** it.
+
+After a successful login, the **first page GET** answers
+`302 -> khelosuper24.com/loginRedirectAuth?lid=<blob> -> that brand's 960KB
+marketing landing page`. It fires **once**, eats whichever page asked first,
+and every request after it is served the real page on the original host.
+Measured, five identical `/ex/d/inplay` calls in a row:
+
+| call | bytes | match rows |
+|---|---|---|
+| 1 | 959,920 | **0** |
+| 2-5 | 633,067 | 16 |
+
+Unabsorbed, the caller parses the landing page and reports **"0 matches" on
+a site with dozens** — a broken parser, not a redirect, which is precisely
+how the same trap read on playinmatch (`_follow_account_home()` there). It
+cost three rounds of chasing the Cloudflare code before the redirect chain
+was printed, so **print `r.history` before blaming a parser**.
+
+`get_page()` **retries once** when the final URL's host differs from the one
+asked for, rather than following. The pages we want stay on the ORIGINAL
+host here — unlike playinmatch, where the session really does move and its
+adapter repoints `base_url` — so landing off-host with `base_url` already
+correct can only be an unabsorbed hand-off, and one retry both absorbs it
+and returns the real page.
+
+**Driven end to end 2026-11-06** through `probe_khelo.py` (the bot's own
+adapter) on khelostar247: login → balance → 9 cricket matches → the event
+page (424-char limit blob, four markets, Match Odds with all three runners)
+→ live odds (`OPEN`, back/lay 4.7/4.8, liquidity ₹15.2M, `hash` present) →
+the open-bets panel. Three consecutive login+list runs, all clean.
+
+**Regression-checked the same day**, since `get_page()`/`_api_post_once()`
+are shared by every instance: cricmatch247, khelstake24 and starexch555 each
+logged in with a real balance and listed 18 series / 3 matches, and
+khelosports77 and kheloexch99 each listed 9. (playinmatch's ids still answer
+"Sorry, your account is Blocked" — a site-side state from 2026-11-04, not a
+regression.)
+
+⚠️ A bare **nginx `403 Forbidden` with no `cf-mitigated`** is a different
+thing again: the login **rate block**, tripped here by ~10 probe logins in a
+few minutes. Note **every fresh process starts the proxy round-robin at line
+1**, so repeated one-account probe runs all go out on the FIRST residential
+IP and trip it quickly — the running bots sweep their roster round-robin and
+spread. Rotate the file or wait ~20min; don't read it as the wall.
 
 Config: `.env.khelo.exchange.example` is a template for **four** instances —
 each needs its own `EXCHANGE_BOT_TOKEN`, its own `ADMINS_FILE` and **its own
@@ -3443,7 +3534,7 @@ log, on `proxies.residential.txt` with `EXCHANGE_BET_CONCURRENCY=2` and
 |---|---|---|---|---|
 | khelosports | `.env.khelosports.exchange` | khelosports77.com | its own book, gid 0 | **running**, 1 ID, ₹0 |
 | kheloexch | `.env.kheloexch.exchange` | kheloexch99.com | its own book, gid 0 | **running**, 1 ID, ₹0 |
-| khelostar | `.env.khelostar.exchange` | khelostar247.com | its own book, gid 0 | **configured, NOT started** (Cloudflare) |
+| khelostar | `.env.khelostar.exchange` | khelostar247.com | its own book, gid 0 | **running**, 1 ID, ₹0 (Cloudflare, solved) |
 | khelo24bet | `.env.khelo24bet.exchange` | khelo24bet7.com | its own book, gid 0 | **running**, 0 IDs — awaiting an account |
 
 khelo24bet's tab holds only its header, so the bot starts with `accounts=0`.

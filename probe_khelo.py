@@ -61,6 +61,17 @@ def head(n, text):
     print(f"\n{'=' * 64}\n{n}. {text}\n{'=' * 64}")
 
 
+def mask(proxy):
+    """host:port only. The pool lines carry `host:port:user:pass`, so printing
+    one raw writes live proxy credentials into the terminal and into whatever
+    log the run is piped to -- same rule mask_proxy_display() follows in the
+    bots. The host is all that is needed to tell pool lines apart."""
+    if not proxy:
+        return "direct"
+    bits = proxy.split(":")
+    return f"{bits[0]}:{bits[1]}" if len(bits) >= 2 else bits[0]
+
+
 def main():
     print(f"site     {SITE_URL}")
     print(f"adapter  {type(bot.SITE).__name__}  (has_series={bot.SITE.has_series})")
@@ -82,7 +93,7 @@ def main():
         acc.proxy = bot.next_proxy()
         acc.session = bot.engine.http_session_for(acc.proxy)
         acc.csrf = ""
-        print(f"(proxy: {acc.proxy or 'direct'})")
+        print(f"(proxy: {mask(acc.proxy)})")
     else:
         head(1, "login")
         # Go through AccountSession.login(), not SITE.login(acc) -- the
@@ -91,7 +102,7 @@ def main():
         # path the bot never takes (and goes out direct, unproxied).
         ok = acc.login()
         msg = acc.error or "Login Successfully"
-        print(f"{'✅' if ok else '❌'} {msg}   (proxy: {acc.proxy or 'direct'})")
+        print(f"{'✅' if ok else '❌'} {msg}   (proxy: {mask(acc.proxy)})")
         if not ok:
             print("\nNothing that needs a session can run. If the message is "
                   "a refusal from the app, the credentials are wrong; if it "

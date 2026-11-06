@@ -24,9 +24,14 @@ verified live is recorded on the class itself.
 """
 from __future__ import annotations
 
+import os
 import re
+import threading
+import time
 from html import unescape as html_unescape
 from urllib.parse import urlsplit
+
+import requests
 
 import main as engine
 
@@ -34,6 +39,186 @@ import main as engine
 # the UA the successful probe requests carried on both platforms.
 ODDS_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
            "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36")
+
+
+# ── Cloudflare's managed challenge ("Just a moment…") ──
+#
+# A DIFFERENT wall from the AWS WAF main.py already solves, and the two are
+# easy to confuse because both answer a page instead of the site:
+#
+#     AWS WAF   202/405 + `x-amzn-waf-action`, "Human Verification",
+#               cleared by main.py's AntiAwsWafTask machinery.
+#     Cloudflare 403 + `cf-mitigated: challenge`, "Just a moment…",
+#               `challenges.cloudflare.com` (Turnstile) in its own CSP.
+#               AntiAwsWafTask does NOT apply -- it is a different task type.
+#
+# Found on khelostar247 2026-11-03 and confirmed 2026-11-06 with a real
+# account in hand (so it is the wall, not the credentials) from the VPS's own
+# datacenter IP AND through the residential pool alike -- it is not an IP
+# problem and no proxy clears it. CapSolver's AntiCloudflareTask does:
+# measured live 2026-11-06, one solve in 11s turned a 403/5.4KB challenge into
+# 200 and the real 610KB page with 14 live matches parsed off it.
+#
+# Three properties decide the whole design, all of them measured:
+#
+#  1. The pass (`cf_clearance`) is bound to the EXIT IP it was minted from,
+#     so it is cached per (host, proxy) and a proxy change misses the cache
+#     rather than replaying another IP's pass. Same rule as
+#     main.cache_waf_token()'s host+egress key, for the same reason. It also
+#     means a ROTATING gateway cannot be used on a walled site -- its exit
+#     changes per connection, so the pass is dead before it is used. The
+#     residential pool is fixed per line, which is what makes this work.
+#  2. The pass is bound to the USER AGENT it was minted with, so that UA is
+#     pinned onto the session. Hence `ua` travels with the cookies.
+#  3. It is NOT bound to the account, so ONE solve covers every ID sharing
+#     that proxy -- which is what keeps this at pennies rather than a solve
+#     per login.
+#
+# Nothing here is flagged per site on purpose: a solve only ever happens
+# after a real challenge is seen, so an unwalled site costs nothing and never
+# calls CapSolver, while a site that turns Cloudflare ON later is handled
+# without a code change. Same self-healing shape as the WAF token cache.
+#
+# A plain `requests` session was enough -- Cloudflare did not also check the
+# TLS fingerprint here, so no curl_cffi/browser is needed. If a site ever
+# does, the symptom is a solve that succeeds and a replay that still 403s.
+
+# Cloudflare issues these for ~30 minutes; expire ours earlier so a request
+# is never made with one about to die mid-flight.
+CF_TTL_SECS = int(os.environ.get("EXCHANGE_CF_TTL_SECS", "1500") or 1500)
+CF_SOLVE_TIMEOUT_SECS = 180
+
+_cf_cache: dict[tuple, dict] = {}
+_cf_locks: dict[tuple, threading.Lock] = {}
+_cf_meta_lock = threading.Lock()
+
+
+def _cf_key(url: str, proxy: str | None) -> tuple:
+    return (urlsplit(url).netloc.lower(), proxy or "direct")
+
+
+def cloudflare_challenged(resp) -> bool:
+    """True when Cloudflare's challenge answered instead of the site.
+
+    Checked on the RESPONSE rather than guessed from a parse failure: an
+    unparsed challenge page reads as "0 matches" or "csrf token not found",
+    i.e. as a broken parser on a healthy site -- the same way playinmatch's
+    sister-domain redirect did before it was named.
+    """
+    if resp.status_code not in (403, 503):
+        return False
+    if resp.headers.get("cf-mitigated"):
+        return True
+    try:
+        body = (resp.text or "")[:4000]
+    except Exception:
+        return False
+    return "challenges.cloudflare.com" in body or "Just a moment" in body
+
+
+def _capsolver_cf_proxy(proxy_str: str | None) -> str:
+    """CapSolver's `scheme:host:port:user:pass` form, so the pass is minted
+    from the very IP it will be replayed from (see property 1 above)."""
+    if not proxy_str:
+        return ""
+    conf = engine.parse_proxy(proxy_str)
+    scheme, hostport = conf["server"].split("://", 1)
+    if scheme not in ("http", "https", "socks5"):
+        scheme = "http"
+    host, _, port = hostport.partition(":")
+    user, pw = conf.get("username") or "", conf.get("password") or ""
+    if user and pw:
+        return f"{scheme}:{host}:{port}:{user}:{pw}"
+    return f"{scheme}:{host}:{port}"
+
+
+def _solve_cloudflare(url: str, proxy: str | None) -> dict:
+    """One CapSolver AntiCloudflareTask. Returns {"cookies": {...}, "ua": str}."""
+    key = engine.capsolver_key()
+    if not key:
+        raise RuntimeError(
+            "this site is behind Cloudflare's challenge and CAPSOLVER_API_KEY "
+            "is not set for this instance")
+    task = {"type": "AntiCloudflareTask", "websiteURL": url}
+    cs_proxy = _capsolver_cf_proxy(proxy)
+    if cs_proxy:
+        task["proxy"] = cs_proxy
+    r = requests.post("https://api.capsolver.com/createTask",
+                      json={"clientKey": key, "task": task}, timeout=40).json()
+    if r.get("errorId"):
+        raise RuntimeError(f"CapSolver refused the task: "
+                           f"{r.get('errorCode')} {r.get('errorDescription')}")
+    task_id = r.get("taskId")
+    deadline = time.time() + CF_SOLVE_TIMEOUT_SECS
+    while time.time() < deadline:
+        time.sleep(3)
+        g = requests.post("https://api.capsolver.com/getTaskResult",
+                          json={"clientKey": key, "taskId": task_id},
+                          timeout=40).json()
+        if g.get("errorId"):
+            raise RuntimeError(f"CapSolver could not solve it: "
+                               f"{g.get('errorCode')} {g.get('errorDescription')}")
+        if g.get("status") == "ready":
+            sol = g.get("solution") or {}
+            cookies = sol.get("cookies") or {}
+            if not isinstance(cookies, dict) or not cookies.get("cf_clearance"):
+                raise RuntimeError("CapSolver returned no cf_clearance cookie")
+            return {"cookies": cookies, "ua": sol.get("userAgent") or ""}
+    raise RuntimeError("CapSolver did not answer in time")
+
+
+def _session_clearance(session) -> str:
+    """The cf_clearance this session is already carrying, if any.
+
+    requests raises CookieConflictError when the same name exists for more
+    than one domain (a session that followed a sister domain), which is not
+    worth failing a request over -- an unreadable one just reads as "none".
+    """
+    try:
+        return session.cookies.get("cf_clearance") or ""
+    except Exception:
+        return ""
+
+
+def ensure_cloudflare_clearance(session, url: str, proxy: str | None) -> bool:
+    """Put a valid Cloudflare pass on `session` for `url`'s host.
+
+    Cached per (host, exit IP) and shared by every account on that proxy, so
+    a startup sweep of N ids pays ONE solve rather than N.
+
+    Called only after a challenge has actually answered, so the pass the
+    session was carrying -- if any -- has just been DISPROVED. It is compared
+    against the cached one and, when they match, that entry is dropped and a
+    real solve runs instead of replaying the same disproved pass. (The same
+    rule main.ensure_waf_cleared() follows against current_waf_token(), for
+    the same reason.) A pass another account refreshed in the meantime is
+    different, so it is tried first and usually works -- which is what stops
+    a sweep of ids on one proxy from each buying a solve to replace the one
+    the id before it just bought.
+
+    Returns True when a pass is on the session. Raises with a plain reason
+    (no key, CapSolver refused) rather than surfacing as a parser error.
+    """
+    key = _cf_key(url, proxy)
+    disproved = _session_clearance(session)
+    with _cf_meta_lock:
+        lock = _cf_locks.setdefault(key, threading.Lock())
+    # One solve per (host, IP) at a time; the rest wait and read the cache.
+    with lock:
+        entry = _cf_cache.get(key)
+        if entry and disproved and \
+                (entry.get("cookies") or {}).get("cf_clearance") == disproved:
+            _cf_cache.pop(key, None)
+            entry = None
+        if not entry or time.time() - entry["at"] > CF_TTL_SECS:
+            entry = {"at": time.time(), **_solve_cloudflare(url, proxy)}
+            _cf_cache[key] = entry
+    for name, value in (entry.get("cookies") or {}).items():
+        session.cookies.set(name, value)
+    if entry.get("ua"):
+        # The pass is bound to this UA; sending another one is refused.
+        session.headers["User-Agent"] = entry["ua"]
+    return True
 
 
 class ExchangeSite:
