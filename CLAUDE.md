@@ -3444,9 +3444,13 @@ log, on `proxies.residential.txt` with `EXCHANGE_BET_CONCURRENCY=2` and
 | khelosports | `.env.khelosports.exchange` | khelosports77.com | its own book, gid 0 | **running**, 1 ID, ₹0 |
 | kheloexch | `.env.kheloexch.exchange` | kheloexch99.com | its own book, gid 0 | **running**, 1 ID, ₹0 |
 | khelostar | `.env.khelostar.exchange` | khelostar247.com | its own book, gid 0 | **configured, NOT started** (Cloudflare) |
+| khelo24bet | `.env.khelo24bet.exchange` | khelo24bet7.com | its own book, gid 0 | **running**, 0 IDs — awaiting an account |
 
-khelo24bet7 has no instance yet — no account for it has been supplied, and the
-brand's shared odds host is already pointed at it regardless.
+khelo24bet's tab holds only its header, so the bot starts with `accounts=0`.
+That is a working state, not a fault: it answers on Telegram, and `/relogin`
+picks up rows added later without a restart. The site itself was re-checked
+anonymously through the adapter the same day (5 cricket matches, the 424-char
+limit blob, Match Odds with every runner), so only the account is missing.
 
 ⚠️ **A residential proxy is required here too — but only for one of the
 four, and it is not the one the 2026-11-03 note guessed.** Re-measured from
