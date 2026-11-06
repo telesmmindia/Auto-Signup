@@ -76,11 +76,21 @@ def main():
     if anon:
         print("\n(no --user/--pass: running the anonymous half only -- "
               "match list, event page and odds)")
+        # Take a proxy the same way a real session does; these sites can be
+        # WAF-walled from a datacenter IP, which reads as "site blocked the
+        # page" rather than as a proxy problem.
+        acc.proxy = bot.next_proxy()
         acc.session = bot.engine.http_session_for(acc.proxy)
         acc.csrf = ""
+        print(f"(proxy: {acc.proxy or 'direct'})")
     else:
         head(1, "login")
-        ok, msg = bot.SITE.login(acc)
+        # Go through AccountSession.login(), not SITE.login(acc) -- the
+        # bot's own method is what assigns the proxy and follows a
+        # sister-domain hand-off, so calling the adapter directly probes a
+        # path the bot never takes (and goes out direct, unproxied).
+        ok = acc.login()
+        msg = acc.error or "Login Successfully"
         print(f"{'✅' if ok else '❌'} {msg}   (proxy: {acc.proxy or 'direct'})")
         if not ok:
             print("\nNothing that needs a session can run. If the message is "

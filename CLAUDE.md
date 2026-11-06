@@ -3327,7 +3327,7 @@ inline JS:
 | open bets | `GET /ex/d/api/getOpenBets/<marketId>` — **HTML, per market** |
 | cancel | `POST /ex/d/api/cancelAllBet?desktop=` — `id[]` array |
 | login | `POST /api2/login` `{_token, email, password}` |
-| balance | `POST /api/getBalance` |
+| balance | `POST /ex/d/api/getBalance` — **not** `/api/getBalance` |
 
 **`has_series = False`** — matches are listed flat, like playinmatch. The
 sport is a per-row attribute (`data-type` on `div.team_names`, and
@@ -3379,27 +3379,74 @@ real back/lay prices, liquidity and the `hash` blob. Registered in both
 existing line was touched and all six existing site URLs still resolve to
 the adapters they did before.
 
-⚠️ **NOT verified: login, balance, open bets, `placeBet`, `cancel`.** They
-are coded from the sites' own JavaScript — the same basis playinmatch's
-adapter shipped on — and have **never been run**, because no account on any
-of these four sites has been available. Run
-`probe_khelo.py --url <site> --user <id> --pass <pw>` (read-only, drives the
-real adapter), then the confirm screen's **🧪 Test 1 ID**, before any
-multi-ID bet. Without `--user/--pass` the probe runs the anonymous half,
-which is the quickest check that a new site on this template parses.
+**Driven with REAL ACCOUNTS 2026-11-05/06** (`probe_khelo.py`, which builds a
+real `exchange.AccountSession` and calls the real adapter), on khelosports77
+and kheloexch99: **login → balance → match list → event page → live odds →
+open bets**, all through the bot's own code. The event page gave the 424-char
+limit blob and a `Match Odds` market with all three runners, and the odds book
+came back `OPEN` with real back/lay prices, liquidity ₹12.4M and the `hash`
+blob. So everything except placing is now proven on this platform.
+
+**One correction the real account bought, and it looked like an empty wallet.**
+Balance is `POST /ex/d/api/getBalance`, under `/ex/d/` like every other route
+here — **not `POST /api/getBalance`**, which the first version used because the
+page's own markup names it. That route does exist, but it is **GET-only**: a
+POST answers `{"message":"The POST method is not supported for this route.
+Supported methods: GET, HEAD."}`, which carries no figures, so every ID read as
+blank rather than erroring. (`/api2/v2/getBalance`, `/api2/getBalance` and a
+bare `/getBalance` all answer `{"message": ""}`.) The right one returns
+`{"status":200,"balance":{"balance":"0.00","exposure":"0.00",
+"totalBalance":"0.00","main_balance":"0.00",…}}` — **strings, and no `wallet`
+key**, so the `totalBalance`/`balance` fallback is what makes this site work,
+the same reason starexch needs it.
+
+⚠️ **`probe_khelo.py` must call `AccountSession.login()`, not
+`SITE.login(acc)`.** The adapter method does not assign a proxy — the bot's own
+method does — so probing the adapter directly went out **unproxied** and hit
+the WAF wall, reporting "could not read the csrf token (site blocked the page,
+or it moved domain?)" on a site and account that were both fine. Fixed
+2026-11-05; the anonymous half takes a proxy now too.
+
+⚠️ **`placeBet` and `cancelAllBet` remain unexercised** — the same two steps
+khelstake, starexch, playinmatch and cricmatch each had open at this point.
+Both live IDs read **₹0.00**, so the test bet cannot run until one is funded.
+Fund an ID, then the confirm screen's **🧪 Test 1 ID** (unmatched BACK @1.01,
+cancelled at once — nothing can match at 1.01, so there is no exposure) before
+any multi-ID bet.
 
 ⚠️ **khelostar247.com is not drivable headlessly yet.** It sits behind a
 **Cloudflare managed challenge** ("Just a moment…", `cf-mitigated:
 challenge`) which a plain `requests.Session` cannot pass — a different
 thing from the AWS WAF handled elsewhere here, so CapSolver's
-`AntiAwsWafTask` does not apply. The other three answered a plain request
-from both a residential IP and the VPS's datacenter IP. All four do load
-AWS WAF's `challenge.js`, so the familiar behavioural wall is present and
-simply was not triggered.
+`AntiAwsWafTask` does not apply. All four do load AWS WAF's `challenge.js`,
+so the familiar behavioural wall is present on the others and simply was not
+triggered.
+
+**Re-confirmed 2026-11-06 with a real account for that site in hand**, so it
+is the wall and not the credentials: `GET /ex/d/inplay` answers **403** with
+`cf-mitigated: challenge`, `server: cloudflare` and `challenges.cloudflare.com`
+in its own CSP (Turnstile), from the VPS's datacenter IP **and** through the
+residential pool alike. It is **not a domain rotation** like playinmatch's.
+Its env file and sheet row exist and its bot is deliberately **not started** —
+running it would just fail every login. Clearing this needs a real browser or
+a Cloudflare-capable solver; neither is built here.
 
 Config: `.env.khelo.exchange.example` is a template for **four** instances —
 each needs its own `EXCHANGE_BOT_TOKEN`, its own `ADMINS_FILE` and **its own
 accounts tab** (the bot writes balances into column C).
+
+**Live since 2026-11-06**, each its own tmux window, auto-restart wrapper and
+log, on `proxies.residential.txt` with `EXCHANGE_BET_CONCURRENCY=2` and
+`EXCHANGE_MIN_STAKE=0`:
+
+| instance | env | site | accounts tab | state |
+|---|---|---|---|---|
+| khelosports | `.env.khelosports.exchange` | khelosports77.com | its own book, gid 0 | **running**, 1 ID, ₹0 |
+| kheloexch | `.env.kheloexch.exchange` | kheloexch99.com | its own book, gid 0 | **running**, 1 ID, ₹0 |
+| khelostar | `.env.khelostar.exchange` | khelostar247.com | its own book, gid 0 | **configured, NOT started** (Cloudflare) |
+
+khelo24bet7 has no instance yet — no account for it has been supplied, and the
+brand's shared odds host is already pointed at it regardless.
 
 ⚠️ **A residential proxy is required here too — but only for one of the
 four, and it is not the one the 2026-11-03 note guessed.** Re-measured from

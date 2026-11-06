@@ -601,7 +601,7 @@ class Khelo24Site(ExchangeSite):
         open bets    GET  /ex/d/api/getOpenBets/<marketId>   -- HTML
         cancel       POST /ex/d/api/cancelAllBet?desktop=    -- id[] array
         login        POST /api2/login     {_token, email, password}
-        balance      POST /api/getBalance
+        balance      POST /ex/d/api/getBalance
 
     Differences worth not re-deriving, each read off the page rather than
     inferred from the sibling platforms:
@@ -620,8 +620,14 @@ class Khelo24Site(ExchangeSite):
     * **Login is `/api2/login`, not `/api2/v2/login`, and it takes no
       `digits`.** playinmatch's client-side captcha field does not exist
       here; sending it is harmless but it is not what the page sends.
-    * **Balance is `/api/getBalance`** -- the winclash-family endpoint, not
-      the Laravel `/api2/v2/getBalance`.
+    * **Balance is `POST /ex/d/api/getBalance`**, under `/ex/d/` like every
+      other route here. ⚠️ `/api/getBalance` also exists and the page's own
+      markup names it, but it is **GET-only** -- a POST answers "The POST
+      method is not supported for this route" with no figures, which reads
+      as an empty wallet rather than as a wrong endpoint. The Laravel
+      `/api2/v2/getBalance` and a bare `/getBalance` both answer
+      `{"message": ""}`. Corrected 2026-11-05 after a real account read
+      blank.
     * **Open bets are HTML and PER MARKET.** The site loads
       `/ex/d/api/getOpenBets/<marketId>` straight into a panel with
       jQuery's .load(), and the cancellable rows inside carry their bet id
@@ -686,7 +692,17 @@ class Khelo24Site(ExchangeSite):
         return m.group(1) if m else ""
 
     def read_balance(self, account) -> dict | None:
-        resp = account.api_post("/api/getBalance")
+        # POST /ex/d/api/getBalance -- NOT /api/getBalance. That route does
+        # exist here and the page's own markup names it, but it answers
+        # **GET only** ("The POST method is not supported for this route"),
+        # so posting to it returns a message and no figures, and the bot
+        # reads every balance as blank. Confirmed live 2026-11-05 against a
+        # real account: the /ex/d/ one answers
+        # {"status":200,"balance":{"balance":"0.00","exposure":"0.00",
+        #  "totalBalance":"0.00","main_balance":"0.00",…}} -- strings, no
+        # "wallet" key, so the totalBalance/balance fallback below is what
+        # makes this site work (same reason starexch needs it).
+        resp = account.api_post("/ex/d/api/getBalance")
         if resp.get("_error"):
             return None
         bal = resp.get("balance")
