@@ -34,9 +34,30 @@ credentials): the login actually completing, the header balance selector,
 and the table id behind game 86. Everything in sel[] below is inherited from
 the identical winclash markup rather than confirmed on this host.
 
-SIGNUP IS OUT OF SCOPE here. The client wants gameplay only, so
-supports_http_fast stays False and the signup selectors are winclash's
-unverified -- run inspect_form.py before trusting them.
+SIGNUP was added 2026-11-07 (.env.funcrash.signup.example), and checked
+against the live site rather than inherited on faith -- read-only, no account
+created, no SMS sent:
+
+* /join-now and winclash's /join-now were fetched side by side and compared.
+  Every signup input carries the same id, maxlength and pattern (#userName
+  5-12 letters/digits, #mobileNumber maxlength 10, #email, #password,
+  #signUpButton, #confirmSignupOtpBtn_, one input.signup_verify_otp), and
+  the #signUpButton handler, validation() and the #confirmSignupOtpBtn_
+  handler are BYTE-IDENTICAL once the hostname is masked. The only two
+  checkboxes are the login form's remember_me -- there is no T&C box.
+* The register call is winclash's: POST /sign-up {_token, user_name, email,
+  password, confirm_password, mobile_number, otp}, status 205 = OTP sent,
+  1 = registered, statusCode 251 = OTP blessed. Exercised over plain HTTP
+  with a deliberately invalid identity (password == username), which the app
+  refuses before any SMS: {"status":0,"msg":"Password cannot be same as
+  username"} -- winclash's exact reply.
+* The affiliate route is winclash's too: GET /?btag=<code> answers 302 ->
+  /setcookie?btag=<code> -> / and sets a `btag` cookie, so tracking_cookie
+  is set below for the same reason winclash needed it (the register POST
+  carries no btag; only the cookie credits the signup).
+
+NOT verified yet: a real signup with a real SMS. Do one /newacc on a real
+number and confirm the account by logging into it before running volume.
 """
 from .base import SiteProfile
 from .cricmatch import GENERIC_RESULT_SELECTORS
@@ -104,7 +125,12 @@ PROFILE = SiteProfile(
     # both, and both were seen live.
     casino_game_hosts={"Mines": "spribegaming.com"},
 
-    # ---- signup: NOT inspected on this host, inherited from winclash ----
+    # ---- signup: compared live against winclash 2026-11-07 (docstring) ----
+    # The register POST carries no btag; the cookie set by the site's own
+    # /?btag= -> /setcookie route is what credits the affiliate. Confirmed on
+    # the wire here exactly as on winclash -- see SiteProfile.tracking_cookie.
+    tracking_param="btag",
+    tracking_cookie="btag",
     register_trigger="page_url",
     register_path="/join-now",
     has_terms_checkbox=False,
@@ -119,7 +145,25 @@ PROFILE = SiteProfile(
     phone_taken_texts=["mobile number is already in use",
                        "mobile number has already been taken"],
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
-    supports_http_fast=False,
+    # HTTP-fast signup (/fast on): winclash's values, because funcrash's
+    # #signUpButton / #confirmSignupOtpBtn_ handlers are byte-identical to
+    # winclash's. Steps 1-2 (csrf GET + register POST) were exercised here
+    # with an invalid identity and answered exactly as winclash does; the
+    # 205 / confirmSignupOtp / status-1 steps need a real SMS and are coded
+    # from the site's own JS, the same basis winclash's are.
+    supports_http_fast=True,
+    http_register_path="/sign-up",
+    http_otp_digits=6,
+    http_register_fields={
+        "username": "user_name", "email": "email", "password": "password",
+        "phone": "mobile_number", "otp": "otp", "token": "_token",
+    },
+    http_confirm_password_field="confirm_password",
+    http_otp_flow="confirm_otp",
+    http_confirm_otp_path="/api2/v2/confirmSignupOtp",
+    http_csrf_path="/join-now",
+    http_status_otp_sent=[205, 251],
+    http_status_registered=[1],
     supports_free_number=False,
     supports_change_password=False,
 
@@ -127,7 +171,8 @@ PROFILE = SiteProfile(
         "close_popup": [".modalClose", ".mnPopupClose", ".pgSoftClsBtn",
                         ".support_popup_close", ".areSurecancelBtn",
                         "button:has-text('Close')"],
-        # ---- signup (winclash's, UNVERIFIED on funcrash) ----
+        # ---- signup: every id below present on funcrash's /join-now with
+        # winclash's exact attributes (compared live 2026-11-07) ----
         "username": "#userName",
         "email": "#email",
         "password": "#password",

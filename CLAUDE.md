@@ -439,12 +439,25 @@ with the ids re-read rather than a new mapping:
 - `supports_http_login` stays False (the WAF blocks a bare `requests.Session`),
   so balances come from the header selector, same as winclash. `/api2/v2/login`
   and `/api/getBalance` both exist; `/api2/v2/getBalance` does not.
-- **Signup is uninspected here** — the `sel` signup keys are winclash's,
-  inherited as a starting point for `inspect_form.py`, and
-  `supports_http_fast` is False.
+- **Signup is winclash's, checked rather than assumed (2026-11-07).**
+  `/join-now` fetched side by side with winclash's: every signup input has
+  the same id/maxlength/pattern, and the `#signUpButton` handler,
+  `validation()` and the `#confirmSignupOtpBtn_` handler are
+  **byte-identical** with the hostname masked. No T&C box (the only
+  checkboxes are the login's `remember_me`). The register POST answered an
+  invalid identity (password == username, refused before any SMS) with
+  winclash's exact `{"status":0,"msg":"Password cannot be same as
+  username"}`, both by hand and through `http_register_call()`. The btag
+  route is winclash's too (`/?btag=` → 302 `/setcookie` → `btag` cookie), so
+  `tracking_cookie="btag"` is set — without it signups would go uncredited
+  exactly as winclash's did on 2026-09-04. `main.py --no-submit` from the
+  laptop: hard WAF captcha → CapSolver → form filled, phone read back, btag
+  cookie present, 25.7s. `supports_http_fast=True` with winclash's fields.
+  **No real signup yet** — one `/newacc` on a real number, then log into it.
 - Config: `.env.funcrash.gameplay.example` → `BOT_MODE=gameplay`,
   `BOT_SITE_URL=https://funcrash.com/`, its own admins/settings/pairs/pair_runs
-  files.
+  files. Signups: `.env.funcrash.signup.example` → `BOT_MODE=signup`, its own
+  admins/settings/admin_phones files, `CAPSOLVER_API_KEY` required.
 
 ### funcrash's Mines: wagering with no risk and no reveal (`BOT_MODE=mines`)
 
@@ -1344,7 +1357,8 @@ Production layout: `.env.cricmatch` (signup), `.env.spin24star` (signup),
 `.env.khelofun.signup` (signup), `.env.winclash` (signup), `.env.gameplay`
 (gameplay), `.env.stockmarket` (stockmarket), `.env.khelofun.stockmarket`
 (stockmarket), `.env.winclash.stockmarket` (stockmarket),
-`.env.winclash.gameplay` (gameplay), `.env.password` (password).
+`.env.winclash.gameplay` (gameplay), `.env.password` (password),
+`.env.funcrash.signup` (signup).
 
 **`--env` is parsed from `sys.argv` at module level and loaded with
 `load_dotenv(_env_file, override=True)`. The `override=True` is load-bearing:**
