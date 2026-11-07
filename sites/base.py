@@ -108,6 +108,16 @@ class SiteProfile:
     # before.
     phone_taken_texts: list = field(default_factory=list)
 
+    # Lower-cased substrings of a register REJECTION that in fact means "the
+    # SMS is on its way, slowly". funcrash answers a valid signup with
+    # "Something went wrong. Please try again after sometime" -- and the OTP
+    # still arrives about a minute later, while the number is now held, so a
+    # retry only gets "already in use". A match makes
+    # wait_for_register_outcome() open the page's own OTP step (what its
+    # success handler would have done) and wait for the code instead of
+    # failing. Empty -> never fires, which is every other site.
+    otp_maybe_sent_texts: list = field(default_factory=list)
+
     # Selector for the inline "mobile number already taken" error, or None if
     # the site surfaces it (if at all) through the generic result scrape instead
     # of a dedicated element (Khelo). Drives the distinct `phone_taken` status.

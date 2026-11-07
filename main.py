@@ -1320,6 +1320,44 @@ def _looks_like_phone_taken(page, msgs):
     return any(t.lower() in joined for t in texts)
 
 
+# Replays the visible half of the page's own `data.status==205` handler
+# (rjm/jeet template: funcrash, winclash): hide the form, show the OTP step
+# and put the number in .signup_verify_number, which #confirmSignupOtpBtn_
+# reads as the `phone` it posts. The form's fields stay filled, so the
+# handler's re-click of #signUpButton after a 251 sends the same identity.
+_SHOW_OTP_STEP_JS = """(phone) => {
+    if (!window.jQuery || !$('.regStepTwo').length) return false;
+    $('.regStepOne').hide();
+    $('.regStepTwo').show();
+    $('.signup_verify_number').text(phone);
+    $('#signUpButton').removeAttr('disabled').html('SIGN UP');
+    return true;
+}"""
+
+
+def _looks_like_otp_maybe_sent(page, msgs):
+    """True when a rejection is one the site sends while its SMS is still on
+    the way (SiteProfile.otp_maybe_sent_texts). Never matches on a site that
+    lists none."""
+    texts = profile_for(page.url).otp_maybe_sent_texts
+    if not texts:
+        return False
+    joined = " ".join(msgs).lower()
+    return any(t.lower() in joined for t in texts)
+
+
+def _force_otp_step(page):
+    """Open the OTP step the site skipped, for the number actually in the
+    form. Returns True once the OTP field is on screen."""
+    try:
+        phone = page.input_value(profile_for(page.url).sel["phone"]).strip()
+        page.evaluate(_SHOW_OTP_STEP_JS, phone)
+        page.wait_for_timeout(300)
+    except Exception:
+        return False
+    return _otp_screen_showing(page)
+
+
 def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250, stop=None):
     """After clicking REGISTER, poll for whichever outcome shows up first
     instead of blindly sleeping: the OTP screen, the phone-taken error, or any
@@ -1355,6 +1393,10 @@ def wait_for_register_outcome(page, timeout_ms=12000, poll_ms=250, stop=None):
                 return "otp", []
             if _looks_like_phone_taken(page, msgs):
                 return "phone_taken", msgs
+            # An "otp" outcome normally carries no messages; carrying the
+            # server's here is how a caller can tell the SMS will be late.
+            if _looks_like_otp_maybe_sent(page, msgs) and _force_otp_step(page):
+                return "otp", msgs
             return "error", msgs
         page.wait_for_timeout(poll_ms)
     return "timeout", []
@@ -2572,6 +2614,11 @@ def signup_once(page, acct, submit=True, interactive=False, site_url=None, proxy
         return result
 
     result["messages"] = msgs
+    if msgs:
+        # Only a late-SMS reply reaches here with messages (see
+        # SiteProfile.otp_maybe_sent_texts).
+        print(f"\nThe site said '{'; '.join(msgs)}', but its SMS usually still "
+              f"arrives about a minute later -- wait for it.")
     # outcome == "otp" -> the site sent an SMS OTP; handle the verify step.
     result = enter_otp(page, acct, result)
 

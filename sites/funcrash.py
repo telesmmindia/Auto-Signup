@@ -144,6 +144,12 @@ PROFILE = SiteProfile(
     phone_taken_selector=None,
     phone_taken_texts=["mobile number is already in use",
                        "mobile number has already been taken"],
+    # OBSERVED LIVE 2026-11-07 on four fresh numbers: the register POST
+    # answered status 0 "Something went wrong. Please try again after
+    # sometime" (the server's own msg -- the page's ajax error path says a
+    # bare "Something went wrong"), yet the OTP SMS arrived ~1 min later and
+    # the number then read "already in use". So treat it as "OTP sent, late".
+    otp_maybe_sent_texts=["please try again after sometime"],
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
     # HTTP-fast signup (/fast on): winclash's values, because funcrash's
     # #signUpButton / #confirmSignupOtpBtn_ handlers are byte-identical to

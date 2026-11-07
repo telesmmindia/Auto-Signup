@@ -922,7 +922,10 @@ def _blocking_fill_and_register(session, phone):
     if digits == 0:
         return {"ok": False, "message": "OTP screen detected but no digit inputs found.",
                 "shot": result_shot}
-    return {"ok": True, "digits": digits, "shot": result_shot}
+    # Messages on an "otp" outcome mean the site called it a failure while its
+    # SMS was still on the way (SiteProfile.otp_maybe_sent_texts).
+    return {"ok": True, "digits": digits, "shot": result_shot,
+            "late_otp_note": "; ".join(msgs) if msgs else None}
 
 
 def _blocking_verify_otp(session, otp):
@@ -2897,8 +2900,17 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
         await _auto_restart(update, chat_id, sub_id)
         return
 
-    logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
     session.stage = "await_otp"
+    if result.get("late_otp_note"):
+        logger.warning(f"#{session.row_id} {session.acct['username']}: site replied "
+                       f"{result['late_otp_note']!r} -- treating it as a late OTP, "
+                       f"OTP step opened")
+        await update.message.reply_text(
+            f"📩 [#{sub_id}] The site is slow sending the OTP to {phone} -- it usually "
+            f"arrives in about a minute. Send the {result['digits']}-digit code when it comes."
+        )
+        return
+    logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
     await update.message.reply_text(
         f"📩 [#{sub_id}] OTP sent to {phone}. Send the {result['digits']}-digit code you received."
     )
