@@ -2906,8 +2906,10 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
                        f"{result['late_otp_note']!r} -- treating it as a late OTP, "
                        f"OTP step opened")
         await update.message.reply_text(
-            f"📩 [#{sub_id}] The site is slow sending the OTP to {phone} -- it usually "
-            f"arrives in about a minute. Send the {result['digits']}-digit code when it comes."
+            f"📩 [#{sub_id}] The site answered \"{result['late_otp_note']}\" for {phone}. "
+            f"If an OTP still arrives in a minute or two, send the {result['digits']}-digit "
+            f"code. If none comes, the site is refusing SMS from this proxy -- /cancel and "
+            f"switch with /setproxy (number not used up)."
         )
         return
     logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")

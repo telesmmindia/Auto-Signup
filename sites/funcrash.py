@@ -149,6 +149,14 @@ PROFILE = SiteProfile(
     # sometime" (the server's own msg -- the page's ajax error path says a
     # bare "Something went wrong"), yet the OTP SMS arrived ~1 min later and
     # the number then read "already in use". So treat it as "OTP sent, late".
+    # CORRECTED 2026-11-09: mostly it is NOT a late OTP. 7974069442 got this
+    # reply three times through 51.194.232.95 over two days, never an SMS and
+    # never "already in use"; the same number through .184 a minute later got
+    # status 205 "Otp Sent Successfully" at once. So it is funcrash refusing
+    # to send SMS for an exit IP it has throttled (.95 also carries the
+    # funcrash Mines bot's logins). The OTP step is still opened -- a code
+    # does sometimes arrive -- but the bot now says a missing SMS means the
+    # proxy, and the cure is a different exit IP.
     otp_maybe_sent_texts=["please try again after sometime"],
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
     # HTTP-fast signup (/fast on): winclash's values, because funcrash's
