@@ -588,7 +588,11 @@ auto-cashout still settles it), the loop just doesn't start another.
 MECHANICAL level — the idle auto-cashout really does return the stake, and
 `run_mines_wager`'s "stop if any balance moves" guard never fired. Whether
 the site COUNTS those rounds as wagering is still the client's question, not
-this repo's. `MAX_CONCURRENT_RUNS` was raised 2→5 after that run.
+this repo's. `MAX_CONCURRENT_RUNS` was raised 2→5 after that run, and
+5→10 on both Mines instances (funcrash and playcric365) 2026-11-10 at the
+operator's request. Both instances log in through the shared `.95`, so at
+10 wide watch `/runlog` for login failures first — the fix for those is
+`/setproxy` onto a less-loaded IP, not a lower number.
 
 ### The same bot on playcric365 (`.env.playcric365.mines`)
 
