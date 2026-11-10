@@ -659,6 +659,44 @@ failed requests. `--ua` forces a user agent, which is how the 403 above was
 isolated. Places no bet and types no credential (`--from-pairs` reads the
 bot's own pairs file).
 
+### playcric365 signups: per-IP refusal → mobile proxy + `--fast` (2026-11-10)
+
+From 2026-11-08 every playcric signup "failed" as **"REGISTER click had no
+effect"**. That wording is the bot's guess for "nothing visible happened";
+the POST was sent. playcric answered `{"status":201,"message":"Something went
+wrong. Please try again"}` in ~1s. The page's own 201 handler expects a
+`{field: reason}` object, so a string renders **nothing**, and the bot waited
+out its 12s. Same number, seconds apart: residential `.87` and `.184` refused,
+the VPS's own IP got `205 "OTP has been sent."` and then was refused too after
+**4 signups in 3 minutes**. So it is a **per-exit-IP signup limit**, and five
+fixed IPs cannot feed it.
+
+The fix is the **DataImpulse MOBILE** login (the bit.ly bot's, `__cr.in`,
+port 823). It gives a fresh Jio/Airtel IP per connection
+(`mobile:true hosting:false`), and playcric accepted a register through it.
+The *other* DataImpulse login (`proxies.txt`) is datacenter even with
+`__cr.in` and is useless here. The browser path cannot use the mobile proxy:
+the homepage pulls ~300 requests over 19 hosts, each a fresh mobile tunnel,
+and never reaches `domcontentloaded` in 60s (90s+ even with images blocked).
+So `supports_http_fast=True` and the bot runs with `"fast": true`, which is
+three requests per signup.
+
+- `http_status_otp_sent=[205]`/`http_status_registered=[200]` are
+  **required**, not decoration. playcric's refusals carry no `message_class`,
+  so the cricmatch convention would read every refusal as a success.
+- The btag survives: the csrf GET is the tracked root, which 302s through
+  `/setcookie` and leaves a `btag` cookie in the session.
+  `tracking_cookie` is deliberately unset (it would change the browser
+  path's entry wait).
+- ⚠️ Open: the OTP POST comes minutes after the register POST, so it will
+  usually leave from a **different** mobile IP. If correct codes start
+  failing as "OTP rejected", move to DataImpulse **sticky** ports
+  (`gw.dataimpulse.com:10000+`, same IP per port, verified) with one port per
+  signup.
+- ⚠️ The mobile plan is **shared with the bit.ly bot** and has run dry before
+  (`407 TRAFFIC_EXHAUSTED`, 2026-10-25). A fast signup is ~0.5 MB, mostly the
+  homepage HTML.
+
 **spin24star** — runs the "Khelo" white-label:
 - No `.registerUserData`; several `button.rj__join_now` (only one visible), and a
   game section overlays it — the click **must be forced**. There's a fast-path

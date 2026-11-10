@@ -47,7 +47,8 @@ wall is inference from the template, and the first run must verify it:
     to starexch's pair because the markup matches starexch's, not because
     a table was opened. Run verify_baccarat.py (and verify_stockmarket.py)
     with a real account before any /run -- both are read-only.
-  * supports_http_fast stays False. /register exists and is almost
+  * supports_http_fast WAS False here until 2026-11-10 (see the PROFILE
+    comment for why it is on now and what was verified). /register exists and is almost
     certainly the same JSON endpoint cricmatch's --fast path drives, but
     "almost certainly" is how --fast breaks silently (it hard-codes the
     field names and JSON shape), so the browser path carries signups here
@@ -69,6 +70,33 @@ PROFILE = SiteProfile(
     phone_taken_selector=".err_phone",
     result_selectors=GENERIC_RESULT_SELECTORS,
     tracking_param="btag",
+
+    # --fast, turned on 2026-11-10 because the browser path stopped being
+    # usable: playcric refuses signups per exit IP after a handful (the VPS's
+    # own IP did 4 in 3 minutes, then refused), so it needs the rotating
+    # MOBILE proxy -- and through that the homepage's ~300 requests over 19
+    # hosts each pay a fresh mobile tunnel, so the page never finishes loading
+    # inside the 60s navigation timeout (measured: 90s+, even with images
+    # blocked). Over HTTP the same signup is three requests, ~3s.
+    #
+    # Read live, not inherited from cricmatch: POST /register takes
+    # username/email/password/phone/otp/_token (the default field names), and
+    # the page's own handler treats status 205 as "OTP sent" and 200 as
+    # "registered". The statuses MUST be listed: playcric's refusals carry no
+    # message_class -- {"status":201,"message":"Something went wrong. Please
+    # try again"} (the per-IP refusal) and {"status":201,"message":{"phone":
+    # "The mobile number has already been taken."}} -- so the message_class
+    # convention would have read every refusal as a success. Verified through
+    # the mobile proxy: 205 "OTP has been sent." for a fresh number.
+    #
+    # The btag needs no extra step: the csrf GET is the tracked root itself,
+    # which redirects through /setcookie and leaves a `btag` cookie in the
+    # session (checked over plain requests). tracking_cookie is deliberately
+    # NOT set -- it would switch the browser path's entry wait to "commit",
+    # which this modal site has never been run with.
+    supports_http_fast=True,
+    http_status_otp_sent=[205],
+    http_status_registered=[200],
 
     # Login markup confirmed present in /append/loginpp and identical to
     # cricmatch's; never driven (no account). supports_login is what lets
@@ -165,7 +193,7 @@ PROFILE = SiteProfile(
     http_balance_path="/api2/v2/getBalance",
 
     # Still never probed on this site. See the module docstring.
-    supports_http_fast=False,
+    # (supports_http_fast is set near the top: it is ON since 2026-11-10.)
     supports_change_password=False,
     supports_free_number=False,
 

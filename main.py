@@ -2991,6 +2991,12 @@ def http_message_of(resp_json):
     for key in ("message", "msg"):
         val = resp_json.get(key)
         if val:
+            # Laravel validation errors arrive as {field: reason} (playcric:
+            # {"phone": "The mobile number has already been taken."}); show
+            # the reasons, not the dict's repr.
+            if isinstance(val, dict):
+                val = " ".join(" ".join(map(str, v)) if isinstance(v, list) else str(v)
+                               for v in val.values())
             return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", str(val))).strip()
     return ""
 
