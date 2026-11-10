@@ -2004,12 +2004,74 @@ async def testbaccarat(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # THE TILES ARE A <canvas>, so "reveal nothing" is structural, not a rule the
 # code has to remember: mines.py has no code path that can touch the grid.
 
-_mines_runs_active = {}  # account id (str) -> {"stop_event": Event, "username": str}
+_mines_runs_active = {}  # account id (str) -> {"stop_event", "username", "proxy"}
 _mines_executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_RUNS)
+
+# Spreading runs over several exit IPs, and spacing the logins on each one.
+# Found 2026-11-11 on funcrash at 10 wide: eight /run commands sent together
+# all logged in through the one /setproxy IP in the same second and every one
+# timed out ("session never became authenticated"), while the same accounts
+# started ~20-30s apart minutes earlier had logged in fine. Seven live games on
+# that one IP had also started failing with ERR_TUNNEL_CONNECTION_FAILED. Both
+# are per-IP limits -- logins throttled per exit IP, tunnels per proxy -- so
+# the fix is more IPs and no bursts, not a smaller number.
+#
+# MINES_PROXY_FILE: one proxy per line (proxies.residential.txt's format).
+# Each run takes the least-busy one, ties in file order, so list the least
+# shared IPs first. Unset or empty -> every run uses /setproxy's, as before.
+MINES_PROXY_FILE = os.environ.get("MINES_PROXY_FILE", "").strip()
+# Minimum gap between two run STARTS on the same exit IP. Covers the login,
+# which comes ~7s after the start.
+MINES_LOGIN_SPACING_SECS = float(os.environ.get("MINES_LOGIN_SPACING_SECS", "20"))
+_mines_login_lock = threading.Lock()
+_mines_next_login = {}  # proxy -> time.monotonic() the next start may begin
+
+
+def _mines_proxy_pool():
+    """Re-read on every /run, so editing the file needs no restart."""
+    if not MINES_PROXY_FILE:
+        return []
+    try:
+        with open(MINES_PROXY_FILE) as f:
+            return [l.strip() for l in f
+                    if l.strip() and not l.lstrip().startswith("#")]
+    except OSError as e:
+        logger.warning(f"MINES_PROXY_FILE unreadable ({e}); using /setproxy")
+        return []
+
+
+def _pick_mines_proxy():
+    """The pool entry carrying the fewest live runs. Called on the event loop
+    before the run is dispatched and recorded in _mines_runs_active straight
+    away, so /run commands sent together each see the others' picks."""
+    pool = _mines_proxy_pool()
+    if not pool:
+        return global_settings.get("proxy")
+    busy = {}
+    for rec in _mines_runs_active.values():
+        busy[rec.get("proxy")] = busy.get(rec.get("proxy"), 0) + 1
+    return min(pool, key=lambda p: (busy.get(p, 0), pool.index(p)))
+
+
+def _wait_mines_login_slot(proxy, stop_event, say):
+    """Book the next start slot on this exit IP and wait for it. The slot is
+    booked under the lock and the wait happens outside it (tournament's
+    _LoginPacer shape), but the wait is on stop_event so /stoprun cancels a
+    queued run without it spending a login."""
+    if MINES_LOGIN_SPACING_SECS <= 0:
+        return
+    with _mines_login_lock:
+        now = time.monotonic()
+        nxt = _mines_next_login.get(proxy, 0.0)
+        delay = max(0.0, nxt - now)
+        _mines_next_login[proxy] = max(now, nxt) + MINES_LOGIN_SPACING_SECS
+    if delay:
+        say(f"⏳ waiting {delay:.0f}s for a login slot on {_proxy_host(proxy)}")
+        stop_event.wait(delay)
 
 
 def _blocking_run_mines(loop, bot, chat_id, aid, creds, amount, rounds, mines_n,
-                        stop_event):
+                        stop_event, proxy):
     """Runs on _mines_executor -- its own worker thread and its own browser,
     like _blocking_run_pair, so concurrent runs share no Playwright object."""
 
@@ -2021,11 +2083,18 @@ def _blocking_run_mines(loop, bot, chat_id, aid, creds, amount, rounds, mines_n,
         except Exception:
             pass
 
+    _wait_mines_login_slot(proxy, stop_event, progress)
+    if stop_event.is_set():
+        return {"ok": True, "rounds_done": 0, "rounds_asked": rounds,
+                "stake": amount, "mines": mines_n,
+                "stop_reason": "stopped_by_user",
+                "start_balance": None, "final_balance": None, "rounds": [],
+                "messages": ["stopped while waiting for a login slot; "
+                             "nothing was opened"]}
     try:
         return mines.run_mines_wager(
             creds["username"], creds["password"], BOT_SITE_URL,
-            amount, rounds, mines=mines_n,
-            proxy=global_settings.get("proxy"),
+            amount, rounds, mines=mines_n, proxy=proxy,
             progress=progress, stop_event=stop_event)
     except PWError as e:
         return {"ok": False, "rounds_done": 0, "rounds_asked": rounds,
@@ -2140,12 +2209,14 @@ async def mines_run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stop_event = threading.Event()
+    proxy = _pick_mines_proxy()
     _mines_runs_active[aid] = {"stop_event": stop_event,
-                               "username": rec["username"]}
+                               "username": rec["username"], "proxy": proxy}
     await update.message.reply_text(
         f"💣 <b>Mines run started</b>  (#{aid})\n"
         f"👤 <b>{html.escape(rec['username'])}</b>\n"
         f"💵 ₹{amount:,.2f} × {rounds} round(s),  {mines_n} mine(s)\n"
+        f"🌐 via {html.escape(_proxy_host(proxy) if proxy else 'no proxy')}\n"
         f"🙈 no tile is ever revealed — every round auto-cashes at 1.00x",
         parse_mode="HTML")
 
@@ -2154,7 +2225,7 @@ async def mines_run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary = await loop.run_in_executor(
             _mines_executor, _blocking_run_mines, loop, context.bot,
             update.effective_chat.id, aid, rec, amount, rounds, mines_n,
-            stop_event)
+            stop_event, proxy)
     finally:
         _mines_runs_active.pop(aid, None)
 
@@ -2162,6 +2233,7 @@ async def mines_run_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "id": mines_runs["next_id"], "account_id": aid,
         "username": rec["username"], "stake": amount,
         "rounds_asked": rounds, "mines": mines_n,
+        "exit_ip": _proxy_host(proxy) if proxy else None,
         "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         **{k: summary.get(k) for k in
            ("ok", "rounds_done", "stop_reason", "start_balance",
@@ -2191,6 +2263,8 @@ def _mines_summary_text(r):
         f"💰 {bal(sb)} → {bal(fb)}   (net {drift})",
         f"🛑 {html.escape(str(r.get('stop_reason')))}",
     ]
+    if r.get("exit_ip"):
+        lines.append(f"🌐 via {html.escape(r['exit_ip'])}")
     msgs = r.get("messages") or []
     if msgs:
         lines.append("")

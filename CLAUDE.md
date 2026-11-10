@@ -591,8 +591,18 @@ the site COUNTS those rounds as wagering is still the client's question, not
 this repo's. `MAX_CONCURRENT_RUNS` was raised 2→5 after that run, and
 5→10 on both Mines instances (funcrash and playcric365) 2026-11-10 at the
 operator's request. Both instances log in through the shared `.95`, so at
-10 wide watch `/runlog` for login failures first — the fix for those is
-`/setproxy` onto a less-loaded IP, not a lower number.
+10 wide that burst a limit within hours: eight `/run`s sent together all
+logged in through `.95` in the same second and every one timed out
+("session never became authenticated"), while the same accounts started
+20-30s apart had logged in fine, and a live game on that IP had already
+hit `ERR_TUNNEL_CONNECTION_FAILED`. Both per-IP limits, so the bot now
+spreads runs: `MINES_PROXY_FILE` (one proxy per line,
+`proxies.residential.txt`'s format, re-read on every `/run`) gives each
+run the least-busy IP, ties in file order, and `MINES_LOGIN_SPACING_SECS`
+(20) spaces run starts on one IP — booked like tournament's
+`_LoginPacer`, but waited on the run's stop event so `/stoprun` cancels a
+queued run without spending a login. The start card and summary name the
+IP (`exit_ip` in the runs file). Unset, every run uses `/setproxy`'s.
 
 ### The same bot on playcric365 (`.env.playcric365.mines`)
 
