@@ -934,9 +934,12 @@ def _blocking_fill_and_register(session, phone):
                  for t in profile_for(site).ip_refused_texts):
             # The site's wording for "not from this IP right now": rest the
             # proxy like a firewall block rather than retrying into it.
+            reply = (f" [the site replied {captured['reply']}]"
+                     if captured.get("reply") else "")
             return {"ok": False, "blocked": True,
                     "message": f"{message} -- the site refuses signups from this "
-                               f"proxy for now (it allows only a few per address)",
+                               f"proxy for now (it allows only a few per address)"
+                               f"{reply}",
                     "shot": result_shot}
         elif not msgs and outcome == "timeout":
             if captured.get("reply"):

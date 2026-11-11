@@ -120,10 +120,15 @@ reused one. **They pass the full browser signup path** — form open, fill,
 REGISTER fires the POST — on cricmatch, khelofun and spin24star (POST
 aborted in the browser, no SMS), and serve all five signup sites without a
 WAF challenge. They live in `proxies.airtel.txt` (VPS only, mode 600,
-excluded from git) and are the MAIN proxy of the cricmatch, khelofun,
-spin24star and playcric signup bots, with the fixed IPs behind them in
-`/proxypool`. funcrash signup stays on a fixed IP: its WAF token is bound to
-one IP, so rotating would buy a CapSolver solve per signup.
+excluded from git) and are the MAIN proxy of the cricmatch, khelofun and
+playcric signup bots, with the fixed IPs behind them in `/proxypool`.
+**Not for the AWS-WAF sites:** funcrash and spin24star stay on fixed IPs. The
+WAF token is bound to one IP and a per-connection gateway sends the page and
+the register POST from different IPs: on spin24star 4 of 5 rotating signups
+hit the register captcha (submit 42-80s instead of ~2s), paid a CapSolver
+solve, and mostly still ended "Something went wrong" — 1 success in 5. Same
+evening it went back to the fixed IPs, where `ip_refused_texts` walks the
+pool ~3 signups per IP; the Airtel logins sit at the END of its pool.
 
 **The signup browser skips images, video and fonts** (`_skip_heavy_resources`
 in `telegram_bot.py`). Within half an hour of the switch, cricmatch page loads
