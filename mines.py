@@ -60,11 +60,14 @@ one. round_is_over() below is therefore written to accept SEVERAL independent
 signals rather than one, so a wrong guess about any single one degrades into
 "wait for the wallet to come back" instead of into a stuck round.
 """
+import logging
 import re
 import time
 from urllib.parse import urlsplit
 
 import main as m
+
+log = logging.getLogger(__name__)
 
 TILE = "Mines"
 
@@ -72,6 +75,17 @@ TILE = "Mines"
 # inside this. The ceiling exists so a round that somehow never resolves gives
 # up and reports it rather than hanging a worker thread forever.
 ROUND_TIMEOUT_SECS = 120.0
+# How long a BET click gets to visibly start a round before it counts as not
+# taken. Found 2026-11-11 on funcrash: of 58 runs over one night, 40 ended
+# with the client back at an idle, enabled BET, nothing live and the wallet
+# unchanged -- i.e. the click never became a bet -- and they failed in bursts
+# across every account and exit IP at once while playcric's games on the same
+# machine kept betting. So it is the operator side refusing or stalling bets
+# for a while, and the answer is to re-click after a pause, not to end the run.
+BET_ACCEPT_SECS = 30.0
+# Pauses before each re-click of a bet the game did not take. Their sum
+# (~2.5 min) is how long an operator-side hiccup is ridden out before giving up.
+BET_RETRY_WAITS = (10, 20, 40, 60)
 # How long after a round resolves before the next bet. The client needs a beat
 # to re-arm the BET button, and this is also the only pacing between bets.
 ROUND_GAP_SECS = 2.0
@@ -270,25 +284,135 @@ def place_bet(frame):
     frame.click("button.btn-control.btn-bet")
 
 
+def _went_live(st):
+    """The client is showing a round in progress (or at least not an idle BET).
+    The same test wait_for_round_end has always used to decide a round began."""
+    return bool(st.get("countdown_up") or st.get("locked") or (
+        (st.get("bet_text") or "").strip().lower() not in ("", "bet")))
+
+
+# Whatever the client is showing as a message. Spribe's refusal markup has
+# never been captured, so this casts wide (any visible notification-ish
+# element) -- it is evidence for the run's report, never a control signal.
+_NOTICES_JS = """() => {
+  const out = [];
+  const sel = '[class*="notif"],[class*="toast"],[class*="alert"],' +
+              '[class*="error"],[class*="snack"],[class*="message"],' +
+              '[class*="popup"],[class*="modal"],[role="alert"]';
+  for (const el of document.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const s = getComputedStyle(el);
+    if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") continue;
+    const t = (el.innerText || "").trim().replace(/\\s+/g, " ");
+    if (t && t.length < 200 && !out.includes(t)) out.push(t);
+    if (out.length >= 5) break;
+  }
+  return out;
+}"""
+
+
+def read_notices(target):
+    """Visible message texts in a frame or page. [] when there are none."""
+    try:
+        return target.evaluate(_NOTICES_JS) or []
+    except Exception:
+        return []
+
+
+def _visible_text(target, limit=600):
+    try:
+        return " ".join(target.inner_text("body").split())[:limit]
+    except Exception as e:
+        return f"(unreadable: {str(e)[:60]})"
+
+
+def place_bet_confirmed(frame, game_page, amount, mines, prev_balance,
+                        stop_event=None, progress=None):
+    """Click BET and confirm the round actually started; re-click a bet the
+    game visibly did not take.
+
+    Returns (status, detail):
+      "live"    -- a round is in progress; wait_for_round_end(saw_live=True).
+      "refused" -- every try came back to an idle BET; NOTHING was staked.
+      "pending" -- the button stayed disabled with no round showing; unknown.
+      "moved"   -- the wallet moved while the client sat idle; not re-clicked.
+      "stopped" -- /stoprun during a pause between tries; nothing staked.
+
+    A re-click is sent only when the client is back at an enabled BET with no
+    round showing AND the wallet still reads the pre-bet balance. Even a bet
+    the client failed to show is a no-reveal round that auto-cashes at 1.00x,
+    and the run's balance check still runs after every round.
+    """
+    say = progress or (lambda s: None)
+    tries = len(BET_RETRY_WAITS) + 1
+    notices = []
+    for attempt in range(1, tries + 1):
+        set_mines_count(frame, mines)
+        set_stake(frame, amount)
+        place_bet(frame)
+
+        deadline = time.time() + BET_ACCEPT_SECS
+        hard_stop = time.time() + ROUND_TIMEOUT_SECS
+        st = {}
+        while time.time() < hard_stop:
+            st = read_state(frame)
+            if _went_live(st):
+                return "live", st
+            # A disabled BET may be the client waiting on the server: never
+            # click on top of it, just keep watching until the hard stop.
+            if time.time() >= deadline and not st.get("bet_disabled"):
+                break
+            game_page.wait_for_timeout(500)
+        else:
+            return "pending", (f"BET stayed disabled for {ROUND_TIMEOUT_SECS:.0f}s "
+                               f"with no round showing ({st})")
+
+        notices = list(dict.fromkeys(read_notices(frame) + read_notices(game_page)))
+        log.warning(f"Mines bet not taken (try {attempt}/{tries}): state={st} "
+                    f"notices={notices} frame_text={_visible_text(frame)!r}")
+        bal = read_wallet(game_page)
+        if (bal is not None and prev_balance is not None
+                and abs(bal - prev_balance) > 0.009):
+            return "moved", (f"balance went {prev_balance} -> {bal} while the "
+                             f"client showed no round; not re-clicking")
+        if attempt == tries:
+            break
+        wait = BET_RETRY_WAITS[attempt - 1]
+        say(f"⚠️ the game did not take the bet (try {attempt}/{tries}), nothing "
+            f"staked{' — it says: ' + ' | '.join(notices) if notices else ''}; "
+            f"trying again in {wait}s")
+        if stop_event is not None and stop_event.wait(wait):
+            return "stopped", "stopped while waiting to re-try a bet the game had not taken"
+
+    total = int(sum(BET_RETRY_WAITS))
+    return "refused", (
+        f"the game did not take the bet in {tries} tries over ~{total // 60}m"
+        f"{total % 60:02d}s; nothing was staked (BET still ready, balance "
+        f"unchanged){'. It showed: ' + ' | '.join(notices) if notices else ''}")
+
+
 def wait_for_round_end(frame, game_page, timeout_secs=ROUND_TIMEOUT_SECS,
-                       stop_event=None, progress=None):
+                       stop_event=None, progress=None, saw_live=False):
     """Let the round run itself out. REVEALS NOTHING.
 
     Returns (ended, state). `ended` False means the round did not resolve
     inside the timeout, which is a reportable fault -- the stake may still be
-    live -- not something to retry on top of.
+    live -- not something to retry on top of. Pass saw_live=True when the
+    caller has already seen the round start (place_bet_confirmed).
     """
     deadline = time.time() + timeout_secs
-    saw_live = False
+    told_stop = False
     while time.time() < deadline:
-        if stop_event is not None and stop_event.is_set():
+        if (stop_event is not None and stop_event.is_set() and not told_stop
+                and progress):
             # A stop does NOT abandon the round: the countdown still resolves
-            # it. Say so rather than implying the stake was pulled.
-            if progress:
-                progress("stop requested -- still waiting out the live round")
+            # it. Say so -- ONCE: this loop polls twice a second, and saying
+            # it every pass flooded the chat into Telegram's flood control.
+            progress("stop requested -- still waiting out the live round")
+            told_stop = True
         st = read_state(frame)
-        if st.get("countdown_up") or st.get("locked") or (
-                (st.get("bet_text") or "").strip().lower() not in ("", "bet")):
+        if _went_live(st):
             saw_live = True
         elif saw_live and round_is_over(frame, st):
             return True, st
@@ -460,15 +584,23 @@ def run_mines_wager(username, password, site_url, amount, rounds, mines=1,
                         f"({read_state(frame)})")
                     break
 
-            # Re-assert both every round: the client resets the stake to its
-            # default after some rounds, and betting the default instead of
-            # the asked-for amount is exactly the silent fault worth guarding.
-            set_mines_count(frame, mines)
-            set_stake(frame, amount)
-
-            place_bet(frame)
+            # place_bet_confirmed re-asserts mines and stake before every
+            # click: the client resets the stake to its default after some
+            # rounds, and betting the default instead of the asked-for amount
+            # is exactly the silent fault worth guarding.
+            status, detail = place_bet_confirmed(
+                frame, game_page, amount, mines, prev,
+                stop_event=stop_event, progress=say)
+            if status != "live":
+                summary["stop_reason"] = {
+                    "refused": "bet_not_accepted", "pending": "bet_pending",
+                    "moved": "balance_moved", "stopped": "stopped_by_user",
+                }[status]
+                summary["messages"].append(f"round {rnd}: {detail}")
+                break
             ended, state = wait_for_round_end(
-                frame, game_page, stop_event=stop_event, progress=say)
+                frame, game_page, stop_event=stop_event, progress=say,
+                saw_live=True)
             if not ended:
                 summary["stop_reason"] = "round_did_not_resolve"
                 summary["messages"].append(

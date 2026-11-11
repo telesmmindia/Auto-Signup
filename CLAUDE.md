@@ -582,6 +582,24 @@ every other file here. Config: `.env.funcrash.mines.example`.
 `/stoprun` is cooperative: the round already staked is **not** abandoned (its
 auto-cashout still settles it), the loop just doesn't start another.
 
+**A BET click is confirmed, and re-sent when the game did not take it
+(2026-11-11).** Over one night on funcrash, 40 of 58 runs ended
+`round_did_not_resolve` with the client back at an idle, enabled BET, nothing
+live and every wallet unchanged — the click had never become a bet, and the
+"stake may still be live" warning was false. They failed in bursts across
+every account and exit IP in the same minute, while playcric's eight games on
+the same machine kept betting, so it is the operator side refusing or
+stalling bets for a while (one burst was preceded by first rounds taking
+~113s against a normal ~40s). `place_bet_confirmed()` gives a click
+`BET_ACCEPT_SECS` (30) to start a round and re-clicks after
+`BET_RETRY_WAITS` (10/20/40/60s) — only from an idle, enabled BET with the
+wallet still at the pre-bet balance; a disabled BET is never clicked on top
+of. Giving up is `bet_not_accepted` ("nothing was staked"), and the
+"may still be live" wording is now reserved for a round that really started.
+Each refusal logs the client's visible text and any notice it shows
+(`Mines bet not taken` in the log): **read the first one** — Spribe's refusal
+markup has never been seen, so the selector casts wide on purpose.
+
 **100 clean rounds have now run on funcrash (2026-10-31).** One account,
 ₹1,000 a round, mines 1: every round read the balance back at exactly
 **1000.0**, ~38s each, ~95 rounds an hour. So the premise is proven at the
