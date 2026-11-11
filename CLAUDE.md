@@ -789,6 +789,15 @@ three requests per signup.
   chat so nobody keeps retrying into it. The real fix for volume is more
   proxy IPs. `click_register_and_wait()` also stops waiting the moment a
   captcha or 403 reply lands, instead of sitting out the full 12s.
+- **Before the 403 there is a softer per-IP refusal: "Something went wrong.
+  Please try again"** (2026-11-11). On `.114`, 3 signups landed in 3
+  minutes, then 4 *different* numbers in a row got that snackbar, then the
+  firewall 403'd the IP; `.184` (same /24, no spin24star signups that week)
+  got it on its first try, so the rule may cover the subnet. It used to be
+  an ordinary failure, so the bot kept retrying the refused IP.
+  `SiteProfile.ip_refused_texts` (spin24star only) now makes it a `blocked`
+  result like the 403, so the proxy rests and the next signup uses a
+  `/proxypool` backup. Moved the same day onto the new `51.146.x` IPs.
 
 **winclash** — added 2026-08-29, and the first site here that is **not** the
 cricmatch/khelofun/starexch white-label Laravel template. Everything below was
@@ -1535,9 +1544,12 @@ earlier per-chat design.
   drift back to the main proxy once its rest ends). It does **not** retry the
   blocked signup in place — the chat reply says the number was unspent and
   can be sent again. Rests are in memory; a restart forgets them. With no
-  pool set, behaviour is exactly the old single-proxy one. spin24star runs
-  main `.114` with backups `.184 → .186 → .87 → .95` (`.95` last: every
-  other bot shares it), then the DataImpulse rotating gateway
+  pool set, behaviour is exactly the old single-proxy one. A site can also
+  name a refusal TEXT that counts as a block (`ip_refused_texts`, spin24star).
+  spin24star runs (2026-11-11) main `51.146.2.36` with backups
+  `51.146.3.8 → 51.146.1.77 → 51.146.2.102 → .164 → .186 → .87` — no
+  `.114`/`.184` (refused that day) and no `.95` — then the DataImpulse
+  rotating gateway
   (`gw.dataimpulse.com:823`, from `proxies.txt`) as the very last resort.
   Tested 2026-10-05: through it a register POST got the WAF captcha,
   CapSolver solved it and the site answered — but its exits are **Amazon

@@ -118,6 +118,15 @@ class SiteProfile:
     # failing. Empty -> never fires, which is every other site.
     otp_maybe_sent_texts: list = field(default_factory=list)
 
+    # Lower-cased substrings of a register REJECTION that mean "this site is
+    # refusing signups from this exit IP", not anything about the number. The
+    # bot treats a match like a firewall 403: it rests the proxy and the next
+    # signup goes out through a /proxypool backup. spin24star, 2026-11-11: 3
+    # signups landed on one IP, then 4 different numbers in a row got
+    # "Something went wrong. Please try again", then the firewall 403'd that
+    # IP. Empty -> never fires, which is every other site.
+    ip_refused_texts: list = field(default_factory=list)
+
     # Selector for the inline "mobile number already taken" error, or None if
     # the site surfaces it (if at all) through the generic result scrape instead
     # of a dedicated element (Khelo). Drives the distinct `phone_taken` status.

@@ -913,6 +913,14 @@ def _blocking_fill_and_register(session, phone):
             return {"ok": False, "blocked": True,
                     "message": "Register rejected: " + register_block_message(captured),
                     "shot": result_shot}
+        elif any(t in msg.lower() for msg in msgs
+                 for t in profile_for(site).ip_refused_texts):
+            # The site's wording for "not from this IP right now": rest the
+            # proxy like a firewall block rather than retrying into it.
+            return {"ok": False, "blocked": True,
+                    "message": f"{message} -- the site refuses signups from this "
+                               f"proxy for now (it allows only a few per address)",
+                    "shot": result_shot}
         elif not msgs and outcome == "timeout":
             message += " (no register API call was made -- REGISTER click had no effect)"
         return {"ok": False, "message": message,

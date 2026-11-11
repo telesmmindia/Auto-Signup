@@ -23,6 +23,8 @@ PROFILE = SiteProfile(
     phone_taken_selector=None,
     phone_taken_texts=["mobile number is already in use",
                        "mobile number has already been taken"],
+    # A per-IP signup limit, not a fault: see SiteProfile.ip_refused_texts.
+    ip_refused_texts=["something went wrong. please try again"],
     # Khelo rejections render as a top-right snackbar (a bare <p> inside this
     # container) with no toast/alert/error class -- add it to the scrape set.
     result_selectors=GENERIC_RESULT_SELECTORS + [".snackbar-container"],
