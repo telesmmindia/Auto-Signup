@@ -3007,14 +3007,24 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
 
     session.stage = "await_otp"
     if result.get("late_otp_note"):
+        # On funcrash this reply arrives once an exit IP has had a few
+        # signups (.95 on 11-07, .184 on 11-09, 51.146.3.8 on 11-11), and the
+        # OTP then mostly never comes. Keep THIS signup's OTP step open in
+        # case it does, but rest the proxy so the NEXT one leaves through a
+        # /proxypool backup instead of walking back into the same refusal.
+        nxt = _rest_blocked_proxy(session.proxy)
+        mins = int(round(PROXY_BLOCK_REST_SECS / 60))
+        switch = (f"The next signup will use the backup {_proxy_host(nxt)} automatically "
+                  f"(this proxy rests {mins} min)." if nxt else
+                  "No backup proxy is free -- add some with /proxypool.")
         logger.warning(f"#{session.row_id} {session.acct['username']}: site replied "
                        f"{result['late_otp_note']!r} -- treating it as a late OTP, "
-                       f"OTP step opened")
+                       f"OTP step opened; proxy {mask_proxy_display(session.proxy)} resting, "
+                       f"next signup uses {mask_proxy_display(nxt) if nxt else 'no backup'}")
         await update.message.reply_text(
             f"📩 [#{sub_id}] The site answered \"{result['late_otp_note']}\" for {phone}. "
             f"If an OTP still arrives in a minute or two, send the {result['digits']}-digit "
-            f"code. If none comes, the site is refusing SMS from this proxy -- /cancel and "
-            f"switch with /setproxy (number not used up)."
+            f"code. If none comes, /cancel (number not used up). {switch}"
         )
         return
     logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
