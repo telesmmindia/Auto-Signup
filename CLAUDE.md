@@ -96,6 +96,18 @@ from the VPS 2026-11-04 (read-only: exit IP + `ip-api.com` quality):
 | `51.194.232.95:46020` | .95 | same | alive, ~1s |
 | `gw.dataimpulse.com:823` | rotates | **`proxy:true hosting:true`** | alive, but flagged |
 
+**Five more added 2026-11-11**, same seller (ISP "Lumina broadband UAB",
+Mumbai, `proxy:false hosting:false`), four of them in a **new range**
+`51.146.x` so one subnet ban no longer takes the whole pool:
+`51.146.1.77:47123`, `51.146.2.102:47409`, `51.146.2.36:43913`,
+`51.146.3.8:47222`, `51.194.232.164:45244`. Each got a clean 200 in ~2s from
+cricmatch, starexch, khelstake, winclash, funcrash, playcric, khelosports and
+playinmatch before going live. They sit **first** in `proxies.residential.txt`
+(both the main and the mines checkout) and in every live `TOURNAMENT_PROXIES`
+line, with `.95` last; winclash's tournament env leaves `.95` out entirely.
+The exchange bots and the tournament watchers read the list only at startup,
+so a pool change needs a restart; Mines re-reads it on every `/run`.
+
 Each has its **own port and its own credentials** — they are five distinct
 proxies, not one with five exits. They live in `proxies.residential.txt`
 (gitignored; `proxies.residential.txt.example` documents the format) and in
