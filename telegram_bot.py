@@ -794,6 +794,22 @@ class _PhaseTimer:
         return f"{parts} = {self.last - self.t0:.1f}s total"
 
 
+# A signup never needs pictures, video or web fonts, and through a rotating
+# proxy they are most of the cost: cricmatch's homepage is ~190 images
+# (~8.6 MB), each fetched over a fresh tunnel. Measured through the
+# proxy-cheap gateway 2026-11-11: the page was ready in 19s instead of 32s and
+# carried ~0.5 MB instead of ~8.6 MB, and the cricmatch, khelofun, spin24star
+# and funcrash forms all still opened, filled and fired their register POST.
+# Before this, three bots loading at once pushed cricmatch past the 60s goto.
+_SKIP_RESOURCE_TYPES = ("image", "media", "font")
+
+
+def _skip_heavy_resources(context):
+    context.route("**/*", lambda route, req: route.abort()
+                  if req.resource_type in _SKIP_RESOURCE_TYPES
+                  else route.continue_())
+
+
 def _blocking_fill_and_register(session, phone):
     """Runs on session.slot's worker thread. Opens a fresh browser context on
     that slot's browser, fills the form, submits, and waits for the OTP screen."""
@@ -809,6 +825,7 @@ def _blocking_fill_and_register(session, phone):
     site = session.site_url or BOT_SITE_URL
     marks = _PhaseTimer()
     context = new_site_context(browser, site, proxy_conf)
+    _skip_heavy_resources(context)
     # A token solved for an earlier signup, injected before the first
     # navigation, gets this context served the real site straight away -- and
     # lets a page_url site (winclash) load its register page directly instead

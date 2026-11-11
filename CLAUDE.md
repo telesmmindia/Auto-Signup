@@ -125,6 +125,16 @@ spin24star and playcric signup bots, with the fixed IPs behind them in
 `/proxypool`. funcrash signup stays on a fixed IP: its WAF token is bound to
 one IP, so rotating would buy a CapSolver solve per signup.
 
+**The signup browser skips images, video and fonts** (`_skip_heavy_resources`
+in `telegram_bot.py`). Within half an hour of the switch, cricmatch page loads
+through the rotating gateway ran 30-58s and then every attempt hit the 60s
+`goto` timeout while three bots loaded at once: the homepage is ~190 images
+(~8.6 MB), each a fresh tunnel. Skipping them: ready in 19s instead of 32s,
+~0.5 MB instead of ~8.6 MB, and the cricmatch, khelofun, spin24star and
+funcrash forms all still opened, filled and fired their register POST
+(checked with the POST aborted in the browser). A context rebuilt after a WAF
+solve does not carry the route — rare, and harmless.
+
 Three more proxy-cheap MOBILE logins (`proxies.mobile.txt`, same handling)
 rotate per connection too but exit **worldwide** (Nigeria, Saudi, China,
 Indonesia… only ~1 in 6 Indian) — they need India set in the proxy-cheap
