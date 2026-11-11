@@ -24,10 +24,25 @@ dry run against khelofun.com filled the form end-to-end with no errors.
 OTP widget/verify selectors are still UNVERIFIED (no real phone/OTP was
 used in that check) -- re-confirm those on the first real signup.
 
-supports_http_fast (HTTP-only signup) is still left at its False default --
-out of scope for what's been requested so far, and the register network
-traffic wasn't captured for this site; don't flip it on without doing the
-same live network capture cricmatch's went through."""
+supports_http_fast is ON since 2026-11-11, and the REQUEST half is proven
+live (through the rotating mobile proxy, no account created): GET / answers
+200 with the csrf-token meta tag and the usual laravel_session/XSRF-TOKEN/
+AWSALB cookies, and a POST /register carrying cricmatch's default field
+names reaches the application and is answered by Laravel's own validator --
+{"status":201,"message":{"email":"The email must be a valid email address.",
+"password":"The password must be at least 5 characters."}} for a
+deliberately invalid identity. So the path, the field names and the csrf
+handling are right.
+
+⚠️ The two SUCCESS statuses below are NOT yet seen live -- they need a real
+phone and a real SMS, exactly as winclash's and funcrash's did. They are
+set explicitly rather than left empty because khelofun's refusals carry NO
+message_class (see the body above), and the cricmatch convention of judging
+by message_class would therefore read every refusal as a SUCCESS -- the
+same fault playcric365 was given explicit statuses to avoid. Do one real
+/newacc and check accounts.db before running volume; if a status is wrong
+the raw reply still reaches result["messages"], so it will say so rather
+than fail silently."""
 from .base import SiteProfile
 from .cricmatch import GENERIC_RESULT_SELECTORS
 
@@ -53,6 +68,16 @@ PROFILE = SiteProfile(
     supports_http_login=True,
     http_login_path="/login",
     http_balance_path="/api2/v2/getBalance",
+    # HTTP-only signup -- see the module docstring for what is proven live
+    # (the csrf GET and the register POST's request half) and what is not
+    # (these two statuses). The field names, /register path and csrf source
+    # are all cricmatch's defaults, which is what the probe confirmed.
+    supports_http_fast=True,
+    # MUST stay non-empty: khelofun's refusals carry no message_class, so an
+    # empty list falls back to the message_class check and reads every
+    # refusal as a success. 201 is a refusal here, so never list it.
+    http_status_otp_sent=[205],
+    http_status_registered=[200],
     # Same caveat as supports_http_login above -- inferred from the shared
     # template, not yet round-tripped against a real khelofun account.
     supports_change_password=True,
