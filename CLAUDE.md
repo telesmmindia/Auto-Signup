@@ -120,15 +120,52 @@ reused one. **They pass the full browser signup path** — form open, fill,
 REGISTER fires the POST — on cricmatch, khelofun and spin24star (POST
 aborted in the browser, no SMS), and serve all five signup sites without a
 WAF challenge. They live in `proxies.airtel.txt` (VPS only, mode 600,
-excluded from git) and are the MAIN proxy of the cricmatch, khelofun and
-playcric signup bots, with the fixed IPs behind them in `/proxypool`.
-**Not for the AWS-WAF sites:** funcrash and spin24star stay on fixed IPs. The
-WAF token is bound to one IP and a per-connection gateway sends the page and
-the register POST from different IPs: on spin24star 4 of 5 rotating signups
-hit the register captcha (submit 42-80s instead of ~2s), paid a CapSolver
-solve, and mostly still ended "Something went wrong" — 1 success in 5. Same
-evening it went back to the fixed IPs, where `ip_refused_texts` walks the
-pool ~3 signups per IP; the Airtel logins sit at the END of its pool.
+excluded from git).
+**Not for the AWS-WAF sites in a BROWSER:** the WAF token is bound to one IP
+and a per-connection gateway sends the page and the register POST from
+different IPs: on spin24star 4 of 5 rotating browser signups hit the register
+captcha (submit 42-80s instead of ~2s), paid a CapSolver solve, and mostly
+still ended "Something went wrong" — 1 success in 5. Same evening it went
+back to the fixed IPs, where `ip_refused_texts` walks the pool ~3 signups per
+IP.
+
+**Superseded the same evening: a DataImpulse MOBILE login now runs all four
+signup bots, funcrash included (2026-11-11 23:48).** User-supplied login
+`45c1c913…__cr.in` on `gw.dataimpulse.com:823` — Reliance Jio / Bharti Airtel
+exits, `mobile:true proxy:false hosting:false`, the best IP quality in the
+inventory and a **new IP on every connection**. It is the MAIN proxy of the
+cricmatch, khelofun, playcric365 **and funcrash** signup bots, each one's
+previous main pushed to the front of its `/proxypool` as the fallback.
+⚠️ Keep the `__cr.in` suffix — without it the exits are Vietnam/Brazil/Europe.
+
+**The rotating-proxy rule for a WAF site is "not in a BROWSER", not "never" —
+`--fast` clears it.** funcrash on this rotating mobile proxy with
+`fast=True` registered on the first attempt: OTP screen at 23:50:29, SUCCESS
+at 23:50:52, `accounts.db` #5767. Three HTTP requests instead of a browser
+pulling hundreds of resources, so the per-connection IP change never gets the
+chance to invalidate a page-load token — the same reasoning that fixed
+playcric on 2026-11-10, now shown to hold on a WAF site too. So the real
+constraint was always the BROWSER path, and any site with
+`supports_http_fast` can take a rotating proxy.
+**spin24star cannot do this yet** — it has no `supports_http_fast`, so it
+stays on fixed IPs until its register/OTP calls are mapped the way
+funcrash's and winclash's were.
+
+**Sticky rotation does not exist on any account here — don't go hunting for
+it again (all measured 2026-11-11).** DataImpulse MOBILE ignores every sticky
+form (`__sid.<id>` ×3, `__cr.in__sid`, `__cr.in__sesstime.10__sid`,
+`__cr.in__session.<id>`, sticky ports 10000-10002): every connection got a
+new IP, which is simply how mobile works — the carrier moves it, and the
+dashboard's sticky toggle cannot bite. DataImpulse RESIDENTIAL (`proxies.txt`)
+sticky ports DO hold an IP per port, but **silently drop the `__cr.in`
+country targeting** (ports exited Australia / Philippines / UK, 2 of 3
+`proxy:true hosting:true`), so they are useless for Indian sites.
+**proxy-cheap takes its parameters in the PASSWORD, not the username** —
+`<pass>_country-IN` and `<pass>_country-India` both work and both exit India,
+while the bare password exits worldwide; its sticky parameters
+(`_session-`, `_sessionid-`, `_sessionduration-`, `_sticky`) are all rejected,
+as are 11 username forms and 8 alternative ports. Note proxy-cheap drops
+~1 connection in 10, so **never call a syntax dead on one sample** — retest 3×.
 
 **The signup browser skips images, video and fonts** (`_skip_heavy_resources`
 in `telegram_bot.py`). Within half an hour of the switch, cricmatch page loads
