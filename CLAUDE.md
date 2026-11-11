@@ -108,6 +108,32 @@ line, with `.95` last; winclash's tournament env leaves `.95` out entirely.
 The exchange bots and the tournament watchers read the list only at startup,
 so a pool change needs a restart; Mines re-reads it on every `/run`.
 
+**Rotating INDIAN proxies now run the signup bots (2026-11-11).** The fixed
+IPs are not enough for signups: on the new IPs cricmatch took **2** and
+khelofun **4** signups in ~3 minutes before each IP was cut off, and the
+cut-off is silent there ("REGISTER click had no effect" — the POST is sent,
+the page renders nothing), while spin24star allowed 3. Two proxy-cheap
+`thehub.proxy-cheap.com:8080` logins, found switched OFF in the bit.ly bot's
+`config.py`, exit on Indian Airtel/Jio/BSNL (`proxy:false hosting:false`),
+~1s per connection, a new IP on most new connections and the same IP for a
+reused one. **They pass the full browser signup path** — form open, fill,
+REGISTER fires the POST — on cricmatch, khelofun and spin24star (POST
+aborted in the browser, no SMS), and serve all five signup sites without a
+WAF challenge. They live in `proxies.airtel.txt` (VPS only, mode 600,
+excluded from git) and are the MAIN proxy of the cricmatch, khelofun,
+spin24star and playcric signup bots, with the fixed IPs behind them in
+`/proxypool`. funcrash signup stays on a fixed IP: its WAF token is bound to
+one IP, so rotating would buy a CapSolver solve per signup.
+
+Three more proxy-cheap MOBILE logins (`proxies.mobile.txt`, same handling)
+rotate per connection too but exit **worldwide** (Nigeria, Saudi, China,
+Indonesia… only ~1 in 6 Indian) — they need India set in the proxy-cheap
+dashboard. Through them a browser page fails (cricmatch tunnel error,
+khelofun's signup modal never opened), so they suit only the no-browser
+paths; 2 of 4 `--fast` playcric attempts got through. One of the three is
+also `~/insta-auto`'s proxy. Both DataImpulse mobile logins answer `407
+TRAFFIC_EXHAUSTED` — including the one the bit.ly bot is running on.
+
 Each has its **own port and its own credentials** — they are five distinct
 proxies, not one with five exits. They live in `proxies.residential.txt`
 (gitignored; `proxies.residential.txt.example` documents the format) and in
