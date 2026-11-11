@@ -26,6 +26,7 @@ Everything below came out of the client's own saved markup, captured live on
       its confirm        app-bet-spinner button.btn-done
       quick stakes       button.dropdown-toggle.all -> .fast-bets-menu .dropdown-item
     the BET button       button.btn-control.btn-bet
+    the CASH OUT button  button.btn-control.btn-cashout   (REPLACES BET while live)
     the idle countdown   .auto-cashout-countdown     (display:none until a bet is live)
     the next multiplier  .next-tile                  ("Next: 1.10x")
     the lock overlay     .lock-ui                    (d-none while interactive)
@@ -39,26 +40,24 @@ context must be opened at a real desktop viewport -- a default headless window
 is wide enough, but anything that shrinks it silently replaces the whole UI
 with an apology.
 
-⚠️ WHAT IS AND IS NOT CONFIRMED LIVE
-------------------------------------
-Confirmed, by running probe_mines.py against a real funded account: the login,
-the WAF path, the launch URL, the host it lands on, the frame it lives in, and
-every selector in the table above (they were read out of the saved DOM, not
-guessed).
+WHAT A ROUND LOOKS LIKE -- watched live on funcrash 2026-11-11, ₹10 stake,
+sampled twice a second through this module's own open_mines_table():
 
-NOT confirmed: what the client looks like DURING a live round -- the BET
-button's text and classes once staked, whether .lock-ui goes up, and above all
-whether the idle countdown really ends the round at 1.00x and returns the
-stake. That needs one real bet, which costs money, so it is deliberately left
-to the operator:
+    0.6s     BET disabled; the outer wallet is already down by the stake
+    2s-33s   button.btn-bet is GONE, replaced by button.btn-cashout
+             "CASH OUT 0.00 INR" (disabled -- nothing revealed, nothing to take)
+    23s-33s  .auto-cashout-countdown shows "Auto cashout in: 10" ... "0"
+    33s      the wallet is back to the full pre-bet balance
+    36s      button.btn-bet "BET" is back and enabled
+    .lock-ui stayed d-none throughout
 
-    .venv/bin/python probe_mines.py <user> <pass> --url https://funcrash.com/ \
-        --game-id 3139 --provider spribe --mines 1 --watch-round
-
-Run that ONCE at the client's default stake before trusting this with a real
-one. round_is_over() below is therefore written to accept SEVERAL independent
-signals rather than one, so a wrong guess about any single one degrades into
-"wait for the wallet to come back" instead of into a stuck round.
+So the CASH OUT button is the live signal from 2s to the end, and the
+countdown only covers the last ~10s of it. Judging a round by the BET button's
+TEXT or by the countdown alone misses the first ~20s, which on a loaded box is
+long enough to call a live bet "not taken" -- exactly what happened to every
+funcrash run for three hours after BET_ACCEPT_SECS went in. And a round is
+over when the client offers BET again, whatever the countdown element says:
+it can stay rendered after the round has settled.
 """
 import logging
 import re
@@ -75,13 +74,9 @@ TILE = "Mines"
 # inside this. The ceiling exists so a round that somehow never resolves gives
 # up and reports it rather than hanging a worker thread forever.
 ROUND_TIMEOUT_SECS = 120.0
-# How long a BET click gets to visibly start a round before it counts as not
-# taken. Found 2026-11-11 on funcrash: of 58 runs over one night, 40 ended
-# with the client back at an idle, enabled BET, nothing live and the wallet
-# unchanged -- i.e. the click never became a bet -- and they failed in bursts
-# across every account and exit IP at once while playcric's games on the same
-# machine kept betting. So it is the operator side refusing or stalling bets
-# for a while, and the answer is to re-click after a pause, not to end the run.
+# How long a BET click gets to show CASH OUT before it counts as not taken. A
+# taken bet shows it in ~2s, so this is generous on purpose: a re-click is only
+# ever sent once BET is offered again, never on top of a round in flight.
 BET_ACCEPT_SECS = 30.0
 # Pauses before each re-click of a bet the game did not take. Their sum
 # (~2.5 min) is how long an operator-side hiccup is ridden out before giving up.
@@ -171,15 +166,25 @@ def read_mines_count(frame):
     return int(hit.group(1)) if hit else None
 
 
+# "Shown" means laid out (getClientRects is empty when the element OR any
+# ancestor is display:none) and not visibility:hidden -- a bare check of the
+# element's own display misses a hidden parent.
 _STATE_JS = """() => {
+  const shown = (e) => !!e && e.getClientRects().length > 0
+      && getComputedStyle(e).visibility !== "hidden";
+  const txt = (e) => (e.innerText || "").trim().replace(/\\s+/g, " ");
   const bet = document.querySelector("button.btn-control.btn-bet");
+  const out = [...document.querySelectorAll(".btn-control")].find(b =>
+      shown(b) && (b.classList.contains("btn-cashout") || /cash\\s*out/i.test(txt(b))));
   const cd  = document.querySelector(".auto-cashout-countdown");
   const lock = document.querySelector(".lock-ui");
   const bar = document.querySelector(".progress-bar");
   return {
-    bet_text: bet ? (bet.innerText || "").trim().replace(/\\s+/g, " ") : null,
+    client: !!document.querySelector("app-bet-spinner"),
+    bet_text: bet ? txt(bet) : null,
     bet_disabled: bet ? !!bet.disabled : null,
-    countdown_up: !!(cd && getComputedStyle(cd).display !== "none"),
+    cashout: out ? txt(out) : null,
+    countdown_up: shown(cd) && getComputedStyle(cd).display !== "none",
     locked: lock ? !lock.classList.contains("d-none") : false,
     progress: bar ? bar.style.width : null,
   };
@@ -193,26 +198,29 @@ def read_state(frame):
         return {}
 
 
+def _bet_offered(st):
+    """The client is showing an enabled BET -- i.e. it will take a new bet."""
+    return ((st.get("bet_text") or "").strip().lower() == "bet"
+            and st.get("bet_disabled") is False)
+
+
 def round_is_over(frame, state=None):
     """True when the client is back to accepting a NEW bet.
 
     Judged on the button rather than on the wallet, because the wallet is in
-    the other document and lags. Deliberately tolerant: the live round's exact
-    rendering has not been observed (see the module docstring), so this asks
-    the one question whose answer cannot be ambiguous -- is the control
-    offering a bet again? -- rather than pattern-matching a CASH OUT label
-    whose wording is a guess.
+    the other document and lags. The CASH OUT button replaces BET for the
+    whole of a live round (watched live, see the module docstring), so an
+    enabled BET with no CASH OUT showing is the client saying the round is
+    settled. The countdown is deliberately NOT consulted: it only ever shows
+    alongside CASH OUT, and an element left rendered after the round would
+    otherwise hold a settled round open until the 120s timeout -- which is
+    how most of funcrash's overnight round_did_not_resolve stops read (BET
+    back and enabled, wallet whole, countdown "up").
     """
     st = state if state is not None else read_state(frame)
     if not st:
         return False
-    if st.get("locked") or st.get("countdown_up"):
-        return False
-    txt = (st.get("bet_text") or "").strip().lower()
-    if not txt:
-        return False
-    # "BET" means idle; a staked round shows the cash-out label instead.
-    return txt == "bet" and not st.get("bet_disabled")
+    return _bet_offered(st) and not st.get("cashout") and not st.get("locked")
 
 
 # --- writing (controls only -- NOTHING here touches the grid) --------------
@@ -285,10 +293,16 @@ def place_bet(frame):
 
 
 def _went_live(st):
-    """The client is showing a round in progress (or at least not an idle BET).
-    The same test wait_for_round_end has always used to decide a round began."""
-    return bool(st.get("countdown_up") or st.get("locked") or (
-        (st.get("bet_text") or "").strip().lower() not in ("", "bet")))
+    """The client is showing a round in progress. CASH OUT is the signal that
+    covers the whole round; the countdown and lock count only while BET is NOT
+    offered, so a countdown element left rendered next to an enabled BET
+    cannot pass for a new round."""
+    if st.get("cashout") or (st.get("locked") and not _bet_offered(st)):
+        return True
+    if st.get("countdown_up") and not _bet_offered(st):
+        return True
+    txt = (st.get("bet_text") or "").strip().lower()
+    return bool(txt) and txt != "bet"
 
 
 # Whatever the client is showing as a message. Spribe's refusal markup has
@@ -335,7 +349,7 @@ def place_bet_confirmed(frame, game_page, amount, mines, prev_balance,
     Returns (status, detail):
       "live"    -- a round is in progress; wait_for_round_end(saw_live=True).
       "refused" -- every try came back to an idle BET; NOTHING was staked.
-      "pending" -- the button stayed disabled with no round showing; unknown.
+      "pending" -- no round showed and BET never came back; unknown.
       "moved"   -- the wallet moved while the client sat idle; not re-clicked.
       "stopped" -- /stoprun during a pause between tries; nothing staked.
 
@@ -359,14 +373,15 @@ def place_bet_confirmed(frame, game_page, amount, mines, prev_balance,
             st = read_state(frame)
             if _went_live(st):
                 return "live", st
-            # A disabled BET may be the client waiting on the server: never
-            # click on top of it, just keep watching until the hard stop.
-            if time.time() >= deadline and not st.get("bet_disabled"):
+            # Only an enabled BET counts as "not taken". A disabled one may be
+            # the client waiting on the server, and an unreadable frame says
+            # nothing -- never click on top of either, keep watching instead.
+            if time.time() >= deadline and _bet_offered(st):
                 break
             game_page.wait_for_timeout(500)
         else:
-            return "pending", (f"BET stayed disabled for {ROUND_TIMEOUT_SECS:.0f}s "
-                               f"with no round showing ({st})")
+            return "pending", (f"no round showed and BET was not offered again "
+                               f"within {ROUND_TIMEOUT_SECS:.0f}s ({st})")
 
         notices = list(dict.fromkeys(read_notices(frame) + read_notices(game_page)))
         log.warning(f"Mines bet not taken (try {attempt}/{tries}): state={st} "
@@ -412,10 +427,12 @@ def wait_for_round_end(frame, game_page, timeout_secs=ROUND_TIMEOUT_SECS,
             progress("stop requested -- still waiting out the live round")
             told_stop = True
         st = read_state(frame)
+        # Over is checked FIRST: once a round has been seen, BET offered
+        # again ends it, whatever else is still rendered.
+        if saw_live and round_is_over(frame, st):
+            return True, st
         if _went_live(st):
             saw_live = True
-        elif saw_live and round_is_over(frame, st):
-            return True, st
         game_page.wait_for_timeout(500)
     return False, read_state(frame)
 

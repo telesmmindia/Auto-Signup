@@ -540,6 +540,7 @@ screenshot:**
 | its numpad | `app-bet-spinner app-numpad button` + `button.btn-done` |
 | quick stakes | `button.dropdown-toggle.all` → 100/200/500/1,000 |
 | BET | `button.btn-control.btn-bet` |
+| CASH OUT | `button.btn-control.btn-cashout` — **replaces** BET for the whole live round |
 | idle countdown | `.auto-cashout-countdown` (`display:none` until a bet is live) |
 | lock overlay | `.lock-ui` (`d-none` while interactive) |
 
@@ -563,22 +564,19 @@ wallet read ₹1,000 from the outer document, and `set_stake()` drove the
 numpad to 25 → 1,000 → 10 with every value confirmed by read-back. No bet was
 placed.
 
-⚠️ **What is NOT confirmed live.** The login, the WAF path, the launch URL,
-the host, the frame and every selector above are all confirmed against a real
-funded account. What has **never been watched** is a round in flight: the BET
-button's text once staked, whether `.lock-ui` goes up, and above all whether
-the idle countdown really returns the stake. That needs one real bet. Run it
-once, at the client's **default ₹10 stake** — the most the check can cost if
-the auto-cashout misbehaves:
+⚠️ **Written before any round had been watched** (superseded 2026-11-11 —
+see "A live round has now been WATCHED" below). The login, the WAF path, the
+launch URL, the host, the frame and every selector above were confirmed
+against a real funded account; a round in flight was not, so this was the
+check to run first, at the client's **default ₹10 stake**:
 
 ```
 .venv/bin/python probe_mines.py <user> <pass> --url https://funcrash.com/ \
     --game-id 3139 --provider spribe --mines 1 --watch-round
 ```
 
-`round_is_over()` is therefore written to accept several independent signals
-rather than pattern-matching one guessed CASH OUT label, so a wrong guess
-about any single one degrades into "wait" instead of into a stuck round. And
+`round_is_over()` now judges by the button the round was watched to use (BET
+offered again, no CASH OUT), not by the countdown. And
 `run_mines_wager()` **stops the moment a balance moves** (>1 paisa): that
 would mean a round did not auto-cash at 1.00x, and repeating it would compound
 a real loss.
@@ -594,23 +592,35 @@ every other file here. Config: `.env.funcrash.mines.example`.
 `/stoprun` is cooperative: the round already staked is **not** abandoned (its
 auto-cashout still settles it), the loop just doesn't start another.
 
-**A BET click is confirmed, and re-sent when the game did not take it
-(2026-11-11).** Over one night on funcrash, 40 of 58 runs ended
-`round_did_not_resolve` with the client back at an idle, enabled BET, nothing
-live and every wallet unchanged — the click had never become a bet, and the
-"stake may still be live" warning was false. They failed in bursts across
-every account and exit IP in the same minute, while playcric's eight games on
-the same machine kept betting, so it is the operator side refusing or
-stalling bets for a while (one burst was preceded by first rounds taking
-~113s against a normal ~40s). `place_bet_confirmed()` gives a click
-`BET_ACCEPT_SECS` (30) to start a round and re-clicks after
-`BET_RETRY_WAITS` (10/20/40/60s) — only from an idle, enabled BET with the
-wallet still at the pre-bet balance; a disabled BET is never clicked on top
-of. Giving up is `bet_not_accepted` ("nothing was staked"), and the
-"may still be live" wording is now reserved for a round that really started.
-Each refusal logs the client's visible text and any notice it shows
-(`Mines bet not taken` in the log): **read the first one** — Spribe's refusal
-markup has never been seen, so the selector casts wide on purpose.
+**A live round has now been WATCHED (2026-11-11, funcrash, ₹10), and the
+CASH OUT button is the signal.** Sampled twice a second through
+`open_mines_table()`: at 0.6s BET goes disabled and the wallet drops by the
+stake; from **2s to 33s `button.btn-bet` is gone, replaced by
+`button.btn-cashout` "CASH OUT 0.00 INR"**; the "Auto cashout in: 10…0"
+countdown shows only for the **last ~10s** (23s→33s); at 33s the wallet is
+whole again; at 36s BET is back. `.lock-ui` never went up. So:
+- **Live = CASH OUT showing.** The first `place_bet_confirmed()` (same day)
+  judged "live" by BET's text or the countdown only, gave a click
+  `BET_ACCEPT_SECS` (30) and saw neither — the BET element was simply absent
+  — so on the loaded VPS, where the countdown sometimes came after 30s, it
+  called every live bet "not taken" and stopped with `balance_moved`
+  ("balance went X -> X-stake while the client showed no round"). Every
+  funcrash run between 11:07 and 15:06 died on that; the stakes all came back.
+- **Over = BET offered again**, whatever the countdown says.
+  `round_is_over()` no longer consults the countdown, and the overnight
+  `round_did_not_resolve` stops (40 of 58 runs) were very likely THAT, not
+  refused bets as first concluded: their recorded state was an enabled BET
+  **with the countdown still "up"** — and the countdown only ever shows
+  after a bet went live — with every wallet whole. The old check required
+  the countdown gone, so a settled round waited out the 120s timeout. The
+  countdown's visibility is now also read through `getClientRects()`, which
+  sees a hidden parent.
+- A re-click (`BET_RETRY_WAITS` 10/20/40/60s, then `bet_not_accepted`) is
+  sent **only** when BET is offered again with no CASH OUT and the wallet
+  still whole; a disabled BET or an unreadable frame is never clicked on top
+  of (it ends `bet_pending` after 120s instead).
+Verified live after the fix: 3/3 rounds at ₹10 through `run_mines_wager()`
+on a new IP (51.146.2.102), ~37s each, balance 6060.4 throughout.
 
 **100 clean rounds have now run on funcrash (2026-10-31).** One account,
 ₹1,000 a round, mines 1: every round read the balance back at exactly
