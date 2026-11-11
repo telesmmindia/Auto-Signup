@@ -939,7 +939,10 @@ def _blocking_fill_and_register(session, phone):
                                f"proxy for now (it allows only a few per address)",
                     "shot": result_shot}
         elif not msgs and outcome == "timeout":
-            message += " (no register API call was made -- REGISTER click had no effect)"
+            if captured.get("reply"):
+                message += f" -- the page showed nothing; the site replied {captured['reply']}"
+            else:
+                message += " (no register API call was made -- REGISTER click had no effect)"
         return {"ok": False, "message": message,
                 "shot": result_shot}
 

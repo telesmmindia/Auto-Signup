@@ -342,9 +342,18 @@ purely by URL (`--url` / `/seturl` / `BOT_SITE_URL`).
   playcric365 keeps boxes 2-6 `disabled` until the box before fires `input`.
 - `fill_register_form()` is shared by the initial fill and the WAF-retry refill
   so they can't drift.
-- If a rejection leaves no visible message, the bot appends the POST responses
-  fired by the click (status/URL/first 150 chars) to the notes — that's the
-  diagnostic for "the register API was blocked/hung," which no screenshot shows.
+- If a rejection leaves no visible message, the bot appends **the site's own
+  register reply** (`captured["reply"]`: HTTP status + first 200 chars, from
+  `click_register_and_wait()`) to the notes: "the page showed nothing; the
+  site replied …". ⚠️ This line used to claim that already happened; it did
+  not until 2026-11-11, and "REGISTER click had no effect" was a guess printed
+  whenever 12s passed with nothing on screen. On cricmatch it hid everything:
+  the page shows nothing even for an ordinary validation refusal
+  (`{"status":201,"message":{"username":"The username has already been
+  taken."}}` left the screen unchanged in a live check), as well as for the
+  per-IP cut-off. The guess is still printed when no register reply arrived at
+  all — which also really happens: an invalid email is refused by the page's
+  own JS with no request and no visible message.
 
 ### Adding a site
 

@@ -1144,6 +1144,9 @@ def click_register_and_wait(page):
     where captured has {"response","action","body"} for the register call
     (empty on sites like cricmatch that don't route through /sign-up + WAF)."""
     captured = {}
+    prof = profile_for(page.url)
+    site_host = urlsplit(page.url).netloc
+    register_paths = {prof.http_register_path.rstrip("/"), "/register", "/sign-up"}
 
     def on_resp(resp):
         try:
@@ -1163,6 +1166,18 @@ def click_register_and_wait(page):
                 captured["action"] = action
                 captured["body"] = body
                 captured["response"] = resp
+            # The site's own register reply, whatever it says. A reply the
+            # page cannot render (cricmatch/khelofun/playcric answer a refusal
+            # with a STRING where their handler expects a {field: reason}
+            # object) leaves the screen unchanged, and without this the only
+            # report was a guess: "REGISTER click had no effect".
+            parts = urlsplit(url)
+            if parts.netloc == site_host and parts.path.rstrip("/") in register_paths:
+                try:
+                    text = " ".join(resp.text().split())
+                except Exception:
+                    text = ""
+                captured["reply"] = f"HTTP {resp.status}: {text[:200]}"
         except Exception:
             pass
 
