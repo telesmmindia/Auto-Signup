@@ -2860,9 +2860,13 @@ def http_register_call(session, csrf_token, acct, site_url, otp=""):
         names["email"]: acct["email"],
         names["password"]: acct["password"],
         names["phone"]: str(acct["phone"]),
-        names["otp"]: otp,
         names["token"]: csrf_token,
     }
+    # In the "verify_endpoint" flow the code never travels on this call -- the
+    # site's own registrationSection() sends no otp field at all, and this
+    # endpoint is only ever asked to send the SMS -- so don't invent one.
+    if prof.http_otp_flow != "verify_endpoint":
+        data[names["otp"]] = otp
     if prof.http_confirm_password_field:
         data[prof.http_confirm_password_field] = acct["password"]
     headers = {
@@ -2914,6 +2918,43 @@ def http_confirm_signup_otp(session, csrf_token, otp, phone, site_url):
     }
     resp = session.post(url, data={"otp": otp, "phone": phone},
                         headers=headers, timeout=20)
+    return _http_json_or_error(resp)
+
+
+def http_verify_otp_endpoint(session, csrf_token, otp, site_url):
+    """spin24star's OTP step: the code goes to the site's own verify endpoint
+    and THAT call completes the registration. There is no second register POST,
+    unlike cricmatch's single_post or winclash's confirm-then-register.
+
+    Read out of the page's own otpVerify() (2026-11-12): it POSTs
+    {_token, otp_input, path:'rg'} to /verifyOtpSignup and, on statusCode 201,
+    redirects to / -- i.e. the account exists at that point. 301 means the code
+    was wrong (it clears the boxes and disables Verify).
+
+    Note the call carries NO phone number: the server pairs the code with the
+    SESSION. So it must run on the same requests.Session as the register POST,
+    which it does -- http_signup_once() builds one session per signup. That
+    also means a per-connection ROTATING proxy sends these two calls from
+    different exit IPs; it works because a Laravel session is not IP-bound, the
+    same property playcric365's fast path already relies on.
+
+    Returns the parsed JSON."""
+    prof = profile_for(site_url)
+    parts = urlsplit(site_url)
+    path = prof.otp_verify_endpoint or "/verifyOtpSignup"
+    url = f"{parts.scheme}://{parts.netloc}{path}"
+    data = {
+        prof.http_register_fields["token"]: csrf_token,
+        prof.http_otp_verify_field: otp,
+    }
+    data.update(prof.http_otp_verify_extra)
+    headers = {
+        "X-Requested-With": "XMLHttpRequest",
+        "X-CSRF-TOKEN": csrf_token,
+        "Referer": http_csrf_url(site_url),
+        "Origin": _http_fast_origin(site_url),
+    }
+    resp = session.post(url, data=data, headers=headers, timeout=20)
     return _http_json_or_error(resp)
 
 
@@ -3076,6 +3117,24 @@ def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
     .signup_verify_number and reads it straight back out), so any
     normalisation the server applied is preserved."""
     prof = profile_for(site_url)
+
+    if prof.http_otp_flow == "verify_endpoint":
+        verified = http_verify_otp_endpoint(session, csrf, otp, site_url)
+        ok = _http_status_of(verified) in [str(c) for c in prof.otp_verify_ok_codes]
+        # This endpoint answers in its OWN vocabulary -- spin24star's
+        # statusCode 201 means REGISTERED -- and that collides head-on with the
+        # register endpoint's 201, which means REFUSED. Listing 201 in
+        # http_status_registered to accept it here would therefore make every
+        # refused register read as a success. So the verdict is taken right
+        # here against otp_verify_ok_codes (the same tuple the browser path
+        # judges this very call by) and handed back in the REGISTER endpoint's
+        # vocabulary, so the caller keeps its single http_is_error().
+        registered = prof.http_status_registered[0] if prof.http_status_registered else 200
+        return {"status": registered if ok else "",
+                "message": http_message_of(verified) or
+                           ("OTP verified -- account registered." if ok else
+                            "The site refused the OTP code.")}
+
     if prof.http_otp_flow != "confirm_otp":
         return http_register_call(session, csrf, acct, site_url, otp=otp)
 

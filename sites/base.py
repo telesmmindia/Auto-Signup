@@ -353,8 +353,22 @@ class SiteProfile:
     #                    repeated with the code. Read out of the site's own
     #                    #confirmSignupOtpBtn_ handler, which literally
     #                    re-clicks #signUpButton on statusCode 251.
+    #   "verify_endpoint" -- spin24star: the code goes to the site's own
+    #                    otp_verify_endpoint (the SAME one the browser path
+    #                    already judges by) and THAT call completes the
+    #                    registration -- there is no second register POST at
+    #                    all. Read out of the page's own otpVerify(), which
+    #                    redirects to / on statusCode 201.
     http_otp_flow: str = "single_post"
     http_confirm_otp_path: str = "/api2/v2/confirmSignupOtp"
+
+    # "verify_endpoint" only: the wire name of the field carrying the code, and
+    # any extra CONSTANT fields the site's own call sends alongside it.
+    # spin24star sends path:'rg' -- one endpoint serves the registration, login
+    # and forgot-password OTP flows, and that field is what picks the right
+    # one, so omitting it would redeem the code against the wrong flow.
+    http_otp_verify_field: str = "otp_input"
+    http_otp_verify_extra: dict = field(default_factory=dict)
 
     # Path to GET for the csrf token and the session cookies. Empty -> the
     # site root, which is where cricmatch's register form lives. winclash's

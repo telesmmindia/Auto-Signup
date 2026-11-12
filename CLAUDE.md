@@ -886,6 +886,62 @@ three requests per signup.
   result like the 403, so the proxy rests and the next signup uses a
   `/proxypool` backup. Moved the same day onto the new `51.146.x` IPs.
 
+- **Fast mode is ON here since 2026-11-12, and it is what ended the per-IP
+  wall.** Resting a refused IP only works while there is a clean one left:
+  on 2026-11-12 the bot walked its whole backup pool one IP per attempt,
+  refusing every number. The rotating mobile gateway is the fix, and the
+  reason this profile had `supports_http_fast=False` — "its register POST is
+  gated by an AWS WAF CAPTCHA that only a real browser can solve" — is about
+  the BROWSER path only: the WAF token is minted on the page load and bound
+  to that exit IP, so a per-connection rotating proxy invalidates it before
+  REGISTER is clicked. Over plain HTTP there is no page load and no token to
+  invalidate. Same correction funcrash got the day before, and it
+  **supersedes** the "funcrash and spin24star stay on fixed IPs" rule in §1.
+  Verified live 2026-11-12 through the rotating mobile proxy with no account
+  created: `GET /?btag=` → 200, csrf meta tag, `btag` cookie set, and
+  `POST /sign-up` answered by the app's own validator
+  (`{"status":201,"message":"Password cannot be same as email"}`) with **no
+  `x-amzn-waf-action` header and no Cloudflare challenge**.
+- **The call sequence is a THIRD shape** (`http_otp_flow="verify_endpoint"`),
+  read out of the page's own `registrationSection()`/`otpVerify()`:
+  `POST /sign-up` with `_token, user_name, email, password, mobile_number`
+  (winclash's field names, not cricmatch's, despite the Laravel template)
+  sends the SMS, then `POST /verifyOtpSignup` with
+  `_token, otp_input, path:"rg"` **completes the registration on its own** —
+  there is no second register POST. `path:"rg"` picks the registration flow
+  on an endpoint shared with login and forgot-password. The register call
+  carries no `otp` field at all, so `http_register_call()` omits it for this
+  flow rather than inventing one.
+- ⚠️ **201 means opposite things on the two endpoints**, which is the trap
+  this flow had to be written around: `/sign-up` answers `201` for a
+  REFUSAL, while `/verifyOtpSignup` answers `201` for REGISTERED. Listing
+  201 in `http_status_registered` would therefore read every refused
+  register as a success. So `http_verify_signup_otp()` judges the verify
+  reply against `otp_verify_ok_codes` (the same tuple the browser path uses)
+  and hands the verdict back in the register endpoint's vocabulary, leaving
+  the caller one `http_is_error()`. `http_status_otp_sent=[205]` /
+  `http_status_registered=[200]` must stay non-empty for the usual reason —
+  spin24star's refusals carry no `message_class`.
+- Note the refusals come in **two shapes** on the same endpoint: a validation
+  error is `{"status":201,"message":…}`, while the per-IP refusal is
+  `{"statusCode":"301","msg":"Something went wrong. Please try again",
+  "message_class":"danger"}` (read out of a live 2026-11-12 bot log). Both
+  are correctly failures under the explicit statuses.
+- ⚠️ `/verifyOtpSignup` sends **no phone number** — the server pairs the code
+  with the SESSION, so both calls must share one `requests.Session` (they
+  do). Through the rotating gateway they leave from different exit IPs,
+  which works because a Laravel session is not IP-bound — the same property
+  playcric365's fast path already relies on. If correct codes ever start
+  failing, that is the first thing to re-check.
+- ⚠️ **The OTP half is not yet proven live.** The register half is (the probe
+  above reached the app's validator through the engine's own code). Steps
+  that need a real SMS — the `205`, and the `/verifyOtpSignup` round trip —
+  are coded from the site's own JavaScript, which is the same basis the
+  verified browser flow was written on. **Do one `/newacc` on a real number
+  and check `accounts.db` before running volume**; if a status is wrong the
+  raw reply still reaches `result["messages"]`, so it will say so rather
+  than fail silently.
+
 **winclash** — added 2026-08-29, and the first site here that is **not** the
 cricmatch/khelofun/starexch white-label Laravel template. Everything below was
 read live out of the page's own inline JavaScript; no account was created
