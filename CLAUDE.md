@@ -1732,12 +1732,28 @@ earlier per-chat design.
   ⚠️ A **rotating gateway cannot satisfy either feature**: there is no "this
   IP" to ration, and the row would name the gateway rather than the address
   the site actually saw. Rationing and recording only work on fixed IPs,
-  which is why the five signup bots were moved back onto the ten residential
-  proxies on 2026-11-13 (main + 9 in `proxy_pool`, `proxy_hourly_cap` 6, so
-  up to 60 attempts an hour per site). The hourly figure is a **starting
-  point, not a measurement** — the only measured limits here are per ~3
-  minutes (cricmatch 2, khelofun 4, spin24star 3, playcric 4). Tune it
-  against real refusals with `/proxycap`.
+  so this is a **per-instance** choice, not a global one. Live split as of
+  2026-11-13, at the operator's direction:
+
+  | instance | main proxy | pool | cap |
+  |---|---|---|---|
+  | cricmatch | `51.146.1.77` | the 10 fixed IPs | **6/hour each** |
+  | khelofun | `51.146.1.77` | the 10 fixed IPs | **6/hour each** |
+  | playcric365 | rotating mobile | 3 | off |
+  | funcrash | rotating mobile | 8 | off |
+  | spin24star | rotating mobile | 10 | off |
+
+  cricmatch and khelofun are the two with the tightest measured per-IP limits
+  (2 and 4 attempts per ~3 minutes), so they gain most from being rationed and
+  spread. The other three stay on the rotating gateway that unblocked them on
+  2026-11-11/12 — moving them onto fixed IPs would undo that, and the cost of
+  the trade is that their rows record the gateway rather than an address.
+
+  ⚠️ The hourly figure 6 is a **starting point, not a measurement** — the only
+  limits ever measured here are per ~3 minutes (cricmatch 2, khelofun 4,
+  spin24star 3, playcric 4), and how long an address stays cut off was never
+  measured at all. Tune it against real refusals with `/proxycap`, and read
+  `/proxypool` for the per-IP tally.
 - `/stats` groups by `status` and by `referral_code` (`COALESCE(..., '(none)')`);
   `/stats <btag>` shows that one btag's status breakdown.
 
