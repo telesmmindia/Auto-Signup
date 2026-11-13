@@ -61,6 +61,11 @@ Master-only commands:
     /clearproxy       -> clear the global proxy (direct connection)
     /testproxy [proxy] -> open the proxy in a browser context and report the
                          exit IP; tests the global proxy if none is given
+    /proxycap [n|off] -> cap EACH proxy at n signup attempts per hour. Signups
+      go to the least-used proxy under its cap, so a burst spreads across the
+      pool instead of hammering one address. Counted from accounts.db, so a
+      restart does not forget the hour. accounts.db records which proxy made
+      each account (host:port, in the `proxy` column).
     /proxypool [p1 p2 ...|off] -> backup proxies for signups: when the site
                          blocks the current one, it rests and the next signup
                          uses the next proxy (shows the pool if no args)
@@ -141,6 +146,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit
 
 import requests
@@ -265,6 +271,14 @@ ROUND_COOLDOWN_SECS = float(os.environ.get("ROUND_COOLDOWN_SECS", "12"))
 # lifted on its own in ~5 minutes in the 2026-10-04 spin24star logs; 10
 # leaves margin, and every attempt made INTO a block seems to extend it.
 PROXY_BLOCK_REST_SECS = float(os.environ.get("PROXY_BLOCK_REST_SECS", "600"))
+# Attempts ONE proxy may make per hour. 0 = no cap, which is the behaviour
+# every instance had before 2026-11-13; the live signup bots set a real
+# number in their settings file (/proxycap shows and changes it).
+PROXY_HOURLY_CAP_DEFAULT = int(os.environ.get("PROXY_HOURLY_CAP", "0") or 0)
+# How often a lane re-checks for a free proxy, and how long it waits in total
+# before giving the round back to the operator.
+PROXY_WAIT_POLL_SECS = float(os.environ.get("PROXY_WAIT_POLL_SECS", "60"))
+PROXY_WAIT_CEILING_SECS = float(os.environ.get("PROXY_WAIT_CEILING_SECS", "3900"))
 
 # Shared across handlers; all handler coroutines run on the same asyncio event
 # loop thread, so one sqlite3 connection is safe to reuse.
@@ -396,19 +410,136 @@ def _proxy_resting(raw):
     return _proxy_rest_until.get(raw, 0) > time.time()
 
 
+def _proxy_label(raw):
+    """How a proxy is RECORDED in accounts.db and COUNTED for the hourly cap:
+    "host:port", with no credentials.
+
+    Not the raw string, for two separate reasons. It lands in the `proxy`
+    column and therefore in every /export CSV, and the raw string carries the
+    proxy PASSWORD -- a file that gets shared around should not. And host:port
+    is what actually identifies one of the fixed residential IPs: each has its
+    own port AND its own credentials, so host alone is not unique while the
+    pair always is.
+
+    Rows written before 2026-11-13 hold the full string; _proxy_usage_last_hour()
+    labels what it reads the same way, so old and new rows count alike.
+    """
+    try:
+        conf = parse_proxy(raw)
+    except ValueError:
+        return (raw or "").strip()
+    if not conf:
+        return ""
+    server = conf.get("server") or ""
+    return urlsplit(server).netloc or server
+
+
+def _proxy_hourly_cap():
+    """Attempts one proxy may make per hour, 0 = no cap (the old behaviour)."""
+    try:
+        return max(0, int(global_settings.get("proxy_hourly_cap",
+                                              PROXY_HOURLY_CAP_DEFAULT)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _proxy_usage_last_hour():
+    """{label: [attempts, oldest_epoch]} for THIS site over the last hour.
+
+    Counted out of accounts.db rather than held in memory on purpose: a
+    restart would otherwise forget the hour and send a just-used IP straight
+    back out, and the table is the real record of what each address has
+    already done.
+
+    ATTEMPTS, not successes -- a refused signup was still a request the site
+    saw from that address, and the per-IP limit counts requests. A row is
+    inserted before each attempt, so every one of them is here.
+
+    Never raises: a counting failure must not be able to stop signups, so it
+    degrades to "nothing used yet" rather than to a dead bot.
+    """
+    host = (urlsplit(global_settings.get("url") or BOT_SITE_URL or "").hostname
+            or "").lower()
+    out = {}
+    try:
+        rows = conn.execute(
+            "SELECT proxy, url, created_at FROM accounts "
+            "WHERE created_at >= datetime('now','localtime','-1 hour')"
+        ).fetchall()
+    except Exception as e:                                  # pragma: no cover
+        logger.warning("could not count proxy usage (cap not applied): %s", e)
+        return {}
+    for raw, url, created in rows:
+        # accounts.db is shared by every site's bot, so filter to ours -- the
+        # per-IP limit is per SITE, and an address spent on cricmatch is not
+        # spent on khelofun.
+        if host and host not in (url or "").lower():
+            continue
+        label = _proxy_label(raw)
+        if not label:
+            continue
+        try:
+            when = datetime.strptime(created, "%Y-%m-%d %H:%M:%S").timestamp()
+        except (TypeError, ValueError):
+            when = time.time()
+        rec = out.setdefault(label, [0, when])
+        rec[0] += 1
+        rec[1] = min(rec[1], when)
+    return out
+
+
 def _pick_signup_proxy():
-    """The proxy a NEW signup should use: the first candidate that is not
-    resting after a block, so signups drift back to the main proxy as soon
-    as its rest is over. With no pool this is just the global proxy, exactly
-    as before. If every candidate is resting, the one whose rest ends first
-    -- trying it costs one attempt, which beats refusing to start."""
+    """The proxy a NEW signup should use: of the candidates that are neither
+    resting after a block nor at their hourly cap, the one that has made the
+    FEWEST attempts in the last hour (ties broken by pool order).
+
+    Least-used rather than first-free is what actually spreads a burst. The
+    limits these sites enforce are "a few attempts within about three minutes
+    from one address, then refused", so consecutive signups have to land on
+    different addresses. Taking the first free candidate every time sent them
+    all to the same one until it was blocked, which is what this replaces.
+
+    Returns None when every candidate is capped -- _signup_proxy_wait_secs()
+    says how long until one frees. With no cap set (0) the result is
+    byte-for-byte the old behaviour: the first non-resting candidate, or the
+    one whose rest ends soonest.
+    """
     cands = _signup_proxy_candidates()
     if not cands:
         return None
-    for raw in cands:
-        if not _proxy_resting(raw):
-            return raw
+    cap = _proxy_hourly_cap()
+    usage = _proxy_usage_last_hour() if cap else {}
+    free = [r for r in cands
+            if not _proxy_resting(r)
+            and (not cap or usage.get(_proxy_label(r), [0])[0] < cap)]
+    if free:
+        return min(free, key=lambda r: (usage.get(_proxy_label(r), [0])[0],
+                                        cands.index(r)))
+    if cap:
+        # Every address is spent or resting. Returning one anyway would burn a
+        # phone number on an attempt we already know the site will refuse.
+        return None
     return min(cands, key=lambda r: _proxy_rest_until.get(r, 0))
+
+
+def _signup_proxy_wait_secs():
+    """Seconds until some proxy frees up, for when _pick_signup_proxy() has
+    none. A capped proxy frees one hour after its OLDEST attempt still inside
+    the window; a resting one frees at its own deadline. Returns the sooner,
+    clamped so a caller always makes progress eventually."""
+    cands = _signup_proxy_candidates()
+    if not cands:
+        return 0
+    cap = _proxy_hourly_cap()
+    usage = _proxy_usage_last_hour() if cap else {}
+    now = time.time()
+    waits = []
+    for raw in cands:
+        rest = max(0.0, _proxy_rest_until.get(raw, 0) - now)
+        used, oldest = usage.get(_proxy_label(raw), [0, now])
+        cap_wait = max(0.0, (oldest + 3600) - now) if cap and used >= cap else 0.0
+        waits.append(max(rest, cap_wait))
+    return int(min(waits)) if waits else 0
 
 
 def _rest_blocked_proxy(raw):
@@ -548,6 +679,7 @@ if SIGNUP_ENABLED:
         BotCommand("clearurl", "Reset to the default site URL"),
         BotCommand("btag", "Set/show just the btag on the global site URL"),
         BotCommand("proxypool", "Backup proxies used when the site blocks the main one"),
+        BotCommand("proxycap", "Cap each proxy at N signups per hour"),
     ]
 MASTER_COMMANDS += [
     BotCommand("addadmin", "Authorize a new admin"),
@@ -1137,6 +1269,40 @@ async def _auto_restart(update, chat_id, sub_id):
     await begin_signup(update, chat_id, sub_id)
 
 
+async def _wait_for_free_proxy(update, sub_id):
+    """Hold this lane until some proxy is under its hourly cap again.
+
+    Returns True once one is free, False if the ceiling passed without one --
+    the caller then stops rather than spending a phone number on an attempt
+    the site is known to refuse.
+
+    Re-checks every PROXY_WAIT_POLL_SECS instead of sleeping the whole
+    computed wait in one go: another lane finishing, a rest expiring, or the
+    master raising /proxycap can each free an address early, and one long
+    sleep would ignore all three. Nothing is held open while waiting -- no
+    session, no browser, no phone number -- so the cost of waiting is zero.
+    """
+    deadline = time.time() + PROXY_WAIT_CEILING_SECS
+    told = False
+    while time.time() < deadline:
+        if _pick_signup_proxy() is not None:
+            return True
+        if not told:
+            wait = _signup_proxy_wait_secs()
+            await update.message.reply_text(
+                f"⏳ [#{sub_id}] All {len(_signup_proxy_candidates())} proxies have used their "
+                f"hourly limit ({_proxy_hourly_cap()} signups each). Waiting ~"
+                f"{max(1, int(round(wait / 60)))} min for one to free up — no phone number "
+                f"has been spent.")
+            told = True
+        await asyncio.sleep(PROXY_WAIT_POLL_SECS)
+    await update.message.reply_text(
+        f"⚠️ [#{sub_id}] Still no proxy under its hourly limit after "
+        f"{int(PROXY_WAIT_CEILING_SECS // 60)} min — stopping this round. Raise the cap with "
+        f"/proxycap <n>, add proxies with /proxypool, or send /newacc to try again.")
+    return False
+
+
 async def begin_signup(update, chat_id, sub_id):
     """Generate a new account and start a fresh session in lane sub_id.
     Shared by /newacc (each initial lane) and the continuous-mode
@@ -1154,6 +1320,14 @@ async def begin_signup(update, chat_id, sub_id):
     # The global proxy, unless the site has blocked it and a /proxypool
     # backup is free -- see _pick_signup_proxy().
     session.proxy = _pick_signup_proxy()
+    # None means every proxy is spent for this hour or resting after a block
+    # (only reachable with a cap set). Starting anyway would spend a phone
+    # number on an attempt the site is already known to refuse, so the lane
+    # waits instead -- _auto_restart() keeps the loop alive across the wait.
+    if session.proxy is None and _signup_proxy_candidates():
+        if not await _wait_for_free_proxy(update, sub_id):
+            return
+        session.proxy = _pick_signup_proxy()
     session.site_url = global_settings.get("url")
     session.sub_id = sub_id
     # Pins this session to one (executor, Chromium) slot for its whole life --
@@ -1647,20 +1821,73 @@ async def proxypool_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/proxypool <p1> <p2> ... adds backups the bot switches to when the "
             "site blocks the main one.")
         return
-    main_raw = global_settings.get("proxy")
-    lines = ["🌐 Signup proxies (used top to bottom; a blocked one rests "
-             f"{int(round(PROXY_BLOCK_REST_SECS / 60))} min):"]
+    cap = _proxy_hourly_cap()
+    usage = _proxy_usage_last_hour() if cap else {}
+    if cap:
+        head = (f"🌐 Signup proxies — least-used first, each capped at {cap}/hour "
+                f"(a blocked one also rests {int(round(PROXY_BLOCK_REST_SECS / 60))} min):")
+    else:
+        head = ("🌐 Signup proxies (used top to bottom; a blocked one rests "
+                f"{int(round(PROXY_BLOCK_REST_SECS / 60))} min). No hourly cap — /proxycap <n>:")
+    lines = [head]
     for raw in cands:
-        role = "main" if raw == main_raw else "backup"
+        used = usage.get(_proxy_label(raw), [0])[0]
         if _proxy_resting(raw):
             left = int((_proxy_rest_until[raw] - time.time()) // 60) + 1
             state = f"⛔ resting, ~{left} min left"
+        elif cap and used >= cap:
+            state = "🚫 hourly limit reached"
         else:
             state = "✅ ready"
-        lines.append(f"• {mask_proxy_display(raw)} — {role}, {state}")
+        tally = f" — {used}/{cap} this hour" if cap else ""
+        lines.append(f"• {_proxy_host(raw)}{tally} — {state}")
     nxt = _pick_signup_proxy()
     if nxt:
         lines.append(f"Next signup uses: {_proxy_host(nxt)}")
+    elif cap:
+        lines.append(f"Every proxy is spent — next one frees in about "
+                     f"{max(1, int(round(_signup_proxy_wait_secs() / 60)))} min.")
+    await update.message.reply_text("\n".join(lines))
+
+
+@require_role(is_master)
+async def proxycap_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/proxycap <n> caps each proxy at n signup ATTEMPTS per hour;
+    /proxycap off removes the cap; bare /proxycap shows it with this hour's
+    tally. Counted from accounts.db, so it survives a restart."""
+    args = context.args or []
+    if args:
+        word = args[0].lower()
+        if word in ("off", "0", "none", "clear"):
+            global_settings.pop("proxy_hourly_cap", None)
+            save_settings()
+            await update.message.reply_text(
+                "🌐 Hourly proxy cap removed — proxies are used until the site blocks them.")
+            return
+        try:
+            n = int(word)
+            if n < 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Usage: /proxycap <number per hour>, or /proxycap off")
+            return
+        global_settings["proxy_hourly_cap"] = n
+        save_settings()
+    cap = _proxy_hourly_cap()
+    cands = _signup_proxy_candidates()
+    if not cap:
+        await update.message.reply_text(
+            "🌐 No hourly cap set. /proxycap <n> limits EACH proxy to n signup "
+            "attempts per hour and spreads signups across the pool least-used first.")
+        return
+    usage = _proxy_usage_last_hour()
+    spent = sum(min(cap, usage.get(_proxy_label(r), [0])[0]) for r in cands)
+    lines = [f"🌐 Hourly cap: {cap} signups per proxy.",
+             f"Pool: {len(cands)} proxies → up to {cap * len(cands)} signups an hour.",
+             f"Used this hour: {spent}."]
+    for raw in cands:
+        used = usage.get(_proxy_label(raw), [0])[0]
+        lines.append(f"• {_proxy_host(raw)} — {used}/{cap}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -2936,7 +3163,10 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
     # the form's maxlength into a different one -- see main.normalize_phone.
     phone = normalize_phone(phone, session.site_url or BOT_SITE_URL)
     session.acct["phone"] = phone
-    session.acct["proxy"] = session.proxy
+    # host:port, never the raw string: this column is what /list, /export and
+    # the CSV show, so it must name the address the site saw WITHOUT carrying
+    # the proxy password into a file people pass around. See _proxy_label().
+    session.acct["proxy"] = _proxy_label(session.proxy)
     session.acct["url"] = session.site_url
     session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
     session.row_id = db.insert_account(conn, session.acct)
@@ -3305,6 +3535,7 @@ def main():
         app.add_handler(CommandHandler("clearurl", clearurl))
         app.add_handler(CommandHandler("btag", btag_cmd))
         app.add_handler(CommandHandler("proxypool", proxypool_cmd))
+        app.add_handler(CommandHandler("proxycap", proxycap_cmd))
         # Phone/OTP replies only exist for signup sessions -- a gameplay-only
         # instance has no sessions, so plain text is just ignored there.
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

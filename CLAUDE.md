@@ -1699,6 +1699,45 @@ earlier per-chat design.
   datacenter IPs** (`hosting: true`), it picks a new IP per connection, and
   pages load ~2x slower (~20s vs ~11s), so expect a paid captcha on most
   signups through it. Fine as a fallback, not as the main proxy.
+- `/proxycap <n> | off` (signup modes, 2026-11-13) — caps EACH proxy at `n`
+  signup **attempts** per hour, stored as `proxy_hourly_cap`. With a cap set,
+  `_pick_signup_proxy()` stops returning the first free candidate and returns
+  the **least-used** one instead — which is the half that actually matters:
+  these sites refuse an address after a few attempts within ~3 minutes, so
+  consecutive signups have to land on *different* addresses. First-free sent
+  them all to one proxy until it was blocked, then all to the next, which is
+  how spin24star walked a 9-proxy pool in two minutes on 2026-11-12.
+  - **Usage is counted out of `accounts.db`, not held in memory**
+    (`_proxy_usage_last_hour()`): a restart would otherwise forget the hour
+    and send a just-spent IP straight back out, and the table is the real
+    record. **Attempts, not successes** — a refused signup was still a
+    request the site saw from that address. Filtered to the instance's own
+    site, since the limit is per site: an address spent on cricmatch is not
+    spent on khelofun.
+  - When every proxy is spent, `_pick_signup_proxy()` returns **None** and
+    the lane WAITS (`_wait_for_free_proxy()`, re-checking every 60s up to
+    65min) rather than starting. Starting anyway would burn a real phone
+    number on an attempt the site is known to refuse. Nothing is held open
+    while waiting — no session, no browser, no number.
+  - `0`/unset is the pre-2026-11-13 behaviour **byte for byte** (first
+    non-resting candidate, else the one resting shortest), so no other mode
+    changed. Regression-tested offline before deploying.
+- **`accounts.db`'s `proxy` column now records `host:port`, not the raw
+  string** (`_proxy_label()`). Two reasons, and the second is the one that
+  mattered: it answers "which IP made this account", and the raw string
+  carried the proxy **PASSWORD** into every `/list`, `/export` and CSV —
+  files that get passed around. Rows written before this date hold the full
+  string; `_proxy_label()` normalises whatever it reads, so old and new rows
+  count alike and no migration is needed.
+  ⚠️ A **rotating gateway cannot satisfy either feature**: there is no "this
+  IP" to ration, and the row would name the gateway rather than the address
+  the site actually saw. Rationing and recording only work on fixed IPs,
+  which is why the five signup bots were moved back onto the ten residential
+  proxies on 2026-11-13 (main + 9 in `proxy_pool`, `proxy_hourly_cap` 6, so
+  up to 60 attempts an hour per site). The hourly figure is a **starting
+  point, not a measurement** — the only measured limits here are per ~3
+  minutes (cricmatch 2, khelofun 4, spin24star 3, playcric 4). Tune it
+  against real refusals with `/proxycap`.
 - `/stats` groups by `status` and by `referral_code` (`COALESCE(..., '(none)')`);
   `/stats <btag>` shows that one btag's status breakdown.
 
