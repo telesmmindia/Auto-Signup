@@ -78,6 +78,12 @@ PROFILE = SiteProfile(
     # refusal as a success. 201 is a refusal here, so never list it.
     http_status_otp_sent=[205],
     http_status_registered=[200],
+    # A per-IP signup limit, not a fault (2026-11-14, on the Geonix IPs): about
+    # 4 signups from one address within minutes, then every register from it is
+    # answered with this for 80+ minutes. Matching it makes the attempt a
+    # BLOCKED result, so the bot rests that proxy (PROXY_BLOCK_REST_SECS, set to
+    # 2h in .env.khelofun.signup) instead of retrying into the refusal.
+    ip_refused_texts=["something went wrong. please try again"],
     # Same caveat as supports_http_login above -- inferred from the shared
     # template, not yet round-tripped against a real khelofun account.
     supports_change_password=True,

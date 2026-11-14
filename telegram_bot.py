@@ -1154,8 +1154,18 @@ def _blocking_http_register(session, phone):
     if http_is_error(resp_json, url):
         if http_is_phone_taken(resp_json):
             return {"ok": False, "phone_taken": True, "message": http_message_of(resp_json)}
-        return {"ok": False,
-                "message": "Register rejected: " + (http_message_of(resp_json) or str(resp_json))}
+        msg = http_message_of(resp_json) or str(resp_json)
+        # The site's wording for "not from this address right now" (khelofun,
+        # 2026-11-14: the 5th signup from an IP within minutes, then refused
+        # for 80+ minutes). Reported as BLOCKED, like the browser path does, so
+        # handle_message() rests this proxy and the next signup goes out through
+        # another one instead of straight back into the refusal. The refusal
+        # comes before any SMS, so the number is unspent.
+        if any(t in msg.lower() for t in prof.ip_refused_texts):
+            return {"ok": False, "blocked": True,
+                    "message": f"Register rejected: {msg} -- the site refuses signups "
+                               f"from this proxy for now (it allows only a few per address)"}
+        return {"ok": False, "message": "Register rejected: " + msg}
 
     session.http_session = http_sess
     session.http_csrf = csrf

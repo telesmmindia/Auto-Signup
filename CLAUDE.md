@@ -1754,6 +1754,16 @@ earlier per-chat design.
   spin24star 3, playcric 4), and how long an address stays cut off was never
   measured at all. Tune it against real refusals with `/proxycap`, and read
   `/proxypool` for the per-IP tally.
+- **Fast mode now rests a refused proxy too (2026-11-14).** The per-IP
+  refusal used to be recognised only on the browser path, so a `--fast`
+  signup that hit it was an ordinary failure and the IP went straight back
+  into rotation. `_blocking_http_register()` now matches the profile's
+  `ip_refused_texts` and returns `blocked`, which rests the proxy exactly as
+  the browser path does. khelofun names its wording ("Something went wrong.
+  Please try again") and runs `PROXY_BLOCK_REST_SECS=7200`: measured on the
+  Geonix IPs that day, ~4 signups from one address within minutes, then
+  refused for **80+ minutes** — so the hourly cap alone let a still-blocked
+  IP back in after 60. The rest is in memory; a restart forgets it.
 - `/stats` groups by `status` and by `referral_code` (`COALESCE(..., '(none)')`);
   `/stats <btag>` shows that one btag's status breakdown.
 
