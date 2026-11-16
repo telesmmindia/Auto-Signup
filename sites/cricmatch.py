@@ -22,6 +22,16 @@ PROFILE = SiteProfile(
     # CSRF via a static per-session token (meta[name=csrf-token] + cookies),
     # no WAF/JS challenge -- see the "HTTP-fast signup" section of CLAUDE.md.
     supports_http_fast=True,
+    # Read out of the register handler in cricmatch's own /append/loginpp
+    # popup (2026-11-16): `response.status == 200` -> registered, `== 205` ->
+    # show the OTP popup, anything else is a refusal. These MUST be listed:
+    # cricmatch's refusals now carry no message_class (a validation refusal
+    # is a bare {"status":201,"message":{...}}), so the old message_class
+    # judging read every refusal -- the per-IP one included -- as "OTP sent",
+    # and the bot asked for a code that was never texted. Same fix khelofun
+    # and playcric365 got; all three are one operator's template.
+    http_status_otp_sent=[205],
+    http_status_registered=[200],
     # Confirmed live via manual HTTP request interception (Kiwi browser +
     # its request-editor extension, 2026-07-19-ish): on an authenticated
     # session, POSTing a new phone to /send_otp_touser overwrites the

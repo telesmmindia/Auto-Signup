@@ -414,6 +414,17 @@ inputs (username, email, password, mobile) + an over-18/T&C checkbox; no name or
 DOB fields despite the help text. Password policy: 5-60 chars, ≥1 digit, ≥1
 special, both cases (spin24star enforces the same, so one password fits both).
 
+⚠️ **cricmatch's fast path needs explicit statuses now (2026-11-16).** Its
+refusals stopped carrying `message_class` — a validation refusal is a bare
+`{"status":201,"message":{...}}` — so the message_class judging read EVERY
+refusal as "OTP sent": the bot showed the OTP prompt for a code cricmatch
+never texted, and the user re-sent one number five times in three minutes.
+The register handler in cricmatch's own `/append/loginpp` popup judges
+`status == 200` (registered) and `== 205` (show the OTP popup), so the
+profile now lists `http_status_otp_sent=[205]`/`http_status_registered=[200]`,
+same as khelofun and playcric. The register code is NOT on the homepage —
+the signup form ships inside `/append/loginpp` with the login popup.
+
 **khelofun** — same white-label Laravel template as cricmatch; register-modal
 selectors are byte-identical (`#userNameid`/`#userEmailid`/`#pass_log_id`/
 `#phoneNumber`/`#remChck2`/`button.cls_register_new`). Dismiss the SPRIBE overlay
