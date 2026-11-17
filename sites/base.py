@@ -437,3 +437,58 @@ class SiteProfile:
     # on. True -> password_changer.py takes the ~2s HTTP route instead of a
     # ~30s Playwright login, which also keeps it off the /login volume block.
     supports_http_change_password: bool = False
+
+    # ---- deposit / withdrawal ("bank-account whitelisting" chain) ----
+    # Read live off cricmatch247's own inline JS 2026-11-17 with
+    # probe_deposit.py. OFF by default, so a site keeps today's behaviour
+    # until its own routes have actually been read -- the family resemblance
+    # between these white-labels is NOT proof (playinmatch looked like a
+    # sibling of khelstake and differed in every layer; see CLAUDE.md §7).
+    supports_deposit: bool = False
+
+    # Step 1 of the gateway deposit: POST the serialized #payNow form
+    # (hashed/amount/coupon/userid) with an X-CSRF-Token header. Answers
+    # {"status":200,"key":<hash>}; the page then puts `key` into the form's
+    # `hashed` field and submits it to the EXTERNAL payment gateway, whose
+    # checkout page is where the QR actually lives. So the QR is the PSP's,
+    # not the site's -- two hops, not one.
+    deposit_store_path: str = "/pay/v3/store"
+
+    # Step 2 of the MANUAL deposit: the player pays by their own means and
+    # submits the bank reference. POST depositvalue/utr/coupon/_token.
+    # 200 = accepted (carries order_id), 201 = refused, 205 = routine check.
+    # NOTE the manual path's own JS refuses amount < 101, so a Rs100 deposit
+    # only goes through the gateway path.
+    deposit_amount_path: str = "/depositamount"
+
+    # UTR (the payment reference the player types in) must match this: the
+    # site's own validation is 8-24 chars, letters and digits only.
+    deposit_utr_pattern: str = r"^[a-zA-Z0-9]{8,24}$"
+
+    # Withdrawal. POST amount/name/ac_number/ifsc/_token.
+    #   205 -> an SMS OTP was sent; the bank account is NOT yet saved
+    #   200 -> accepted outright (an already-verified bank account)
+    #   201/301/302 -> refused, reason in `message`
+    #   206 -> account under routine check
+    supports_withdraw: bool = False
+    withdraw_amount_path: str = "/withdrawAmount"
+
+    # The OTP that VERIFIES a new bank account, which is what actually
+    # whitelists it. POST otp/ac_num/_token -> 200 carries withdraw_amount,
+    # orderId and the saved bank id. Until this succeeds there is no
+    # withdrawal to cancel: the order is created HERE, not by the call above.
+    withdraw_verify_otp_path: str = "/verify_withdraw_otp"
+    withdraw_resend_otp_path: str = "/resend_withdraw_otp"
+
+    # Cancelling a pending withdrawal. POST id/_token -> 200 = cancelled,
+    # 205 = routine check. The id comes from the transaction-history row.
+    cancel_withdraw_path: str = "/api2/v2/cancelWithdraw"
+
+    # Transaction history, which is where a withdrawal's cancellable id and
+    # its status are read from. POST page/type/from_date/to_date/
+    # date_fitler/_token (the site's own misspelling of "filter" -- keep it).
+    # Answers rendered HTML in data.html plus last_page.
+    transaction_history_path: str = "/transhistory"
+
+    # Saved bank accounts can be deleted again: POST card_id/_token.
+    remove_bank_path: str = "/removecarddetails"

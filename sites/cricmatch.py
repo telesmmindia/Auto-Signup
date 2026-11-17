@@ -67,6 +67,36 @@ PROFILE = SiteProfile(
     # so http_is_error() does not apply to this endpoint.
     supports_change_password=True,
     change_password_path="/changePassword",
+    # Deposit / withdrawal routes, read live out of cricmatch's own inline
+    # JS 2026-11-17 with probe_deposit.py (read-only: one login POST, then
+    # GETs). The forms are NOT in the homepage source -- they ship in the
+    # /append/depositpp and /append/withdrawpp partials, the same convention
+    # that keeps the signup form in /append/loginpp.
+    #
+    # The chain the deposit bot needs, in order:
+    #   deposit : POST /pay/v3/store -> {"status":200,"key":...} -> the
+    #             #payNow form is submitted to the EXTERNAL gateway
+    #             (stipepay.com/pg/<merchant>/checkout) which renders the QR.
+    #   confirm : the site pushes "Deposit successful" over a Pusher private
+    #             channel (private-notify.<player_number>, app key in the
+    #             page, cluster ap2) -- so a deposit can be WAITED ON rather
+    #             than polled, though polling the balance still works.
+    #   withdraw: POST /withdrawAmount -> 205 + an SMS OTP for a NEW bank
+    #             account, 200 outright for one already verified.
+    #   verify  : POST /verify_withdraw_otp -> 200, and ONLY now does the
+    #             withdrawal order exist (it returns orderId + the saved
+    #             bank id). Verifying the OTP is what whitelists the bank.
+    #   cancel  : POST /api2/v2/cancelWithdraw with the id from
+    #             /transhistory -> 200.
+    #
+    # NOT yet established, and both need one real run to settle:
+    #   * whether the 3-minute cancel cooldown is server-enforced or only a
+    #     UI countdown -- the history row is server-rendered, so the rule
+    #     cannot be read from the markup.
+    #   * whether cancelWithdraw wants the orderId from verify_withdraw_otp
+    #     or the row's own data-id. The history row is the authority.
+    supports_deposit=True,
+    supports_withdraw=True,
     sel={
         # ---- signup ----
         "open_modal": [".registerUserData", "button.headerjoinBtn",
