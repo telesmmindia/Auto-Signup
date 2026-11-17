@@ -7,3 +7,6 @@ PySocks==1.7.1
 gspread==6.1.4
 google-auth==2.35.0
 telethon==1.44.0
+
+# QR rendering for the deposit flow (pure python, no Pillow)
+segno

@@ -492,3 +492,12 @@ class SiteProfile:
 
     # Saved bank accounts can be deleted again: POST card_id/_token.
     remove_bank_path: str = "/removecarddetails"
+
+    # Where the #payNow form is submitted once deposit_store_path has handed
+    # back its key. This is a THIRD-PARTY payment gateway, not the site, and
+    # its checkout is where the QR lives -- cricmatch's own JS sets
+    # action="https://stipepay.com/pg/stipeyWNO/checkout", which then
+    # auto-submits on through truelayerpayments to a page carrying a plain
+    # upi:// string. Read it off the site's own deposit JS per site; the
+    # merchant slug in the path is the operator's, so it is never guessable.
+    deposit_gateway_url: str = ""

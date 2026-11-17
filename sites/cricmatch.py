@@ -96,6 +96,9 @@ PROFILE = SiteProfile(
     #   * whether cancelWithdraw wants the orderId from verify_withdraw_otp
     #     or the row's own data-id. The history row is the authority.
     supports_deposit=True,
+    # The merchant slug is cricmatch's own, read off its deposit partial.
+    deposit_gateway_url="https://stipepay.com/pg/stipeyWNO/checkout",
+
     supports_withdraw=True,
     sel={
         # ---- signup ----
