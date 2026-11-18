@@ -26,7 +26,13 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 # Columns added after the initial release; migrated in on every connect so
 # older accounts.db files keep working.
-_MIGRATED_COLUMNS = ("proxy TEXT", "url TEXT", "referral_code TEXT", "freed_phone TEXT")
+_MIGRATED_COLUMNS = ("proxy TEXT", "url TEXT", "referral_code TEXT", "freed_phone TEXT",
+                     # Who started the signup (Telegram user id + display name
+                     # at the time) and which site profile it ran against --
+                     # accounts.db is shared by every signup bot, so `site` is
+                     # what lets one bot's per-user stats ignore the others'.
+                     # NULL for CLI runs and for rows from before 2026-11-18.
+                     "created_by_id INTEGER", "created_by_name TEXT", "site TEXT")
 
 
 def get_connection(db_path=DB_PATH):
@@ -44,10 +50,12 @@ def get_connection(db_path=DB_PATH):
 def insert_account(conn, acct):
     """Store a freshly generated account, return its row id."""
     cur = conn.execute(
-        "INSERT INTO accounts (username, email, password, phone, proxy, url, referral_code) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO accounts (username, email, password, phone, proxy, url, referral_code, "
+        "created_by_id, created_by_name, site) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (acct["username"], acct["email"], acct["password"], acct.get("phone", ""),
-         acct.get("proxy"), acct.get("url"), acct.get("referral_code")),
+         acct.get("proxy"), acct.get("url"), acct.get("referral_code"),
+         acct.get("created_by_id"), acct.get("created_by_name"), acct.get("site")),
     )
     conn.commit()
     return cur.lastrowid
@@ -70,7 +78,8 @@ def update_freed_phone(conn, row_id, freed_phone):
 
 
 COLUMNS = ("id", "created_at", "username", "email", "password", "phone",
-           "status", "proxy", "url", "referral_code", "screenshot", "notes", "freed_phone")
+           "status", "proxy", "url", "referral_code", "screenshot", "notes", "freed_phone",
+           "created_by_id", "created_by_name", "site")
 
 
 def list_accounts(conn, limit=20, status=None, url=None):
@@ -133,3 +142,26 @@ def print_accounts(conn, limit=20, status=None, url=None):
     print("-+-".join("-" * w for w in widths))
     for r in rows:
         print(fmt_row(r))
+
+
+def user_daily_stats(conn, days=7, site=None, user_id=None):
+    """Signups per day per creator for the last `days` days (today included).
+    Returns rows of (day, created_by_id, created_by_name, total, success),
+    newest day first, busiest creator first within a day. `site` limits to
+    one site profile key; `user_id` to one creator. Rows with no creator
+    (CLI runs, pre-2026-11-18 rows) come back with created_by_id None."""
+    query = (
+        "SELECT date(created_at) AS day, created_by_id, "
+        "MAX(created_by_name), COUNT(*), "
+        "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) "
+        "FROM accounts WHERE date(created_at) >= date('now', 'localtime', ?)"
+    )
+    params = [f"-{max(int(days), 1) - 1} days"]
+    if site:
+        query += " AND site = ?"
+        params.append(site)
+    if user_id is not None:
+        query += " AND created_by_id = ?"
+        params.append(user_id)
+    query += " GROUP BY day, created_by_id ORDER BY day DESC, COUNT(*) DESC"
+    return conn.execute(query, params).fetchall()

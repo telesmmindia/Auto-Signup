@@ -622,6 +622,7 @@ if SIGNUP_ENABLED:
         BotCommand("addphone", "Add one number to your phone pool"),
         BotCommand("delphone", "Remove one number from your phone pool"),
         BotCommand("phone", "Show the current phone pool/mode"),
+        BotCommand("userstats", "Daily signups per user (yours, or everyone's for the master)"),
     ]
 ADMIN_COMMANDS.append(BotCommand("start", "Show available commands"))
 MASTER_COMMANDS = list(ADMIN_COMMANDS)
@@ -830,6 +831,20 @@ class Session:
         # swaps the account onto a random throwaway phone number, freeing the
         # real one just used for the next signup.
         self.free_number = False
+        # Who started this signup -- stored in accounts.db so /userstats can
+        # show each admin's daily output. Set in begin_signup().
+        self.created_by_id = None
+        self.created_by_name = None
+
+
+def _user_label(user):
+    """'@handle' if the Telegram user has one, else their display name, else
+    the bare id -- what /userstats and /list show for a creator."""
+    if user is None:
+        return None
+    if user.username:
+        return f"@{user.username}"
+    return user.full_name or str(user.id)
 
 
 def _valid_phone(text):
@@ -1340,6 +1355,8 @@ async def begin_signup(update, chat_id, sub_id):
         session.proxy = _pick_signup_proxy()
     session.site_url = global_settings.get("url")
     session.sub_id = sub_id
+    session.created_by_id = update.effective_user.id if update.effective_user else None
+    session.created_by_name = _user_label(update.effective_user)
     # Pins this session to one (executor, Chromium) slot for its whole life --
     # round-robin across BOT_CONCURRENCY slots so concurrent lanes (whether
     # from different chats or several lanes in one /newacc <n>) run on
@@ -3044,6 +3061,59 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+def _instance_site_key():
+    """The site profile this signup bot is running against -- per-user stats
+    are limited to it, since accounts.db is shared by every signup bot."""
+    return profile_for(global_settings.get("url") or BOT_SITE_URL).key
+
+
+@require_role(is_admin)
+async def userstats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/userstats [days] -- signups per day, per admin, for this bot's site.
+    The master sees every admin; a plain admin sees only their own."""
+    days = 7
+    if context.args:
+        try:
+            days = max(1, min(int(context.args[0]), 60))
+        except ValueError:
+            await update.message.reply_text("Usage: /userstats [days] — e.g. /userstats 7")
+            return
+    uid = update.effective_user.id
+    site = _instance_site_key()
+    rows = db.user_daily_stats(conn, days=days, site=site,
+                               user_id=None if is_master(uid) else uid)
+    if not rows:
+        await update.message.reply_text(
+            f"No signups on {site} in the last {days} day(s) with a recorded creator.")
+        return
+
+    head = "Your signups" if not is_master(uid) else "Signups by user"
+    lines = [f"📊 <b>{head} — {html.escape(site)}, last {days} day(s)</b>",
+             "<i>✅ successful / total attempts</i>"]
+    totals = {}
+    current_day = None
+    for day, cid, cname, total, ok in rows:
+        if day != current_day:
+            current_day = day
+            day_total = sum(t for d, _, _, t, _ in rows if d == day)
+            day_ok = sum(o or 0 for d, _, _, _, o in rows if d == day)
+            lines += ["", f"📅 <b>{day}</b> — ✅ {day_ok} / {day_total}"]
+        who = cname or (str(cid) if cid else "(unknown — CLI or older rows)")
+        lines.append(f"   {html.escape(who)}:  ✅ <b>{ok or 0}</b> / {total}")
+        key = (cid, who)
+        t = totals.setdefault(key, [0, 0])
+        t[0] += ok or 0
+        t[1] += total
+    if is_master(uid) and len(totals) > 1:
+        lines += ["", "<b>Period total per user</b>"]
+        for (cid, who), (ok, total) in sorted(totals.items(), key=lambda kv: -kv[1][0]):
+            lines.append(f"   {html.escape(who)}:  ✅ <b>{ok}</b> / {total}")
+
+    text = "\n".join(lines)
+    for i in range(0, len(text), 3800):
+        await update.message.reply_text(text[i:i + 3800], parse_mode="HTML")
+
+
 @require_role(is_master)
 async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     limit = 10
@@ -3069,6 +3139,8 @@ async def list_accounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if r["proxy"]:
             line += f"\n🌐 {mask_proxy_display(r['proxy'])}"
+        if r.get("created_by_id"):
+            line += f"\n🙋 by {r['created_by_name'] or r['created_by_id']} ({r['created_by_id']})"
         if r["screenshot"]:
             line += f"\n🖼 {r['screenshot']}"
         if r["notes"]:
@@ -3179,6 +3251,9 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
     session.acct["proxy"] = _proxy_label(session.proxy)
     session.acct["url"] = session.site_url
     session.acct["referral_code"] = extract_referral_code(session.site_url or BOT_SITE_URL)
+    session.acct["created_by_id"] = session.created_by_id
+    session.acct["created_by_name"] = session.created_by_name
+    session.acct["site"] = profile_for(session.site_url or BOT_SITE_URL).key
     session.row_id = db.insert_account(conn, session.acct)
     await update.message.reply_text(
         f"{tag}⏳ [#{sub_id}] Submitting the signup form ({phone}) and "
@@ -3353,7 +3428,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel [lane] — abandon in-progress signup(s)\n"
         "/setphone <n> [n2] ... | --random · /addphone · /delphone · /phone — rotate a phone "
         "pool for YOUR signups; exclusive to you (falls back to the master's shared pool, if "
-        "any is set, until you set your own)"
+        "any is set, until you set your own)\n"
+        "/userstats [days] — signups per day per user (master sees everyone, admins see their own)"
     )
     if is_master(user_id):
         sections = []
@@ -3528,6 +3604,7 @@ def main():
         app.add_handler(CommandHandler("cancel", cancel))
         app.add_handler(CommandHandler("done", done_cmd))
         app.add_handler(CommandHandler("stats", stats))
+        app.add_handler(CommandHandler("userstats", userstats_cmd))
         app.add_handler(CommandHandler("setpassword", setpassword))
         app.add_handler(CommandHandler("password", show_password))
         app.add_handler(CommandHandler("setphone", setphone_cmd))

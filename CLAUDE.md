@@ -1845,6 +1845,14 @@ earlier per-chat design.
   Geonix IPs that day, ~4 signups from one address within minutes, then
   refused for **80+ minutes** — so the hourly cap alone let a still-blocked
   IP back in after 60. The rest is in memory; a restart forgets it.
+- **Who made each account (2026-11-18).** `accounts.db` now records
+  `created_by_id`/`created_by_name` (the Telegram user who started the
+  signup, set in `begin_signup()`) and `site` (the profile key). `/list`
+  shows the creator. `/userstats [days]` (default 7, max 60) lists signups
+  per day per user, ✅ successful / total attempts, limited to this bot's
+  own site because `accounts.db` is shared — the master sees everyone, a
+  plain admin sees only their own. Rows from before this date and CLI runs
+  have no creator and show as "(unknown)".
 - `/stats` groups by `status` and by `referral_code` (`COALESCE(..., '(none)')`);
   `/stats <btag>` shows that one btag's status breakdown.
 
