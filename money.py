@@ -356,3 +356,30 @@ def _row_status(text):
         if word in low:
             return word
     return "unknown"
+
+
+def registered_phone(session, site_url):
+    """The phone number the withdrawal OTP will be texted to, or None.
+
+    Worth reading before requesting a withdrawal: the code goes to whatever
+    number is registered on the ACCOUNT, which on a bot-made account is
+    whichever number the signup pool happened to use -- so the operator has
+    to be holding that SIM, and the bot should say which one rather than
+    leaving them to guess.
+
+    It is read out of the withdrawal partial's own resend_withdraw_otp(),
+    which hardcodes `let phone = "<number>"` per session. Established by
+    differential 2026-11-18: two accounts fetched the same partial and got
+    two different numbers, which is what rules out it being one of the
+    site-wide support numbers that also appear in the markup.
+    """
+    prof = profile_for(site_url)
+    if not prof.supports_withdraw:
+        return None
+    try:
+        resp = session.get(site_url.rstrip("/") + "/append/withdrawpp", timeout=30)
+    except requests.RequestException:
+        return None
+    m = re.search(r"resend_withdraw_otp\s*\(\s*\)\s*\{[^}]{0,200}?"
+                  r"let\s+phone\s*=\s*[\"'](\d{6,15})[\"']", resp.text, re.S)
+    return m.group(1) if m else None
