@@ -230,6 +230,62 @@ the `TOURNAMENT_PROXIES` lines of the tournament envs.
   **More proxy IPs is the real fix, not a bigger concurrency number** — as
   everywhere else here.
 
+### Holding ONE exit IP through a whole flow on a ROTATING proxy (`sticky.py`)
+
+The deposit/withdraw work needs signup, deposit, withdrawal and cancel to all
+leave from **one address** -- one person, one IP. A rotating gateway hands out
+a new exit IP per **CONNECTION**, so this is possible: keep one connection
+alive and every request on it keeps that IP. `StickySession` does exactly
+that, and the four facts below were each measured (laptop ->
+`gw.dataimpulse.com`, read-only GETs, 2026-11-18).
+
+- **A connection is only reusable if its body is DRAINED.** urllib3 cannot
+  reuse a partially-read connection, so closing a `stream=True` response
+  without reading it **closes the tunnel** -- and the next request gets a new
+  IP. This looks identical to the gateway rotating and cost a whole 10-minute
+  measurement run, which reported the IP changing on *every* request at a 30s
+  heartbeat. Drained, the same site held **one connection for 210s**.
+  `request()` therefore reads `resp.content` unconditionally before returning.
+- **An idle tunnel dies between 60s and 120s.** Same IP after 30s and 60s of
+  silence; a different one after 120s and again after 240s. So a flow with
+  human-sized gaps (SMS waits, someone actually paying the deposit, the
+  3-minute cancel cooldown) loses its IP unless something keeps it warm.
+  `HEARTBEAT_SECS` is **30** -- half the proven-safe gap.
+- **One tunnel per HOST, not per session.** One session asking three sites
+  reported three different exit IPs, each stable for its own host. So the
+  heartbeat must go to the **site's own host**; warming anything else holds a
+  tunnel nothing will use while the site's tunnel rotates away. `request()`
+  **refuses an off-host URL** rather than quietly opening a second one. (The
+  external payment-gateway hops therefore leave from a different IP -- which
+  is fine, the PSP is not the site judging the account.)
+- **The heartbeat is `HEAD /`.** `GET /` holds the connection but costs
+  **442 KB** a time: ~53 MB per account-hour, >1 GB over 20 accounts -- real
+  money on a metered mobile plan, and this plan has run dry before
+  (`407 TRAFFIC_EXHAUSTED`). `HEAD /` answers **200 with a zero-byte body**
+  and holds the same connection. A 404 is no cheaper (cricmatch renders a
+  290 KB error page).
+
+**A lost IP is SILENT** -- the gateway just opens a new tunnel and nothing
+raises -- and we cannot read our own exit IP on the site's connection (asking
+an IP-echo service measures a *different* tunnel, per the per-host rule). So
+it is verified **indirectly by connection identity**: a TCP connection has a
+unique local port, so a stable local port proves the tunnel was never
+rebuilt. `held` goes False the moment the port moves and `require_held()`
+raises -- the same rule as `fill_register_form()`'s phone read-back: verify
+what actually LANDED. **A dropped IP is not recoverable**, so the only correct
+response is to abandon that account's run; this module reports rather than
+retries.
+
+Validated end to end through the class itself: **546s held, 17 heartbeats, 0
+failures, one connection**, across 90s/180s/90s/180s gaps standing in for the
+real ones.
+
+⚠️ **Fixed IPs remain the cheaper answer for a small batch** -- the address is
+recorded in `accounts.db` and is still valid days later, with nothing to keep
+alive and no way to silently lose it. The rotating path is for when the batch
+is too big for the fixed pool to feed. ⚠️ Note `proxies.txt`'s DataImpulse
+login now exits **Korea / UK / Israel**, not India, despite `__cr.in`.
+
 ### `--fast`: HTTP-only signup (cricmatch only)
 
 Skips Chromium entirely, ~10-20x faster. Flow: `GET /` for the csrf token +
