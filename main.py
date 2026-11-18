@@ -2843,7 +2843,7 @@ def http_fetch_csrf(session, site_url, proxy=None):
     return m.group(1)
 
 
-def http_register_call(session, csrf_token, acct, site_url, otp=""):
+def http_register_call(session, csrf_token, acct, site_url, otp="", timeout=20):
     """POST the register endpoint. `otp=""` triggers the SMS; a follow-up call
     with the real code verifies it -- same endpoint both times, confirmed live.
     Returns the parsed JSON body (or a synthetic error dict if the response
@@ -2875,7 +2875,7 @@ def http_register_call(session, csrf_token, acct, site_url, otp=""):
         "Referer": http_csrf_url(site_url),
         "Origin": _http_fast_origin(site_url),
     }
-    resp = session.post(register_url, data=data, headers=headers, timeout=20)
+    resp = session.post(register_url, data=data, headers=headers, timeout=timeout)
     return _http_json_or_error(resp)
 
 
@@ -2894,7 +2894,7 @@ def _http_json_or_error(resp):
                            f"{resp.text[:200]}"}
 
 
-def http_confirm_signup_otp(session, csrf_token, otp, phone, site_url):
+def http_confirm_signup_otp(session, csrf_token, otp, phone, site_url, timeout=20):
     """winclash's extra OTP step: the code is checked by its own endpoint
     BEFORE the register POST is repeated with it.
 
@@ -2917,11 +2917,11 @@ def http_confirm_signup_otp(session, csrf_token, otp, phone, site_url):
         "Origin": _http_fast_origin(site_url),
     }
     resp = session.post(url, data={"otp": otp, "phone": phone},
-                        headers=headers, timeout=20)
+                        headers=headers, timeout=timeout)
     return _http_json_or_error(resp)
 
 
-def http_verify_otp_endpoint(session, csrf_token, otp, site_url):
+def http_verify_otp_endpoint(session, csrf_token, otp, site_url, timeout=20):
     """spin24star's OTP step: the code goes to the site's own verify endpoint
     and THAT call completes the registration. There is no second register POST,
     unlike cricmatch's single_post or winclash's confirm-then-register.
@@ -2954,7 +2954,7 @@ def http_verify_otp_endpoint(session, csrf_token, otp, site_url):
         "Referer": http_csrf_url(site_url),
         "Origin": _http_fast_origin(site_url),
     }
-    resp = session.post(url, data=data, headers=headers, timeout=20)
+    resp = session.post(url, data=data, headers=headers, timeout=timeout)
     return _http_json_or_error(resp)
 
 
@@ -3097,7 +3097,72 @@ def http_is_phone_taken(resp_json):
     return "mobile number is already in use" in msg
 
 
+# How long the call that CREATES the account may take to answer. Every other
+# request here keeps 20s. khelofun, 2026-11-18 from 20:38: that one POST began
+# taking over 20s while the homepage still answered in ~6s through the same
+# proxy, and the account was created anyway -- all 8 signups reported
+# "OTP verify request failed: Read timed out" logged in fine afterwards, and
+# the operator, told they had failed, re-sent the same numbers and got
+# "already taken".
+HTTP_OTP_TIMEOUT_SECS = int(os.getenv("HTTP_OTP_TIMEOUT_SECS", "60"))
+# If it still does not answer, log in with the new credentials before calling
+# it a failure. Two tries, a pause apart, because a slow server may finish
+# creating the account a little after we stop waiting.
+HTTP_OTP_CONFIRM_LOGIN_TRIES = 2
+HTTP_OTP_CONFIRM_LOGIN_GAP_SECS = 10
+
+
+def _http_account_logs_in(signup_session, acct, site_url):
+    """Does the account we just tried to register exist? Answered the way a
+    person would check: log in with its username and password.
+
+    A FRESH session on the same proxy, not the signup one -- that session's
+    cookies are whatever the site set before the unanswered call, so it is in
+    no known state. Returns (True, message) on a real login, else
+    (False, the last reason)."""
+    reason = "no login attempted"
+    for attempt in range(HTTP_OTP_CONFIRM_LOGIN_TRIES):
+        if attempt:
+            time.sleep(HTTP_OTP_CONFIRM_LOGIN_GAP_SECS)
+        try:
+            check = http_session_for(None)
+            check.proxies = dict(signup_session.proxies or {})
+            csrf = http_fetch_csrf(check, site_url)
+            resp = http_login_call(check, csrf, acct["username"], acct["password"], site_url)
+        except (requests.RequestException, RuntimeError) as e:
+            reason = f"login check could not reach the site: {str(e)[:120]}"
+            continue
+        if resp.get("status") == 200:
+            return True, "the new account logs in"
+        reason = f"login check answered: {resp.get('message') or resp}"[:200]
+    return False, reason
+
+
 def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
+    """Redeem the SMS code (see _http_redeem_otp), and if the site never
+    answers, find out whether the account was created anyway rather than
+    reporting a failure for one that exists.
+
+    Only a site with a verified HTTP login can be checked; anywhere else the
+    original error is raised exactly as before. A check that cannot confirm
+    the account also re-raises the original error, with the check's answer
+    attached, so a genuinely failed signup still reads as one."""
+    try:
+        return _http_redeem_otp(session, csrf, acct, site_url, otp, register_json)
+    except requests.RequestException as e:
+        prof = profile_for(site_url)
+        if not prof.supports_http_login:
+            raise
+        logs_in, why = _http_account_logs_in(session, acct, site_url)
+        if not logs_in:
+            raise requests.RequestException(f"{e} [{why}]") from e
+        registered = prof.http_status_registered[0] if prof.http_status_registered else 200
+        return {"status": registered,
+                "message": (f"Registration confirmed by logging in -- the site did not "
+                            f"answer the OTP step ({type(e).__name__}), but {why}.")}
+
+
+def _http_redeem_otp(session, csrf, acct, site_url, otp, register_json):
     """Redeem the SMS code, whichever way this site does it. Returns the JSON
     of whichever call decides the outcome, so the caller judges it with one
     http_is_error().
@@ -3119,7 +3184,8 @@ def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
     prof = profile_for(site_url)
 
     if prof.http_otp_flow == "verify_endpoint":
-        verified = http_verify_otp_endpoint(session, csrf, otp, site_url)
+        verified = http_verify_otp_endpoint(session, csrf, otp, site_url,
+                                            timeout=HTTP_OTP_TIMEOUT_SECS)
         ok = _http_status_of(verified) in [str(c) for c in prof.otp_verify_ok_codes]
         # This endpoint answers in its OWN vocabulary -- spin24star's
         # statusCode 201 means REGISTERED -- and that collides head-on with the
@@ -3136,13 +3202,15 @@ def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
                             "The site refused the OTP code.")}
 
     if prof.http_otp_flow != "confirm_otp":
-        return http_register_call(session, csrf, acct, site_url, otp=otp)
+        return http_register_call(session, csrf, acct, site_url, otp=otp,
+                                  timeout=HTTP_OTP_TIMEOUT_SECS)
 
     phone = str(register_json.get("phone") or acct["phone"])
     confirmed = http_confirm_signup_otp(session, csrf, otp, phone, site_url)
     if http_is_error(confirmed, site_url):
         return confirmed
-    return http_register_call(session, csrf, acct, site_url, otp=otp)
+    return http_register_call(session, csrf, acct, site_url, otp=otp,
+                              timeout=HTTP_OTP_TIMEOUT_SECS)
 
 
 def http_signup_once(acct, submit=True, interactive=False, site_url=None, proxy=None,

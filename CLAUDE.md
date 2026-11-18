@@ -487,6 +487,20 @@ selectors are byte-identical (`#userNameid`/`#userEmailid`/`#pass_log_id`/
 (`.skip_right_img`) first. OTP selectors unverified. `supports_http_fast` stays
 `False`.
 
+⚠️ **A timed-out OTP step is not a failed signup (2026-11-18).** From 20:38
+that evening khelofun's account-creating POST (`/register` with the code) took
+over 20s to answer, while its homepage still loaded in ~6s through the same
+proxy. The bot reported "OTP verify request failed: Read timed out" on 9
+signups in a row, and **all 9 accounts existed** — each logged in, and the
+operator, told they had failed, re-sent the numbers and got "already taken".
+So `http_verify_signup_otp()` now gives that one call `HTTP_OTP_TIMEOUT_SECS`
+(60, env) and, if it still does not answer, **logs in with the new
+credentials** (`_http_account_logs_in()`, fresh session, same proxy, 2 tries)
+before deciding. Login works → success, with a note saying so; login fails →
+the original error, with the check's answer appended. Only on profiles with
+`supports_http_login` (cricmatch, khelofun, starexch); everywhere else the
+old behaviour is unchanged. The 9 rows were corrected to `success` by hand.
+
 **starexch555** — same white-label Laravel platform as cricmatch/khelofun, added
 2026-08-19 for a three-tab Google Sheet (balance / password change / multi-id
 wager). Confirmed live against a real account:
