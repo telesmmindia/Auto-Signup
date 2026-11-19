@@ -2,6 +2,15 @@
 
 Guidance for Claude Code working in this repo.
 
+## Incident log — ALWAYS (`INCIDENTS.md`)
+- **Before debugging any problem**, grep `INCIDENTS.md` for the site and the
+  exact error text — it has probably happened before, with the fix recorded.
+- **After every fix or diagnosis**, add an entry at the top of `INCIDENTS.md`
+  (template in the file): symptom with the exact error text, cause, seen
+  before?, fix (commit / env / restart), what to check if it returns. Do this
+  even when the answer is "site-side, nothing changed". Commit it with the fix.
+- No credentials, proxy passwords or full phone numbers — the repo is public.
+
 ## Communication style
 - Plain English. No jargon or acronyms without explanation.
 - Say what you're doing and why, briefly.
