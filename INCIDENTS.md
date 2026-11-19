@@ -26,6 +26,21 @@ Template:
 
 ---
 
+## 2026-11-19 — spin24star signup: 70–80s after the code; "Server Error" accounts existed
+- **Seen as:** log `OTP step got no answer after 60.1s (ReadTimeout)` then
+  `login check 1/2 (12s): account exists` — every success. Also
+  `OTP verify FAILED -- OTP rejected: Server Error` on #7515/#7520.
+- **Cause:** spin24star creates the account well within 60s but never answers
+  `/verifyOtpSignup`; its env had no `HTTP_OTP_TIMEOUT_SECS`, so the bot waited
+  the full default 60s. "Server Error" (Laravel 500) also came AFTER the
+  account was created — both such accounts log in.
+- **Seen before?** yes — the timeout half, same day (#7466/#7467).
+- **Fix:** `.env.spin24star`: `HTTP_OTP_TIMEOUT_SECS=15`, `TRIES=8`,
+  `GAP_SECS=5`. `http_verify_signup_otp()` now also checks by login when the
+  OTP step answers a bare "Server Error". Rows 7515/7520 set to `success`.
+- **If it comes back:** read the `login check i/N` lines; if the first check
+  is always "not yet", the 15s wait is too short for the site that day.
+
 ## 2026-11-19 — khelofun signup: each signup takes 2–3 minutes
 - **Seen as:** operators report 2–3 min per signup.
 - **Cause (measured):** khelofun's account-creating OTP call has not answered

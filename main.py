@@ -3163,22 +3163,37 @@ def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
     the account also re-raises the original error, with the check's answer
     attached, so a genuinely failed signup still reads as one."""
     t0 = time.time()
+    prof = profile_for(site_url)
+    checkable = prof.supports_http_login or prof.http_signup_login_check
+    registered = prof.http_status_registered[0] if prof.http_status_registered else 200
     try:
-        return _http_redeem_otp(session, csrf, acct, site_url, otp, register_json)
+        result = _http_redeem_otp(session, csrf, acct, site_url, otp, register_json)
     except requests.RequestException as e:
-        prof = profile_for(site_url)
         logging.getLogger("signup").info(
             f"{acct['username']}: OTP step got no answer after {time.time() - t0:.1f}s "
             f"({type(e).__name__})")
-        if not (prof.supports_http_login or prof.http_signup_login_check):
+        if not checkable:
             raise
         logs_in, why = _http_account_logs_in(session, acct, site_url)
         if not logs_in:
             raise requests.RequestException(f"{e} [{why}]") from e
-        registered = prof.http_status_registered[0] if prof.http_status_registered else 200
         return {"status": registered,
                 "message": (f"Registration confirmed by logging in -- the site did not "
                             f"answer the OTP step ({type(e).__name__}), but {why}.")}
+
+    # A bare "Server Error" (Laravel's 500 page) is not a verdict on the code:
+    # on spin24star 2026-11-19 both such signups (#7515, #7520) had created
+    # the account. So check by login, exactly as for a timeout.
+    msg = (http_message_of(result) or "").strip().rstrip(".").lower()
+    if checkable and http_is_error(result, site_url) and msg == "server error":
+        logging.getLogger("signup").info(
+            f"{acct['username']}: OTP step answered 'Server Error' -- checking by login")
+        logs_in, why = _http_account_logs_in(session, acct, site_url)
+        if logs_in:
+            return {"status": registered,
+                    "message": (f"Registration confirmed by logging in -- the OTP step "
+                                f"answered 'Server Error', but {why}.")}
+    return result
 
 
 def _http_redeem_otp(session, csrf, acct, site_url, otp, register_json):
