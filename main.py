@@ -40,6 +40,7 @@ Other options:
 """
 import argparse
 import json
+import logging
 import os
 import random
 import re
@@ -3125,10 +3126,14 @@ def _http_account_logs_in(signup_session, acct, site_url):
     cookies are whatever the site set before the unanswered call, so it is in
     no known state. Returns (True, message) on a real login, else
     (False, the last reason)."""
+    # Each try is logged with its timing (2026-11-19): operators reported
+    # signups taking 2-3 minutes and the log could not say where it went.
+    log = logging.getLogger("signup")
     reason = "no login attempted"
     for attempt in range(HTTP_OTP_CONFIRM_LOGIN_TRIES):
         if attempt:
             time.sleep(HTTP_OTP_CONFIRM_LOGIN_GAP_SECS)
+        t0 = time.time()
         try:
             check = http_session_for(None)
             check.proxies = dict(signup_session.proxies or {})
@@ -3136,8 +3141,13 @@ def _http_account_logs_in(signup_session, acct, site_url):
             resp = http_login_call(check, csrf, acct["username"], acct["password"], site_url)
         except (requests.RequestException, RuntimeError) as e:
             reason = f"login check could not reach the site: {str(e)[:120]}"
+            log.info(f"{acct['username']}: login check {attempt + 1}/{HTTP_OTP_CONFIRM_LOGIN_TRIES} "
+                     f"({time.time() - t0:.1f}s): could not reach the site")
             continue
-        if resp.get("status") == 200:
+        ok = resp.get("status") == 200
+        log.info(f"{acct['username']}: login check {attempt + 1}/{HTTP_OTP_CONFIRM_LOGIN_TRIES} "
+                 f"({time.time() - t0:.1f}s): {'account exists' if ok else 'not yet'}")
+        if ok:
             return True, "the new account logs in"
         reason = f"login check answered: {resp.get('message') or resp}"[:200]
     return False, reason
@@ -3152,10 +3162,14 @@ def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
     original error is raised exactly as before. A check that cannot confirm
     the account also re-raises the original error, with the check's answer
     attached, so a genuinely failed signup still reads as one."""
+    t0 = time.time()
     try:
         return _http_redeem_otp(session, csrf, acct, site_url, otp, register_json)
     except requests.RequestException as e:
         prof = profile_for(site_url)
+        logging.getLogger("signup").info(
+            f"{acct['username']}: OTP step got no answer after {time.time() - t0:.1f}s "
+            f"({type(e).__name__})")
         if not (prof.supports_http_login or prof.http_signup_login_check):
             raise
         logs_in, why = _http_account_logs_in(session, acct, site_url)

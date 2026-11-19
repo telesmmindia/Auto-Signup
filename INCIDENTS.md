@@ -26,6 +26,20 @@ Template:
 
 ---
 
+## 2026-11-19 — khelofun signup: each signup takes 2–3 minutes
+- **Seen as:** operators report 2–3 min per signup.
+- **Cause (measured):** khelofun's account-creating OTP call has not answered
+  within 20s on ANY success that day (all 216 notes say `ReadTimeout`), so
+  every signup waits 20s and then confirms by login. Each login check through
+  the mobile proxy costs ~8–14s, almost all of it the proxy opening a new
+  connection (even a 0 KB file took 5s). Plus SMS delivery and typing.
+- **Seen before?** yes — 2026-11-18 evening, khelofun create call >20s.
+- **Fix:** checks every 5s instead of 10 (`HTTP_OTP_CONFIRM_LOGIN_GAP_SECS=5`,
+  `TRIES=8` in `.env.khelofun.signup`). New log lines: `OTP code received`,
+  `OTP step got no answer after Ns`, `login check i/N (Ns): …`, `verify step
+  took Ns` — read those before tuning further.
+- **If it comes back:** the slow part is khelofun's create call (site-side).
+
 ## 2026-11-19 — khelofun signup: correct OTP → "Signup failed"
 - **Seen as:** `OTP verify FAILED -- OTP rejected: Something went wrong. Please
   request OTP again.` (36 of ~300 that day). Those accounts do NOT exist

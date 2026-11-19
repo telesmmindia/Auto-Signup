@@ -3422,7 +3422,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if session.use_fast:
+            # Timed (2026-11-19) so a slow signup shows where its minutes went.
+            logger.info(f"#{session.row_id} {session.acct['username']}: OTP code received, verifying")
+            _otp_t0 = time.monotonic()
             result = await loop.run_in_executor(None, _blocking_http_verify_otp, session, text)
+            logger.info(f"#{session.row_id} {session.acct['username']}: verify step took "
+                        f"{time.monotonic() - _otp_t0:.0f}s")
         else:
             result = await loop.run_in_executor(
                 _pw_executors[session.slot], _blocking_verify_otp, session, text)
