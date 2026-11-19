@@ -3108,8 +3108,12 @@ HTTP_OTP_TIMEOUT_SECS = int(os.getenv("HTTP_OTP_TIMEOUT_SECS", "60"))
 # If it still does not answer, log in with the new credentials before calling
 # it a failure. Two tries, a pause apart, because a slow server may finish
 # creating the account a little after we stop waiting.
-HTTP_OTP_CONFIRM_LOGIN_TRIES = 2
-HTTP_OTP_CONFIRM_LOGIN_GAP_SECS = 10
+# Env-tunable (2026-11-19): khelofun's create call now routinely runs past a
+# minute, so its bot waits only ~20s and then keeps checking by login (more
+# tries) -- a finished signup is confirmed in ~25s instead of ~80s, and the
+# total patience before calling it failed is no shorter than before.
+HTTP_OTP_CONFIRM_LOGIN_TRIES = int(os.getenv("HTTP_OTP_CONFIRM_LOGIN_TRIES", "2"))
+HTTP_OTP_CONFIRM_LOGIN_GAP_SECS = int(os.getenv("HTTP_OTP_CONFIRM_LOGIN_GAP_SECS", "10"))
 
 
 def _http_account_logs_in(signup_session, acct, site_url):
