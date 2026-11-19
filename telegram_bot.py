@@ -899,6 +899,7 @@ def _blocking_close_context(session):
     except Exception:
         pass
     session.context = None
+    _stop_otp_keepalive(session)
     session.page = None
     session.http_session = None
     session.http_csrf = None
@@ -1191,6 +1192,52 @@ def _blocking_http_register(session, phone):
     return {"ok": True, "digits": prof.http_otp_digits, "shot": None}
 
 
+# Keep a fast signup's connection open while the operator types the OTP.
+# The signup bots run on a ROTATING proxy that gives a new exit IP per
+# CONNECTION, and an idle tunnel dies somewhere between 60s and 120s (measured
+# for sticky.py, 2026-11-18). So a code typed after ~1 minute went out from a
+# DIFFERENT IP than the register call that sent the SMS. On khelofun,
+# 2026-11-19, 30 of the 36 "OTP rejected: Something went wrong. Please request
+# OTP again" refusals came more than ~60s after the OTP screen, and no success
+# came later than ~2 minutes. A zero-byte HEAD / every OTP_KEEPALIVE_SECS holds
+# the same connection, and so the same IP, until the code arrives. If the
+# refusals continue for late codes anyway, the site's OTP simply expires.
+OTP_KEEPALIVE_SECS = int(os.getenv("OTP_KEEPALIVE_SECS", "30"))
+OTP_KEEPALIVE_MAX_SECS = 30 * 60  # never beat forever on a session nobody closed
+
+
+def _start_otp_keepalive(session):
+    sess = session.http_session
+    if sess is None or OTP_KEEPALIVE_SECS <= 0:
+        return
+    _stop_otp_keepalive(session)
+    parts = urlsplit(session.site_url or BOT_SITE_URL)
+    root = f"{parts.scheme}://{parts.netloc}/"
+    stop = threading.Event()
+    deadline = time.monotonic() + OTP_KEEPALIVE_MAX_SECS
+
+    def beat():
+        while not stop.wait(OTP_KEEPALIVE_SECS) and time.monotonic() < deadline:
+            try:
+                sess.head(root, allow_redirects=False, timeout=15)
+            except Exception as e:
+                logger.info(f"#{session.row_id}: OTP keep-alive request failed: {str(e)[:120]}")
+
+    th = threading.Thread(target=beat, daemon=True, name=f"otp-keepalive-{session.row_id}")
+    session.otp_keepalive = (stop, th)
+    th.start()
+
+
+def _stop_otp_keepalive(session):
+    """Stop the keep-alive and WAIT for an in-flight beat, so the OTP call
+    never shares the requests.Session with it."""
+    ka = getattr(session, "otp_keepalive", None)
+    session.otp_keepalive = None
+    if ka:
+        ka[0].set()
+        ka[1].join(timeout=20)
+
+
 def _blocking_http_verify_otp(session, otp):
     """HTTP-fast counterpart to _blocking_verify_otp(): redeem the code on the
     SAME requests.Session. Goes through main.http_verify_signup_otp so the
@@ -1198,6 +1245,7 @@ def _blocking_http_verify_otp(session, otp):
     the code at /api2/v2/confirmSignupOtp before the register form is
     re-sent) share the CLI's code path rather than a second copy of it."""
     url = session.site_url or BOT_SITE_URL
+    _stop_otp_keepalive(session)
     try:
         verify_json = http_verify_signup_otp(
             session.http_session, session.http_csrf, session.acct, url, otp,
@@ -3343,6 +3391,8 @@ async def _submit_phone(update, chat_id, sub_id, session, phone, tag="", fallbac
         )
         return
     logger.info(f"#{session.row_id} {session.acct['username']}: OTP screen reached")
+    if session.use_fast:
+        _start_otp_keepalive(session)
     await update.message.reply_text(
         f"📩 [#{sub_id}] OTP sent to {phone}. Send the {result['digits']}-digit code you received."
     )

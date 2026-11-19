@@ -26,6 +26,26 @@ Template:
 
 ---
 
+## 2026-11-19 — khelofun signup: correct OTP → "Signup failed"
+- **Seen as:** `OTP verify FAILED -- OTP rejected: Something went wrong. Please
+  request OTP again.` (36 of ~300 that day). Those accounts do NOT exist
+  (login check: `Invalid Username or Password`), so the failure is real.
+- **Cause (likely):** late codes. 30 of 36 came >60s after the OTP screen;
+  no success came later than ~2 min. On the rotating mobile proxy an idle
+  connection dies after 60–120s, so a late code left from a NEW IP. Measured
+  that evening: idle 150s → new connection; with a HEAD / every 30s → same
+  connection. Not proven which of "new IP" or "OTP expired" khelofun objects to.
+- **Seen before?** partly — 2026-11-19 morning entry blamed the 9218… series;
+  the timing pattern covers those too (gaps 70–1967s).
+- **Fix:** `telegram_bot.py` keeps a fast signup's connection alive while
+  waiting for the OTP (`_start_otp_keepalive`, `OTP_KEEPALIVE_SECS`=30).
+  Patched in the repo and in the VPS's own diverged copy (backup
+  `telegram_bot.py.bak-keepalive-20261119`); khelofun, spin24star,
+  playcric365 and funcrash signup bots restarted.
+- **If it comes back:** compute OTP-screen→outcome gaps for the failures. If
+  late codes still fail with the keep-alive on, the OTP itself expires (~1–2
+  min) — enter codes faster; nothing in code can fix that.
+
 ## 2026-11-19 — khelofun signup: every signup fails instantly after one refusal
 - **Seen as:** chat `❌ Signup failed.` seconds after sending the number; log
   `Couldn't load the site (check the proxy?) ... ProxyError('Unable to connect
