@@ -507,8 +507,11 @@ So `http_verify_signup_otp()` now gives that one call `HTTP_OTP_TIMEOUT_SECS`
 credentials** (`_http_account_logs_in()`, fresh session, same proxy, 2 tries)
 before deciding. Login works → success, with a note saying so; login fails →
 the original error, with the check's answer appended. Only on profiles with
-`supports_http_login` (cricmatch, khelofun, starexch); everywhere else the
-old behaviour is unchanged. The 9 rows were corrected to `success` by hand.
+`supports_http_login` (cricmatch, khelofun, starexch) **or
+`http_signup_login_check`** (spin24star since 2026-11-19 — `POST /api2/login`
+with the username in `email`, set by `http_login_user_field`); everywhere
+else the old behaviour is unchanged. The 9 rows were corrected to `success`
+by hand.
 
 **starexch555** — same white-label Laravel platform as cricmatch/khelofun, added
 2026-08-19 for a three-tab Google Sheet (balance / password change / multi-id

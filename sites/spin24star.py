@@ -85,6 +85,18 @@ PROFILE = SiteProfile(
     # endpoint answers with is judged separately by otp_verify_ok_codes.
     http_status_otp_sent=[205],
     http_status_registered=[200],
+    # A /verifyOtpSignup that times out does NOT mean the signup failed: on
+    # 2026-11-19 two in a row timed out / lost the proxy and BOTH accounts
+    # existed. So, like khelofun, a timed-out OTP step logs in with the new
+    # credentials before deciding. Login is POST /api2/login with the username
+    # in `email` (its own #login_formkhelo handler), verified live that day:
+    # {"status":200,"message":"Login Success"}, and a wrong password gets
+    # {"status":201,"message":"Invalid Username or Password"}. Only this
+    # check is turned on -- supports_http_login would also claim an HTTP
+    # balance read, which is not mapped here.
+    http_login_path="/api2/login",
+    http_login_user_field="email",
+    http_signup_login_check=True,
     supports_casino=False,
     sel={
         # ---- signup ----

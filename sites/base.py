@@ -410,6 +410,17 @@ class SiteProfile:
     # Path the login form's JS POSTs to, used only when supports_http_login.
     http_login_path: str = "/login"
 
+    # The form field the login POST carries the username in. The cricmatch
+    # family sends "username"; spin24star's /api2/login sends it as "email"
+    # (read out of its own #login_formkhelo handler 2026-11-19).
+    http_login_user_field: str = "username"
+
+    # Confirm a signup whose OTP step never answered by logging in with the
+    # new credentials (main.http_verify_signup_otp). supports_http_login
+    # already implies it; this turns on ONLY that check, for a site whose
+    # HTTP login works but whose HTTP balance read has not been mapped.
+    http_signup_login_check: bool = False
+
     # Path that returns the logged-in account's wallet balance as JSON, used
     # only when supports_http_login.
     http_balance_path: str = "/api2/v2/getBalance"

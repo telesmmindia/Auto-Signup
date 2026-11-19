@@ -26,6 +26,25 @@ Template:
 
 ---
 
+## 2026-11-19 — spin24star signup: "Signup failed" after OTP, accounts existed
+- **Seen as:** chat `❌ Signup failed. (#7466)` / `(#7467)`; log
+  `OTP verify FAILED -- OTP verify request failed: ... /verifyOtpSignup
+  (Caused by ProxyError('Unable to connect to proxy', RemoteDisconnected(...`
+  and `... Read timed out. (read timeout=60)`.
+- **Cause:** the OTP step's request through the rotating DataImpulse mobile
+  proxy dropped / took >60s (khelofun's bot was hitting the same timeouts at
+  the same minutes). The site created both accounts anyway — both log in with
+  `{"status":200,"message":"Login Success"}`. spin24star had no login check,
+  so the bot called them failed.
+- **Seen before?** yes — same pattern on khelofun 2026-11-18 (9 "failed"
+  accounts that existed).
+- **Fix:** spin24star now confirms a timed-out OTP step by logging in
+  (`http_signup_login_check`, login `POST /api2/login` with the username in
+  `email`). Rows 7466/7467 corrected to `success` by hand. Bot restarted.
+- **If it comes back:** a "failed" with `Read timed out` / `ProxyError` on the
+  OTP step — log into the account before re-sending the number. If the
+  timeouts are constant, the mobile proxy is the slow part, not the site.
+
 ## 2026-11-19 — khelofun signup: slow to confirm, OTP not arriving
 - **Seen as:** signup ✅ came 1–1.5 min after sending the OTP; log
   `SUCCESS -- Registration confirmed by logging in -- the site did not answer

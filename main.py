@@ -2323,7 +2323,8 @@ def http_login_call(session, csrf_token, username, password, site_url):
     prof = profile_for(site_url)
     parts = urlsplit(site_url)
     login_url = f"{parts.scheme}://{parts.netloc}{prof.http_login_path}"
-    data = {"username": username, "password": password, "remember_me": "1", "_token": csrf_token}
+    data = {prof.http_login_user_field: username, "password": password, "remember_me": "1",
+            "_token": csrf_token}
     headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url,
                "Origin": _http_fast_origin(site_url)}
     resp = session.post(login_url, data=data, headers=headers, timeout=20)
@@ -3155,7 +3156,7 @@ def http_verify_signup_otp(session, csrf, acct, site_url, otp, register_json):
         return _http_redeem_otp(session, csrf, acct, site_url, otp, register_json)
     except requests.RequestException as e:
         prof = profile_for(site_url)
-        if not prof.supports_http_login:
+        if not (prof.supports_http_login or prof.http_signup_login_check):
             raise
         logs_in, why = _http_account_logs_in(session, acct, site_url)
         if not logs_in:
