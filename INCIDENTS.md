@@ -26,6 +26,24 @@ Template:
 
 ---
 
+## 2026-11-19 — khelofun signup: every signup fails instantly after one refusal
+- **Seen as:** chat `❌ Signup failed.` seconds after sending the number; log
+  `Couldn't load the site (check the proxy?) ... ProxyError('Unable to connect
+  to proxy', OSError('Tunnel connection failed: 401 Unauthorized`.
+- **Cause:** one register got `Something went wrong. Please try again` (#7479),
+  so the bot rested the main proxy (rotating DataImpulse mobile) for
+  `PROXY_BLOCK_REST_SECS=7200` and switched to the `/proxypool` backups — two
+  proxy-cheap logins whose credentials now answer `401 unauthorized`. Resting a
+  ROTATING proxy buys nothing (each connection is a new IP anyway).
+- **Seen before?** no (proxy-cheap logins worked 2026-11-11).
+- **Fix:** removed the dead proxy-cheap entries from
+  `bot_settings.khelofun.signup.json` (backup `.bak-dead-pool-20261119`),
+  restarted the bot (clears the in-memory rest). With an empty pool a rested
+  main proxy is still used. Separately, #7477 `OTP rejected: Something went
+  wrong. Please request OTP again` was a real failure (account does not log in).
+- **If it comes back:** test each `/proxypool` entry before trusting it; a
+  `401`/`407` from the tunnel is the proxy account, not the site.
+
 ## 2026-11-19 — spin24star signup: "Signup failed" after OTP, accounts existed
 - **Seen as:** chat `❌ Signup failed. (#7466)` / `(#7467)`; log
   `OTP verify FAILED -- OTP verify request failed: ... /verifyOtpSignup
