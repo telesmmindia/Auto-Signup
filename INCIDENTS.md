@@ -36,9 +36,10 @@ Template:
   proxy-cheap logins whose credentials now answer `401 unauthorized`. Resting a
   ROTATING proxy buys nothing (each connection is a new IP anyway).
 - **Seen before?** no (proxy-cheap logins worked 2026-11-11).
-- **Fix:** removed the dead proxy-cheap entries from
-  `bot_settings.khelofun.signup.json` (backup `.bak-dead-pool-20261119`),
-  restarted the bot (clears the in-memory rest). With an empty pool a rested
+- **Fix:** removed the dead proxy-cheap entries (all 401) from the
+  `/proxypool` of khelofun, cricmatch, playcric365 and spin24star (each
+  settings file backed up as `.bak-dead-pool-20261119`) and restarted all four
+  bots (also clears the in-memory rest). With an empty pool a rested
   main proxy is still used. Separately, #7477 `OTP rejected: Something went
   wrong. Please request OTP again` was a real failure (account does not log in).
 - **If it comes back:** test each `/proxypool` entry before trusting it; a
