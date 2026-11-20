@@ -47,7 +47,7 @@ Template:
   window "starexch signup" → `telegram_bot.py --env .env.starexch.signup`
   (fast on, DataImpulse mobile proxy, log `logs_starexch_signup.log`); window
   "starexch365 exch" → `exchange.py --env .env.starexch365.exchange`, accounts
-  tab `STAREXCH365 EXCH` (gid 1664754644) in the starexch workbook, residential
+  in the client's own sheet "STAREXCH 365", tab `exch` (gid 0), residential
   pool, concurrency 3, log `logs_starexch365_exchange.log`. Tab starts empty
   (0 accounts) — add USERNAME | PASSWORD rows, then `/relogin`.
 - **If it comes back:** no real signup yet — do one `/newacc` on a real number
