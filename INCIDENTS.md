@@ -26,6 +26,27 @@ Template:
 
 ---
 
+## 2026-11-20 — starexch signup: "btag se user create nhi ho rahe / signup reflect nhi ho rahe"
+- **Seen as:** client: signups not showing; `/export https://starexch365.com?btag=230853`
+  answered "No accounts to export."; "Signup failed. (#7621)".
+- **Cause:** accounts ARE created — 25 `success` rows (#7597–#7629) in the first
+  ~45 min, each confirmed by logging into the new account, all stored with
+  `referral_code=230853`. `/export`'s URL filter is an exact match and rows are
+  stored under `https://starexch555.com?btag=230853`, so the starexch365 URL
+  matches nothing. Failures: 4× "OTP rejected: Something went wrong. Please
+  request OTP again." (site refused the code in 2–5s) and 2× proxy connection
+  errors. Whether the site CREDITS the btag cannot be seen from a player
+  account (no referral info on any logged-in page) — only the affiliate
+  dashboard shows it. Our flow walks `/?btag=` → `/setcookie` and holds the
+  `btag` cookie on both register POSTs, but through the rotating proxy each
+  request leaves from a different IP, unlike a real visitor.
+- **Seen before?** similar — winclash 2026-09-04 (cookie set but not credited
+  until the `/setcookie` route was walked; that route IS walked here).
+- **Fix:** none yet. Use `/export` or `/export https://starexch555.com?btag=230853`.
+- **If it comes back:** compare with ONE manual browser signup via the
+  starexch365 link — if that shows in the dashboard and ours don't, move the
+  bot to fixed residential IPs (one IP per signup) and/or `/fast off`.
+
 ## 2026-11-20 — signup bots: 2–3 min per signup; per-bot OTP settings ignored
 - **Seen as:** operators report 2–3 min per signup. Logs: `OTP step got no
   answer after 60.1s` and `login check 1/2` on khelofun, spin24star and
