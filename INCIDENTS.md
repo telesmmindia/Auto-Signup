@@ -26,6 +26,29 @@ Template:
 
 ---
 
+## 2026-11-20 — signup bots: 2–3 min per signup; per-bot OTP settings ignored
+- **Seen as:** operators report 2–3 min per signup. Logs: `OTP step got no
+  answer after 60.1s` and `login check 1/2` on khelofun, spin24star and
+  starexch — whose env files set `HTTP_OTP_TIMEOUT_SECS=15/20` and
+  `HTTP_OTP_CONFIRM_LOGIN_TRIES=8`.
+- **Cause:** our code. `telegram_bot.py` imports `main` BEFORE it loads the
+  `--env` file, and `main` copies those settings into constants at import, so
+  every bot ran on main's defaults (60s, 2 checks, 10s apart). The 2026-11-19
+  tuning never took effect. Measured median per signup (logs): ~12–26s to the
+  OTP screen, ~30–35s waiting for the SMS + typing, ~66–72s on the code step
+  (60s of it waiting for an answer the site never sends), ~12–23s between
+  signups.
+- **Seen before?** yes — 2026-11-19 entries tuned these values; they were
+  never applied.
+- **Fix:** `telegram_bot.py` re-applies `HTTP_OTP_*`, `HEDGE_MAX_BET_CLICKS`,
+  `WAF_TOKEN_TTL_SECS` from the env onto `main` right after `load_dotenv`.
+  Patched in the VPS's own copy (backup `telegram_bot.py.bak-envfix-20261120`);
+  khelofun, spin24star, starexch signup restarted. First signup after: `no
+  answer after 20.0s`, `login check 2/8`, verify step 40s (was 66–77s).
+- **If it comes back:** compare the `after Ns` / `check i/N` numbers in the log
+  with the env file. The rest (SMS + typing, the site not answering the code
+  step) is not ours to shorten.
+
 ## 2026-11-20 — "Instamatch exch bot": every ID "Invalid Username or Password"
 - **Seen as:** `/relogin` → `✅ 0 logged in, ❌ 5 failed`; `/ids` → each of the
   5 IDs `Invalid Username or Password` (log: `❌ <id>: Invalid Username or

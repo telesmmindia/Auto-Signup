@@ -198,6 +198,18 @@ if "--env" in sys.argv:
 # an explicit --env file for any key both files define (dotenv's default is
 # override=False, i.e. first load wins).
 load_dotenv(_env_file, override=True)
+# main.py read these into module constants at IMPORT time -- before the line
+# above -- so a per-bot value in the --env file was silently ignored and every
+# bot ran on main's defaults (found 2026-11-20: khelofun/spin24star/starexch
+# set a 15-20s OTP wait and 8 login checks, the logs showed 60s and "1/2").
+# main reads them as globals at call time, so re-binding them here is enough.
+import main as _main_mod
+for _k in ("HTTP_OTP_TIMEOUT_SECS", "HTTP_OTP_CONFIRM_LOGIN_TRIES",
+           "HTTP_OTP_CONFIRM_LOGIN_GAP_SECS", "HEDGE_MAX_BET_CLICKS"):
+    if os.environ.get(_k, "").strip():
+        setattr(_main_mod, _k, int(os.environ[_k]))
+if os.environ.get("WAF_TOKEN_TTL_SECS", "").strip():
+    _main_mod._WAF_TOKEN_TTL_SECS = int(os.environ["WAF_TOKEN_TTL_SECS"])
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 # The fixed top-level role(s). Set via .env, not changeable from the bot
 # itself -- a compromised admin session should never be able to promote itself
