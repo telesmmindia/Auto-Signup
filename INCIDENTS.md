@@ -42,7 +42,14 @@ Template:
   taken."}}`, judged as an error); browser `--no-submit` filled the form in
   12.5s. New `.env.starexch.signup.example`; point the bot at
   `https://starexch555.com?btag=230853`, never the starexch365 URL. The
-  exchange side is the starexch555 exchange bot already running.
+  exchange side runs as its own bot.
+- **Deployed 2026-11-20 on the VPS** (tmux `autosignup`, auto-restart loops):
+  window "starexch signup" → `telegram_bot.py --env .env.starexch.signup`
+  (fast on, DataImpulse mobile proxy, log `logs_starexch_signup.log`); window
+  "starexch365 exch" → `exchange.py --env .env.starexch365.exchange`, accounts
+  tab `STAREXCH365 EXCH` (gid 1664754644) in the starexch workbook, residential
+  pool, concurrency 3, log `logs_starexch365_exchange.log`. Tab starts empty
+  (0 accounts) — add USERNAME | PASSWORD rows, then `/relogin`.
 - **If it comes back:** no real signup yet — do one `/newacc` on a real number
   and log into it. If the code step fails, re-check the 205/200 statuses.
 
