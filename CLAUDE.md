@@ -3730,6 +3730,24 @@ accounts tab** — the bot writes balances into column C, and
 `balance_checker.py` writes column C too, so a shared tab would have the two
 processes overwrite each other.
 
+### instamatch88: the same platform, ONE route moved (`InstamatchSite`)
+
+Added 2026-11-20 after the "Instamatch exch bot" (the starexch365 instance,
+`.env.starexch365.exchange`) answered "Invalid Username or Password" for
+every ID: the client's IDs were instamatch88 accounts and the bot pointed at
+starexch555. instamatch.com / instamatch365.com 301 to instamatch88.com.
+Read live: login, balance, `/ex/competition/<id>`, `/ex/event-details/<id>`,
+the odds provider (odds4.starlingpay.co.uk, event TYPE in the path), and the
+sixteen-field placeBet are khelstake's; a second `limit` input and a
+`content_id` field are rendered but **commented out**, so the first blob is
+the live one. The only difference is the sport pages,
+`/sports-exchange/<sport>` (`/exchange/cricket-exchange` 404s), so
+`InstamatchSite` subclasses `KhelstakeSite` and overrides `sports` alone.
+Driven read-only with the 5 real IDs (~₹5,000 each): series, matches, event
+page, live odds, unmatched panel. **No bet placed yet** — 🧪 Test 1 ID first.
+⚠️ "Invalid Username or Password" on EVERY ID at once is a wrong-site
+symptom before it is a wrong-password one.
+
 ### The khelo family is a THIRD platform (`exchange_sites.Khelo24Site`)
 
 Added 2026-11-03 for four sites the client asked for at once:

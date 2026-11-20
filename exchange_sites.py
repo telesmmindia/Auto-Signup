@@ -480,6 +480,32 @@ class KhelstakeSite(ExchangeSite):
         return len(bet_ids) - len(errors), errors
 
 
+class InstamatchSite(KhelstakeSite):
+    """instamatch88 (instamatch.com / instamatch365.com 301 here): the
+    khelstake/starexch Laravel platform with ONE route moved.
+
+    Read live 2026-11-20, logged out and with the client's own IDs: login is
+    `POST /login`, balance `/api2/v2/getBalance`, `/ex/competition/<id>` and
+    `/ex/event-details/<id>` parse with the shared parsers (19 cricket
+    series, Match Odds with both runners, a 400-char limit blob), the odds
+    provider is odds4.starlingpay.co.uk with the event TYPE in the path (the
+    gamerstechnologies branch sits behind `if ("" == 1)`, dead code), and
+    placeBet sends the same sixteen fields, 205 = routine check. The page
+    renders a second `limit` input and a `content_id` field, but both are
+    commented out (`// '<input ...`), so the first blob is the live one.
+
+    The only difference: the sport pages are `/sports-exchange/<sport>`;
+    `/exchange/cricket-exchange` 404s. placeBet/cancelbet unexercised here.
+    """
+
+    key = "instamatch"
+    sports = {
+        "cricket": ("Cricket", "🏏", "/sports-exchange/cricket"),
+        "football": ("Football", "⚽", "/sports-exchange/football"),
+        "tennis": ("Tennis", "🎾", "/sports-exchange/tennis"),
+    }
+
+
 # ═══════════════════════════════════════════════════════════════════════
 #  playinmatch99 -- the "jeetwin" exchange white-label
 # ═══════════════════════════════════════════════════════════════════════
@@ -1364,6 +1390,7 @@ _BY_HOST = {
     # read-only, 2026-11-02 -- see the class docstring), so a later change
     # to the fallback cannot silently move a verified site off its adapter.
     "cricmatch247.com": KhelstakeSite,
+    "instamatch88.com": InstamatchSite,
     # The "khelo" family: the jeetwin template's DESKTOP routes. These
     # answer NEITHER platform's tell (both /exchange/cricket-exchange and
     # /mobile/sports 404), so without these lines they would fall through
@@ -1388,6 +1415,7 @@ _BY_BRAND = {
     "khelstake": KhelstakeSite,
     "starexch": KhelstakeSite,
     "cricmatch": KhelstakeSite,
+    "instamatch": InstamatchSite,
     # Same digit-rotation rule: khelo24bet7 -> khelo24bet, khelosports77 ->
     # khelosports, and so on, so a brand that moves domain by changing the
     # trailing digits keeps its adapter.

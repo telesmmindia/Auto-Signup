@@ -26,6 +26,28 @@ Template:
 
 ---
 
+## 2026-11-20 — "Instamatch exch bot": every ID "Invalid Username or Password"
+- **Seen as:** `/relogin` → `✅ 0 logged in, ❌ 5 failed`; `/ids` → each of the
+  5 IDs `Invalid Username or Password` (log: `❌ <id>: Invalid Username or
+  Password`).
+- **Cause:** wrong site, not wrong passwords. The Telegram bot is the
+  starexch365 exchange instance (`.env.starexch365.exchange`), pointed at
+  starexch555 — but the client's sheet holds **instamatch88.com** IDs
+  (instamatch.com / instamatch365.com 301 there). On instamatch88 all 5 log
+  in with ~₹5,000 each. instamatch88 is the khelstake/starexch Laravel
+  platform with one route moved: sport pages are `/sports-exchange/<sport>`
+  (`/exchange/cricket-exchange` 404s).
+- **Seen before?** no.
+- **Fix:** `exchange_sites.InstamatchSite` (KhelstakeSite with the sport
+  routes changed; host + brand registered). VPS env now
+  `EXCHANGE_SITE_URL=https://instamatch88.com`, `EXCHANGE_SITE_NAME=instamatch88`
+  (backups `*.bak-20261120-insta`); bot restarted → `Login: 5 OK, 0 failed`.
+  Read-only check through the adapter: 19 cricket series, matches, event page
+  (400-char limit blob, Match Odds), live odds OPEN, unmatched list empty.
+- **If it comes back:** an "Invalid Username or Password" on EVERY ID means
+  ask which site the IDs belong to before touching passwords. No bet placed
+  on instamatch88 yet — run 🧪 Test 1 ID first.
+
 ## 2026-11-20 — starexch365 (new client link): signup + exchange set-up
 - **Seen as:** request for a signup and exchange bot for
   `starexch365.com?btag=230853`.
