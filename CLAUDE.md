@@ -541,8 +541,13 @@ wager). Confirmed live against a real account:
 - `supports_casino=False`, and **the tournament cannot simply be pointed at this
   site** — see the next section. `supports_login=True` carries the verified
   login on its own (the two flags were split 2026-08-19 precisely for this).
-- Signup/OTP selectors were **never inspected** — the ones in the profile are
-  inherited cricmatch guesses, a starting point for `inspect_form.py`, nothing more.
+- **Signup checked 2026-11-20** (for the client link `starexch365.com?btag=230853`
+  — **starexch365 is only a 301 to starexch555**, every path). The
+  `/append/loginpp` form and register handler are cricmatch's byte for byte
+  bar host/logos/token, so the selectors are confirmed and `--fast` is on with
+  `http_status_otp_sent=[205]`/`http_status_registered=[200]`. Point the bot at
+  `https://starexch555.com?btag=230853` — a POST to starexch365 would 301 into
+  a GET. Config: `.env.starexch.signup.example`. No real SMS signup yet.
 - Config: `.env.starexch.balance` / `.env.starexch.password` /
   `.env.starexch.tournament`, all three pointing at one workbook but **different
   tab gids**, sharing `bot_settings.starexch.json` and using

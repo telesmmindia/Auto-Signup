@@ -35,10 +35,19 @@ Ezugi-client baccarat, whose table markup the engine cannot drive at all, and
 the real Evolution tables it can -- picking the wrong provider silently lands
 on the wrong one, which is why casino_lobby_path pins ?p=evolution.
 
+Signup: CHECKED 2026-11-20, for the starexch365.com?btag=230853 client link.
+starexch365.com is not a separate site -- every path on it 301s to the same
+path on starexch555.com, and the btag then goes through starexch555's own
+/?btag= -> 302 /setcookie route and lands as a `btag` cookie. The signup form
+ships in /append/loginpp exactly as cricmatch's does, and with the hostname,
+logos, customer-care number and session token masked the two popups are
+IDENTICAL, register handler included: POST /register {username, email,
+password, phone, otp, _token}; status 200 = registered, 205 = OTP sent (show
+the popup), 201 = refusal as a {field: reason} object, anything else = a
+refusal in `message`. So the selectors below are cricmatch's verified ones and
+the fast path uses cricmatch's explicit statuses.
+
 NOT verified, deliberately left False:
-  * signup (register modal / OTP) -- never inspected on this site. The selectors
-    below are inherited from the cricmatch template as a starting point for
-    inspect_form.py; treat them as unconfirmed guesses.
   * supports_free_number -- /send_otp_touser never probed here.
 """
 from .base import SiteProfile
@@ -73,7 +82,14 @@ PROFILE = SiteProfile(
     # Evolution table.
     casino_lobby_path="/live-casino/?p=evolution",
     casino_tile_mode="go_to_casino_live",
-    supports_http_fast=False,
+    # Same register code as cricmatch (see the module docstring), so the same
+    # three-request flow: GET the tracked root (btag cookie + csrf) -> POST
+    # /register with otp="" -> POST /register with the code. The statuses MUST
+    # be explicit: refusals carry no message_class, so the message_class
+    # convention would read every refusal as "OTP sent".
+    supports_http_fast=True,
+    http_status_otp_sent=[205],
+    http_status_registered=[200],
     supports_free_number=False,
 
     # Confirmed live 2026-08-19.
@@ -89,7 +105,8 @@ PROFILE = SiteProfile(
     supports_http_change_password=True,
 
     sel={
-        # ---- signup: inherited from the cricmatch template, UNCONFIRMED here.
+        # ---- signup: identical to cricmatch's /append/loginpp markup and
+        # register handler, checked 2026-11-20 (see the module docstring).
         "open_modal": [".registerUserData", "button.headerjoinBtn",
                        "button.cls_reg_btn", ".join__btn"],
         "close_popup": [".mnPopupClose", ".pgSoftClsBtn", ".support_popup_close",

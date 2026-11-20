@@ -26,6 +26,26 @@ Template:
 
 ---
 
+## 2026-11-20 — starexch365 (new client link): signup + exchange set-up
+- **Seen as:** request for a signup and exchange bot for
+  `starexch365.com?btag=230853`.
+- **Cause:** not a new site. Every starexch365 path answers `301` to the same
+  path on **starexch555.com**; the btag then goes `/?btag=` → `302 /setcookie`
+  → `btag` cookie, exactly as on starexch555. starexch555's signup form
+  (`/append/loginpp`) and register handler are identical to cricmatch's once
+  host/logos/token are masked — they had never been checked before.
+- **Seen before?** no.
+- **Fix:** `sites/starexch.py` signup marked checked, `supports_http_fast=True`
+  with `http_status_otp_sent=[205]`/`http_status_registered=[200]`. Verified
+  without an SMS: fast path got csrf + btag cookie and a real validator refusal
+  (`{"status":201,"message":{"username":"The username has already been
+  taken."}}`, judged as an error); browser `--no-submit` filled the form in
+  12.5s. New `.env.starexch.signup.example`; point the bot at
+  `https://starexch555.com?btag=230853`, never the starexch365 URL. The
+  exchange side is the starexch555 exchange bot already running.
+- **If it comes back:** no real signup yet — do one `/newacc` on a real number
+  and log into it. If the code step fails, re-check the 205/200 statuses.
+
 ## 2026-11-19 — spin24star signup: 70–80s after the code; "Server Error" accounts existed
 - **Seen as:** log `OTP step got no answer after 60.1s (ReadTimeout)` then
   `login check 1/2 (12s): account exists` — every success. Also
