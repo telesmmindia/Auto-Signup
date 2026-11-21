@@ -205,7 +205,8 @@ load_dotenv(_env_file, override=True)
 # main reads them as globals at call time, so re-binding them here is enough.
 import main as _main_mod
 for _k in ("HTTP_OTP_TIMEOUT_SECS", "HTTP_OTP_CONFIRM_LOGIN_TRIES",
-           "HTTP_OTP_CONFIRM_LOGIN_GAP_SECS", "HEDGE_MAX_BET_CLICKS"):
+           "HTTP_OTP_CONFIRM_LOGIN_GAP_SECS", "HTTP_PAGE_TIMEOUT_SECS",
+           "HEDGE_MAX_BET_CLICKS"):
     if os.environ.get(_k, "").strip():
         setattr(_main_mod, _k, int(os.environ[_k]))
 if os.environ.get("WAF_TOKEN_TTL_SECS", "").strip():

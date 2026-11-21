@@ -2752,6 +2752,18 @@ def http_apply_waf_token(session, site_url, token):
     session.cookies.set("aws-waf-token", token, domain=host, path="/")
 
 
+# How long to wait for a page over plain HTTP. 20s was the hard-coded value
+# and stays the default, so nothing changes on a site reached over a fast IP.
+# Env-tunable (2026-11-21): the rotating DataImpulse MOBILE gateway opens a new
+# tunnel per connection, and measured from the VPS that day khelofun's homepage
+# came back in 5.0s / 7.0s / 8.5s / 18.9s -- i.e. a fetch that works fine most
+# of the time sits right on the 20s edge and randomly loses the whole signup
+# with "Couldn't load the site (check the proxy?) ... Read timed out", burning
+# the operator's phone number for a request that was merely slow (#7637).
+# Raising it costs only waiting; it cannot turn a refusal into a success.
+HTTP_PAGE_TIMEOUT_SECS = int(os.getenv("HTTP_PAGE_TIMEOUT_SECS", "20"))
+
+
 def http_get_page(session, url, site_url=None, proxy=None):
     """GET a page over plain HTTP, clearing an AWS WAF wall on the way if one
     turns up. Returns the requests Response.
@@ -2772,13 +2784,14 @@ def http_get_page(session, url, site_url=None, proxy=None):
     # same plain GET, same headers, same timeout. Nothing about cricmatch's or
     # starexch's HTTP paths changes because winclash needed this.
     if not profile_for(site).waf_on_navigation:
-        return session.get(url, timeout=20)
+        return session.get(url, timeout=HTTP_PAGE_TIMEOUT_SECS)
 
     token = cached_waf_token(site, proxy)
     if token:
         http_apply_waf_token(session, site, token)
 
-    resp = session.get(url, headers=_HTTP_NAV_HEADERS, timeout=25)
+    resp = session.get(url, headers=_HTTP_NAV_HEADERS,
+                       timeout=HTTP_PAGE_TIMEOUT_SECS + 5)
     if not resp.headers.get("x-amzn-waf-action"):
         return resp
 
@@ -2801,7 +2814,8 @@ def http_get_page(session, url, site_url=None, proxy=None):
     http_apply_waf_token(session, site, token)
     cache_waf_token(site, token, proxy)
 
-    resp = session.get(url, headers=_HTTP_NAV_HEADERS, timeout=25)
+    resp = session.get(url, headers=_HTTP_NAV_HEADERS,
+                       timeout=HTTP_PAGE_TIMEOUT_SECS + 5)
     if resp.headers.get("x-amzn-waf-action"):
         forget_waf_token(site, proxy)
         raise RuntimeError("AWS WAF is still challenging after presenting a "

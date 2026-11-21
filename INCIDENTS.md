@@ -26,6 +26,47 @@ Template:
 
 ---
 
+## 2026-11-21 — khelofun + starexch signup: "slow and OTP not coming"
+- **Seen as:** operators report slow signups and no OTP. Log: repeated `OTP
+  screen reached` with **no** following `OTP code received` (#7630 #7631 #7634
+  #7635 #7636 #7638 all sat at `generated`), plus one `FAILED -- Couldn't load
+  the site (check the proxy?): ... Read timed out. (read timeout=20)` (#7637).
+- **Cause:** three things, only one of them ours.
+  1. **The numbers.** Every attempt that day used the **9218… series**, which
+     was already flagged on 2026-11-19 as the series khelofun answers "OTP
+     sent" for without delivering. Measured over the last 3 days: 9218… =
+     **32%** success (11-19) and **11%** (11-21, 1 of 9); every other series
+     that week ran **50–94%**, most 70–90%. Not ours — the site accepts the
+     register call and no SMS arrives.
+  2. **Each number was sent to BOTH bots within ~3 min** (3 numbers covered
+     all 9 attempts: starexch then khelofun on the same number). Two sites
+     each text the same phone, so a code can't be matched to the bot waiting
+     for it. Operator workflow, not config — both bots have **empty** phone
+     pools, so numbers are typed by hand.
+  3. **"Slow" is the rotating mobile proxy, not the site.** Measured from the
+     VPS that afternoon, khelofun homepage through `gw.dataimpulse.com:823`:
+     **5.0s / 7.0s / 8.5s / 18.9s** (IP quality fine — Jio mobile,
+     `proxy:false hosting:false`, new IP per connection, no 407). The site
+     itself was **fast**: the one signup that got a code verified in **3s**
+     (vs the 60s ReadTimeouts of 11-19).
+- **Seen before?** yes — 2026-11-19 ("OTP not arriving", same 9218… series)
+  and 2026-11-19 ("slow", same mobile proxy). Both recurred unchanged.
+- **Fix:** the 20s page fetch sat right on the proxy's 18.9s worst case and
+  was losing whole signups (and the operator's number) to a timeout, so it is
+  now env-tunable: `HTTP_PAGE_TIMEOUT_SECS` (**default 20, unchanged**) in
+  `main.py:http_get_page`, set to **45** in `.env.khelofun.signup` and
+  `.env.starexch.signup`. ⚠️ It also had to be added to `telegram_bot.py`'s
+  post-`load_dotenv` re-bind list or it would have been **silently ignored**,
+  exactly as 2026-11-20's entry describes — verified: 20 before the re-bind,
+  45 after. Patched in the VPS's own diverged copy (backup
+  `telegram_bot.py.bak-pagetimeout-20261121`); both bots restarted 15:15.
+  **Nothing was changed for the OTP problem — it is the number series.**
+- **If it comes back:** check the number series FIRST (per-series success rate
+  from `accounts.db`), before touching proxies or code — rest the 9218…
+  numbers ~30 min and switch series. Don't feed one number to two bots. If
+  "slow" is the complaint, time the homepage through the proxy
+  (`curl -x ... -w %{time_total}`) before blaming the site.
+
 ## 2026-11-20 — starexch signup: "btag se user create nhi ho rahe / signup reflect nhi ho rahe"
 - **Seen as:** client: signups not showing; `/export https://starexch365.com?btag=230853`
   answered "No accounts to export."; "Signup failed. (#7621)".
