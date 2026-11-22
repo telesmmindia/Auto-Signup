@@ -1040,6 +1040,44 @@ three requests per signup.
   raw reply still reaches `result["messages"]`, so it will say so rather
   than fail silently.
 
+### spin24star's Stock Market bot (`.env.spin24star.stockmarket`, 2026-11-22)
+
+Login and live casino were unmapped on spin24star until this bot. **Its casino
+side is winclash's platform** (`jeet_session` cookie, `.casinoLink` tiles,
+`/homepageGames`), even though signup looks Laravel-ish, so the bot runs on
+winclash's route with no new engine path:
+- **Login:** the visible `button.rj__login` opens `#login_khelo_username` /
+  `#login_khelo_password` / `#login_formkhelo` (`POST /api2/login`, username
+  in `email`). Ignore `#user_login` (hidden legacy form) and `login_page()`'s
+  `#app_1`/`#login_p_username` (not in the page at all). The snackbar shows
+  "Please Wait..." and "Login Success", hence `benign_texts`.
+- **Auth check:** `GET /api/getBalance` → 401 logged out, `{"status":200,
+  "balance":{…}}` logged in. **GET-only** — a POST is 405 — which is why
+  `SiteProfile.http_balance_method` exists (every other site POSTs).
+- **Tables open by launch URL**, `casino_launch_mode="direct_game_url"`: the
+  logged-in `.casinoLink` handler builds winclash's
+  `/casinoRedirect?q=<id>&provider=evolution&type=casino` (logged out it is
+  stubbed to `login_page()`, the playcric365 trap). **Stock Market is id
+  1584** and in the site's own catalogue (`POST
+  /home/get_casinonew_filter_data`, `filter_value[]=evolution`, anonymous),
+  so the Evolution-lobby hop is skipped. Baccarat A/B are 86/87.
+- **The WAF walls page loads after a few automated logins from one IP**
+  (405 + captcha on `/?q=<id>`, `/homepageGames`, `/api/getBalance`), so
+  `waf_on_navigation=True` and the bot needs `CAPSOLVER_API_KEY` and a FIXED
+  proxy IP. ⚠️ **`http_waf_on_navigation=False` is load-bearing**: without it
+  the same flag would switch the live `--fast` signup bot's `http_get_page()`
+  to navigation headers and CapSolver solves through its rotating proxy,
+  where a token is useless.
+- Logged out, that WAF also captchas `login()`'s own balance probe, which
+  made a wrong password read as "AWS WAF refused the login request". `login()`
+  now ignores probe-only WAF hits when the site shows a real message.
+
+`verify_stockmarket.py --url https://spin24star.com/` **PASSED** twice
+(83-93s to `StockMarket00001`, UP/DOWN spots and cash-out present, 3-5
+windows a minute), the second time through a solved wall. ⚠️ **No bet placed
+yet** — every test account held ₹0, and at ₹0 `read_game_balance` came back
+empty. Fund two accounts, `/run <pair> 10 1`, read `/runlog` first.
+
 **winclash** — added 2026-08-29, and the first site here that is **not** the
 cricmatch/khelofun/starexch white-label Laravel template. Everything below was
 read live out of the page's own inline JavaScript; no account was created
@@ -1700,7 +1738,8 @@ Production layout: `.env.cricmatch` (signup), `.env.spin24star` (signup),
 (gameplay), `.env.stockmarket` (stockmarket), `.env.khelofun.stockmarket`
 (stockmarket), `.env.winclash.stockmarket` (stockmarket),
 `.env.winclash.gameplay` (gameplay), `.env.password` (password),
-`.env.funcrash.signup` (signup).
+`.env.funcrash.signup` (signup), `.env.spin24star.stockmarket` (stockmarket,
+template added 2026-11-22 — needs its own bot token before it can run).
 
 **`--env` is parsed from `sys.argv` at module level and loaded with
 `load_dotenv(_env_file, override=True)`. The `override=True` is load-bearing:**

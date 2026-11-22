@@ -3,7 +3,17 @@ khelocdn). Signup selectors captured live via inspect_form.py --url. Its
 register endpoint is guarded by an AWS WAF CAPTCHA in the BROWSER (handled
 generically by the engine's CapSolver path) -- but not over plain HTTP, which
 is why supports_http_fast is on since 2026-11-12; see the flag's comment
-below. Login/casino markup is NOT inspected, so supports_casino=False."""
+below.
+
+Login + live casino mapped 2026-11-22 for a Stock Market bot, read off the
+site's own pages and JS (logged out AND logged in -- the tile handler is
+stubbed to `login_page()` while logged out, same trap as playcric365). The
+casino half is winclash's platform, not the Laravel template's: tiles are
+`.casinoLink` with data-link/data-provider, and the logged-in handler builds
+/casinoRedirect?q=<id>&provider=<prov>&type=casino -- the profile's default
+casino_launch_path -- so the engine's direct_game_url route applies as is.
+Game ids come from the site's own POST /home/get_casinonew_filter_data
+(filter_value[]=evolution, 184 titles, answers anonymously)."""
 from .base import SiteProfile
 from .cricmatch import GENERIC_RESULT_SELECTORS
 
@@ -97,7 +107,55 @@ PROFILE = SiteProfile(
     http_login_path="/api2/login",
     http_login_user_field="email",
     http_signup_login_check=True,
-    supports_casino=False,
+
+    # ---- login + live casino (Stock Market bot), mapped 2026-11-22 ----
+    # The header LOGIN button (button.rj__login, two in the DOM, one visible)
+    # opens the #login_khelo_* form; driven in headless Chromium that day.
+    # Ignore #user_login and login_page()'s #app_1/#login_p_username: the
+    # first is a hidden legacy form and the second is not in the page at all.
+    supports_login=True,
+    supports_casino=True,
+    # The snackbar login() scrapes for a rejection also shows "Please
+    # Wait..." the moment LOGIN is clicked and "Login Success" when it works
+    # (the #login_formkhelo handler's own notify() calls) -- winclash's trait
+    # exactly, so the same filter.
+    benign_texts=["please wait", "login success"],
+    # LOAD-BEARING. Without an auth check login() falls back to the header
+    # indicator, which the white-labels here have shown visible while logged
+    # out. GET /api/getBalance answers 401 "Unauthorized." logged out and
+    # {"status":200,"balance":{...}} logged in (measured 2026-11-22), which
+    # is exactly the shape the in-page check accepts. It is GET-only -- a
+    # POST is 405 -- hence http_balance_method. supports_http_login stays
+    # False: this check needs the browser session only.
+    verify_auth_in_page=True,
+    http_balance_path="/api/getBalance",
+    http_balance_method="GET",
+    # The AWS WAF walls PAGE LOADS too once an IP has done a few automated
+    # logins (measured 2026-11-22 from one laptop IP: the first verify run
+    # was served clean, a few logins later the post-login page /?q=<id>,
+    # /homepageGames and /api/getBalance all answered 405 + captcha). So the
+    # login/casino path clears the wall first and replays a solved token
+    # from a fresh context, exactly like winclash -- CAPSOLVER_API_KEY is
+    # required on the Stock Market bot.
+    waf_on_navigation=True,
+    # ...but NOT on the no-browser signup path: the live signup bot runs
+    # --fast through a rotating proxy, where a solved token is useless (it is
+    # bound to an exit IP that changes per connection). False keeps
+    # http_get_page() exactly as it was before this flag existed.
+    http_waf_on_navigation=False,
+    # Tables open by the site's own launch URL, not by clicking a tile:
+    # /casinoRedirect?q=<id>&provider=evolution&type=casino (the default
+    # casino_launch_path), read out of the logged-in .casinoLink handler.
+    # Same reasons as winclash: the tile handler shows an "add money" popup
+    # instead of launching when both balances are zero, and Stock Market is
+    # in this site's OWN catalogue, so the Evolution-lobby hop is skipped.
+    casino_launch_mode="direct_game_url",
+    casino_provider="evolution",
+    casino_game_ids={
+        "Baccarat A": 86,      # same ids as winclash/funcrash
+        "Baccarat B": 87,
+        "Stock Market": 1584,
+    },
     sel={
         # ---- signup ----
         "open_modal_khelo": "button.rj__join_now",
@@ -120,5 +178,19 @@ PROFILE = SiteProfile(
         "otp_digits": "input.regOtpKhelo1",
         "otp_verify": ["button.submitRegOtpMain"],
         "otp_error": ".otp_error",
+
+        # ---- login (driven live 2026-11-22) ----
+        "open_login": "button.rj__login",
+        "login_username": "#login_khelo_username",
+        "login_password": "#login_khelo_password",
+        "login_submit": "#login_formkhelo",
+        # Only consulted on the lobby route and when no auth check exists;
+        # login() verifies through /api/getBalance here. .headUserName is in
+        # the logged-in header only.
+        "logged_in_indicator": ".headUserName",
+        # Unused on the direct_game_url route; kept so no caller KeyErrors.
+        "casino_nav": "a[href*='live-casino']",
+        # getBalance() writes main_balance here (static "0" until it lands).
+        "wallet_balance": ".rj_coin_sec .wallet_balance",
     },
 )

@@ -26,6 +26,35 @@ Template:
 
 ---
 
+## 2026-11-22 — spin24star Stock Market bot: login mapped; WAF walls logins; wrong password read as a WAF block
+- **Seen as:** while building the new bot, a bare `login()` with a WRONG
+  password returned `AWS WAF refused the login request itself (HTTP 405,
+  action=captcha) -- the site never saw these credentials`, though the site
+  had shown `Invalid Username or Password`. A few logins later even a correct
+  login came back that way: the post-login page `/?q=<id>`, `/homepageGames`
+  and `/api/getBalance` all answered `405` + `x-amzn-waf-action: captcha`.
+- **Cause:** two things.
+  1. **Site-side, expected:** spin24star's AWS WAF escalates to a hard captcha
+     on page loads after a handful of automated logins from one IP (the
+     first verify run from the laptop was served clean). Same behaviour as
+     winclash.
+  2. **Ours:** `login()` counted ANY WAF answer as "the login was blocked",
+     including its own in-page balance probe — and logged out, spin24star's
+     WAF captchas that probe every time. So a wrong password was misreported
+     and would have bought a CapSolver solve.
+- **Seen before?** no (the WAF itself: yes, winclash, see CLAUDE.md).
+- **Fix:** `login()` only calls a visible site message a WAF block if
+  something other than the balance probe was walled. spin24star profile now
+  has login + casino mapped, `waf_on_navigation=True` for the login/casino
+  path and `http_waf_on_navigation=False` so the live `--fast` signup bot's
+  HTTP path is unchanged. Its balance route is GET-only (POST = 405), hence
+  the new `http_balance_method`. `verify_stockmarket.py` PASSED twice, the
+  second time with the IP flagged. New template
+  `.env.spin24star.stockmarket.example`.
+- **If it comes back:** "login failed ... AWS WAF" on every seat → check
+  `CAPSOLVER_API_KEY` is set on that bot and the proxy is a FIXED IP (a
+  rotating one invalidates the solved token).
+
 ## 2026-11-21 — khelofun + starexch signup: "slow and OTP not coming"
 - **Seen as:** operators report slow signups and no OTP. Log: repeated `OTP
   screen reached` with **no** following `OTP code received` (#7630 #7631 #7634

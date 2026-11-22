@@ -260,6 +260,15 @@ class SiteProfile:
     # find the LOGIN button", which is true but useless. False everywhere
     # else, where the check would be a pointless page evaluation.
     waf_on_navigation: bool = False
+    # Override of waf_on_navigation for the no-browser page fetch
+    # (main.http_get_page) only. None = follow waf_on_navigation, which is
+    # every site but one. spin24star sets waf_on_navigation for its LOGIN /
+    # casino path (its WAF escalates to a hard captcha on page loads after a
+    # few automated logins, measured 2026-11-22) while its live --fast signup
+    # bot runs through a per-connection ROTATING proxy, where a solved token
+    # is bound to an exit IP that is already gone -- so that path must keep
+    # its plain GET and never buy a solve. False keeps it byte for byte.
+    http_waf_on_navigation: bool = None
 
     # How a live-table game is launched.
     #   "lobby"            -- cricmatch/starexch: open the Live Casino lobby,
@@ -424,6 +433,12 @@ class SiteProfile:
     # Path that returns the logged-in account's wallet balance as JSON, used
     # only when supports_http_login.
     http_balance_path: str = "/api2/v2/getBalance"
+    # How that path is called. Every site here POSTs it except spin24star,
+    # whose /api/getBalance is GET-only: a POST answers 405 "The POST method
+    # is not supported for this route" (measured 2026-11-22), which carries
+    # no balance, so login()'s in-page auth check could never pass there.
+    # Used by both login()'s check and http_get_balance().
+    http_balance_method: str = "POST"
 
     # Whether an EXISTING, logged-in account's password can be changed via a
     # direct POST to change_password_path (oldPassword/newPassword/_token) --

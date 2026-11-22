@@ -2343,7 +2343,10 @@ def http_get_balance(session, csrf_token, site_url):
     url = f"{parts.scheme}://{parts.netloc}{prof.http_balance_path}"
     headers = {"X-Requested-With": "XMLHttpRequest", "X-CSRF-TOKEN": csrf_token, "Referer": site_url,
                "Origin": _http_fast_origin(site_url)}
-    resp = session.post(url, data={"_token": csrf_token}, headers=headers, timeout=20)
+    if (prof.http_balance_method or "POST").upper() == "GET":
+        resp = session.get(url, headers=headers, timeout=20)
+    else:
+        resp = session.post(url, data={"_token": csrf_token}, headers=headers, timeout=20)
     try:
         return resp.json()
     except ValueError:
@@ -2783,7 +2786,13 @@ def http_get_page(session, url, site_url=None, proxy=None):
     # A site with no wall in front of it is fetched EXACTLY as it always was:
     # same plain GET, same headers, same timeout. Nothing about cricmatch's or
     # starexch's HTTP paths changes because winclash needed this.
-    if not profile_for(site).waf_on_navigation:
+    # http_waf_on_navigation lets a site wall its browser path without
+    # touching this one (spin24star -- see SiteProfile).
+    _prof = profile_for(site)
+    _walled = (_prof.http_waf_on_navigation
+               if _prof.http_waf_on_navigation is not None
+               else _prof.waf_on_navigation)
+    if not _walled:
         return session.get(url, timeout=HTTP_PAGE_TIMEOUT_SECS)
 
     token = cached_waf_token(site, proxy)
@@ -3439,11 +3448,20 @@ def _login_debug_shot(page, username):
 # an earlier version truncated the body to 300 chars, which corrupted the JSON
 # and made every check fail. "authed" is only true for the authenticated
 # shape {"status":200,"balance":{...}}; a guest gets 401 "Unauthenticated".
-_AUTH_CHECK_FETCH_JS = """async (path) => {
+_AUTH_CHECK_FETCH_JS = """async ([path, method]) => {
     const meta = document.querySelector('meta[name=csrf-token]');
     const token = meta ? meta.content : '';
     try {
-        const resp = await fetch(path, {
+        // GET for a site whose balance route refuses POST (spin24star, see
+        // SiteProfile.http_balance_method); POST, unchanged, everywhere else.
+        const opts = method === "GET" ? {
+            method: "GET",
+            credentials: "same-origin",
+            headers: {
+                "X-Requested-With": "XMLHttpRequest",
+                "X-CSRF-TOKEN": token,
+            },
+        } : {
             method: "POST",
             credentials: "same-origin",
             headers: {
@@ -3452,7 +3470,8 @@ _AUTH_CHECK_FETCH_JS = """async (path) => {
                 "X-CSRF-TOKEN": token,
             },
             body: "_token=" + encodeURIComponent(token),
-        });
+        };
+        const resp = await fetch(path, opts);
         let authed = false;
         try {
             const body = await resp.json();
@@ -3474,7 +3493,8 @@ def _browser_login_authenticated(page, site_url):
     parts = urlsplit(site_url or page.url)
     path = f"{parts.scheme}://{parts.netloc}{prof.http_balance_path}"
     try:
-        result = page.evaluate(_AUTH_CHECK_FETCH_JS, path)
+        result = page.evaluate(_AUTH_CHECK_FETCH_JS,
+                               [path, (prof.http_balance_method or "POST").upper()])
     except Exception:
         return None
     status = result.get("status")
@@ -3603,11 +3623,22 @@ def login(page, username, password, site_url=None, already_loaded=False):
     # POST shows. The caller can fix this (clear the wall, retry from a fresh
     # context); a wrong password it cannot, so the two must not be conflated.
     waf_blocked = []
+    # WAF answers to anything OTHER than the balance path. That path is what
+    # _browser_login_authenticated() probes while it waits, so on a site whose
+    # WAF walls it for a logged-out session (spin24star, 2026-11-22: a 405
+    # captcha before login, a 200 after) every poll lands in waf_blocked --
+    # and a wrong password was then reported as "AWS WAF refused the login
+    # request itself" and sent off to buy a CapSolver solve. A visible site
+    # message is only a WAF artefact if something besides that probe was
+    # walled; the timeout path below still counts every hit, as before.
+    waf_not_probe = []
 
     def _watch_waf(resp):
         try:
             if resp.headers.get("x-amzn-waf-action") and resp.status in (403, 405):
                 waf_blocked.append(resp.status)
+                if prof.http_balance_path not in urlsplit(resp.url).path:
+                    waf_not_probe.append(resp.status)
         except Exception:
             pass
 
@@ -3635,8 +3666,8 @@ def login(page, username, password, site_url=None, already_loaded=False):
         msgs = [m for m in read_result(page)
                 if not any(b in m.lower() for b in prof.benign_texts)]
         if msgs:
-            if waf_blocked:
-                return "waf", [_WAF_LOGIN_MSG.format(status=waf_blocked[0])]
+            if waf_not_probe:
+                return "waf", [_WAF_LOGIN_MSG.format(status=waf_not_probe[0])]
             return "error", msgs
         if can_verify_auth:
             authed = _browser_login_authenticated(page, site_url or SITE_URL)
