@@ -50,7 +50,11 @@ Template:
   HTTP path is unchanged. Its balance route is GET-only (POST = 405), hence
   the new `http_balance_method`. `verify_stockmarket.py` PASSED twice, the
   second time with the IP flagged. New template
-  `.env.spin24star.stockmarket.example`.
+  `.env.spin24star.stockmarket.example`. Deployed the same day (main.py,
+  sites/base.py, sites/spin24star.py copied; backups in
+  `~/deploy-bak/20261122-spin24star-stockmarket`), pre-flight PASSED from the
+  VPS through `.184`, bot live as @spin24stockmarketbot. `*.log` now
+  gitignored — the bot log holds the token in its request lines.
 - **If it comes back:** "login failed ... AWS WAF" on every seat → check
   `CAPSOLVER_API_KEY` is set on that bot and the proxy is a FIXED IP (a
   rotating one invalidates the solved token).

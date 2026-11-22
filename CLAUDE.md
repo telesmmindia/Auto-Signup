@@ -1074,9 +1074,12 @@ winclash's route with no new engine path:
 
 `verify_stockmarket.py --url https://spin24star.com/` **PASSED** twice
 (83-93s to `StockMarket00001`, UP/DOWN spots and cash-out present, 3-5
-windows a minute), the second time through a solved wall. ⚠️ **No bet placed
-yet** — every test account held ₹0, and at ₹0 `read_game_balance` came back
-empty. Fund two accounts, `/run <pair> 10 1`, read `/runlog` first.
+windows a minute), the second time through a solved wall, and a third time
+from the VPS through `51.194.232.184` (99s, balance read ₹0 — the laptop runs
+read it as empty). **Live as @spin24stockmarketbot** (window "spin24star
+stockmkt", log `spin24star_stockmarket_bot.log`, proxy `.184`, which is not in
+the spin24star signup bot's pool). ⚠️ **No bet placed yet** — every test
+account held ₹0. Fund two accounts, `/run <pair> 10 1`, read `/runlog` first.
 
 **winclash** — added 2026-08-29, and the first site here that is **not** the
 cricmatch/khelofun/starexch white-label Laravel template. Everything below was
@@ -1739,7 +1742,7 @@ Production layout: `.env.cricmatch` (signup), `.env.spin24star` (signup),
 (stockmarket), `.env.winclash.stockmarket` (stockmarket),
 `.env.winclash.gameplay` (gameplay), `.env.password` (password),
 `.env.funcrash.signup` (signup), `.env.spin24star.stockmarket` (stockmarket,
-template added 2026-11-22 — needs its own bot token before it can run).
+@spin24stockmarketbot, tmux window "spin24star stockmkt", live 2026-11-22).
 
 **`--env` is parsed from `sys.argv` at module level and loaded with
 `load_dotenv(_env_file, override=True)`. The `override=True` is load-bearing:**

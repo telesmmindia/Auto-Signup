@@ -3,6 +3,8 @@
 shots/
 accounts.json
 credentials.log
+# Bot logs: telegram's request lines carry the bot TOKEN in the URL.
+*.log
 accounts.db
 admins.json
 admins.*.json
