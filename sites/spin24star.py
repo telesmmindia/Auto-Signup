@@ -164,8 +164,14 @@ PROFILE = SiteProfile(
         # .app_download_close: a full-screen "Download the app" promo added
         # ~2026-10-03 that covers REGISTER; without it every signup failed with
         # "Could not open the signup modal (JOIN button)".
+        # button.avi-close-btn: a full-screen animated promo
+        # (section.avi-overlay, "zanzaro") added ~2026-11-24 that covers the
+        # header LOGIN button; without it every Stock Market login failed with
+        # "Could not find the LOGIN button". Its close is an icon with only
+        # aria-label="Close overlay", so has-text('Close') misses it.
         "close_popup": [".app_download_close", ".skip_right_img", ".mnPopupClose", ".pgSoftClsBtn",
                         ".support_popup_close", ".areSurecancelBtn",
+                        "button.avi-close-btn",
                         "button:has-text('Close')"],
         "username": "#userNameKhelo",
         "email": "#emailKhelo",

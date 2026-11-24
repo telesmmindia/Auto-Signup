@@ -26,6 +26,30 @@ Template:
 
 ---
 
+## 2026-11-24 — spin24star Stock Market bot: every login "Could not find the LOGIN button"
+- **Seen as:** `login failed for Rohitt58677: Could not find the LOGIN button.
+  [page URL: https://spin24star.com/ | title: 'Spin24Star Official Platform
+  For Secure Play & Instant Fun' | text: 'EXPLORE NOW LOGIN REGISTER ...
+  VEN****11 INR 22288.4']` on both sides, all 4 attempts, runs #2-#4
+  (from 16:22). Run #1 the night before hedged 32 rounds fine.
+- **Cause:** site-side. spin24star added a full-screen animated promo
+  (`section.avi-overlay avi-popup--zanzaro … is-open`) that sits on top of
+  the header LOGIN button (`elementFromPoint` at the button = the overlay).
+  Its close is an icon-only `button.avi-close-btn` (`aria-label="Close
+  overlay"`), which none of our pop-up closers matched. The `VEN****11 INR
+  …` in the page text is a winners ticker, NOT a logged-in header.
+- **Seen before?** same class as 2026-10-03's "Download the app" promo
+  covering REGISTER (CLAUDE.md, spin24star).
+- **Fix:** `button.avi-close-btn` added to spin24star's `close_popup`.
+  Verified on the VPS through `.184`: after closing, the element at the
+  LOGIN button is the button itself, and `login()` clicked it and submitted
+  the form (the reply was the usual WAF captcha on the login call, which the
+  bot's table path solves). sites/spin24star.py copied to the VPS (backup
+  `~/deploy-bak/20261124-s24-popup`), bot restarted 17:46.
+- **If it comes back:** "Could not find the LOGIN button" with LOGIN in the
+  page text = something covers it. Probe `document.elementFromPoint` at
+  `button.rj__login`'s centre and add that overlay's close button.
+
 ## 2026-11-22 — spin24star Stock Market bot: login mapped; WAF walls logins; wrong password read as a WAF block
 - **Seen as:** while building the new bot, a bare `login()` with a WRONG
   password returned `AWS WAF refused the login request itself (HTTP 405,
