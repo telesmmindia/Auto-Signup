@@ -144,6 +144,25 @@ Template:
   with the env file. The rest (SMS + typing, the site not answering the code
   step) is not ours to shorten.
 
+## 2026-11-24 — Instamatch exch bot moved to instamatch24.com
+- **Seen as:** request to change the domain. Before the switch every login
+  failed with `HTTPSConnectionPool(host='instamatch88.com') … ProxyError
+  ('Unable to connect…')` — the old domain had stopped answering.
+- **Cause:** the brand rotated its domain (instamatch88 → instamatch24), the
+  same digit-rotation playinmatch did.
+- **Seen before?** yes in kind (playinmatch99 → 88, 2026-10-31).
+- **Fix:** VPS `.env.starexch365.exchange` → `EXCHANGE_SITE_URL=
+  https://instamatch24.com`, `EXCHANGE_SITE_NAME=instamatch24` (backup
+  `*.bak-20261124-insta24`); bot restarted. No code change: `site_for()`'s
+  brand rule already maps `instamatch24` → `InstamatchSite`, and the platform
+  tells match (`/sports-exchange/cricket` 200, `/exchange/cricket-exchange`
+  404). Result: `Login: 4 OK, 4 failed` — Nishanth88, Murli47, Jeshuuu
+  (~₹13.5-14k each) and Gaurav99 (₹1) in; Sains, Prasad1789, Ghanasyaam,
+  Gsuresh answered by the site itself "Your Account has been Blocked please
+  contact us" — a site-side account state, not ours to fix.
+- **If it comes back:** connection errors on every ID at once → check whether
+  the domain moved again before touching proxies.
+
 ## 2026-11-20 — "Instamatch exch bot": every ID "Invalid Username or Password"
 - **Seen as:** `/relogin` → `✅ 0 logged in, ❌ 5 failed`; `/ids` → each of the
   5 IDs `Invalid Username or Password` (log: `❌ <id>: Invalid Username or
